@@ -20,7 +20,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [hnsw.md](hnsw.md) -- the graph as derived data, its records, its restore and open, its linking, and vectors written again
 - [benchmarks.md](benchmarks.md) -- what `make scale-bench` and `make ycsb` measure and how
 - [writes.md](writes.md) -- `insert` and `put`, arithmetic in `set`, `require`, upserts, picked writes, an `order` by expression and `returning`
-- [fenecql.md](fenecql.md) -- SQL's spellings, parameters for counts, inner `get`s, `alter`, json paths, the shell's reading and declared schemas
+- [fenecql.md](fenecql.md) -- SQL's spellings, its joins, subqueries and schema, parameters for counts, inner `get`s, `alter`, json paths, the shell's reading and declared schemas
 - [waits.md](waits.md) -- `Fenec-Wait`, the writes that wake held ones, the bids that settle a row, and the leader's looks
 - [indexes.md](indexes.md) -- `@unique`, hash buckets and tables, `@ttl`, what reaches an index, bound filters, `@sorted`, composite indexes, lazy builds, `--warm` and `@geo`
 - [browser-module.md](browser-module.md) -- threads and features, what is core, and the bytes the module holds
@@ -172,3 +172,4 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 136. [Grafana's data source binds a dashboard's values; it never splices them](integrations.md#grafana)
 137. [`deploy/` is the kit for running regions, held to the binaries by two checks](integrations.md#deploy)
 138. [Profiles differ on purpose](crates.md#profiles)
+139. [A JOIN on a key is a `lookup` answered flat, or one table's `get` with the other's rows a filter](fenecql.md#sql-joins-subqueries-and-schema) (added after the move, under *FenecQL and schemas*)

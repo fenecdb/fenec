@@ -9,7 +9,7 @@
 
 use crate::{Column, Source};
 use fenec_core::error::{Error, Result};
-use fenec_core::value::{DataType, Value, VecPrec};
+use fenec_core::value::{DataType, Value};
 use fenec_wire::client::{Client, CopyOut, FieldDesc};
 
 /// The connection string. Passed through from `fenec_wire::client` as is.
@@ -87,59 +87,30 @@ pub(crate) fn map_oid(f: &FieldDesc, oids: &VectorOids) -> (Column, Kind) {
     let name = f.name.as_str();
     let col = |ty: DataType, src: &str| Column::new(name, ty, src);
 
-    if Some(f.oid) == oids.vector || Some(f.oid) == oids.halfvec {
-        let prec = if Some(f.oid) == oids.halfvec {
-            VecPrec::F16
-        } else {
-            VecPrec::F32
-        };
-        let tyname = if prec == VecPrec::F16 {
-            "halfvec"
-        } else {
-            "vector"
-        };
-        // pgvector carries the dimension in typmod; when it is not declared
-        // the column is defined as `vector` and the dimension can vary per row.
-        return if f.typmod > 0 {
-            (
-                col(
-                    DataType::Vector(f.typmod as usize, prec),
-                    &format!("{tyname}({})", f.typmod),
-                ),
-                Kind::Vector,
-            )
-        } else {
-            (
+    // pgvector carries the dimension in typmod; when it is not declared the
+    // column is defined as `vector` and the dimension can vary per row. A
+    // `sparsevec` arrives in the text form `sparse<N>` reads,
+    // `{1:0.5,3:0.25}/N`, so it is taken as text and read by the schema.
+    let pgvector = [
+        (oids.vector, "vector", Kind::Vector, "vector<N>"),
+        (oids.halfvec, "halfvec", Kind::Vector, "vector<N, f16>"),
+        (oids.sparsevec, "sparsevec", Kind::Text, "sparse<N>"),
+    ];
+    if let Some((_, tyname, kind, cast)) = pgvector.into_iter().find(|p| p.0 == Some(f.oid)) {
+        return match fenec_ql::sqltypes::postgres(tyname, &[f.typmod as i64]) {
+            Some(fenec_ql::sqltypes::Mapped::Type(ty, _)) => {
+                (col(ty, &format!("{tyname}({})", f.typmod)), kind)
+            }
+            _ => (
                 Column::unsupported(
                     name,
                     tyname,
-                    "the dimension is not declared; supply it with `--cast <field>=vector<N>`",
+                    format!(
+                        "the dimension is not declared; supply it with `--cast <field>={cast}`"
+                    ),
                 ),
-                Kind::Vector,
-            )
-        };
-    }
-
-    // A `sparsevec` arrives in the text form `sparse<N>` reads,
-    // `{1:0.5,3:0.25}/N`, so it is taken as text and read by the schema.
-    if Some(f.oid) == oids.sparsevec {
-        return if f.typmod > 0 {
-            (
-                col(
-                    DataType::Sparse(f.typmod as usize),
-                    &format!("sparsevec({})", f.typmod),
-                ),
-                Kind::Text,
-            )
-        } else {
-            (
-                Column::unsupported(
-                    name,
-                    "sparsevec",
-                    "the dimension is not declared; supply it with `--cast <field>=sparse<N>`",
-                ),
-                Kind::Text,
-            )
+                kind,
+            ),
         };
     }
 
@@ -176,54 +147,63 @@ pub(crate) fn map_oid(f: &FieldDesc, oids: &VectorOids) -> (Column, Kind) {
         return (col(DataType::Text, "citext").nocase(), Kind::Text);
     }
 
-    match f.oid {
-        POINT => (
-            col(DataType::Geo, "point").note("point (x,y) taken as [lon, lat]"),
-            Kind::Point,
-        ),
-        BOOL => (col(DataType::Bool, "bool"), Kind::Bool),
-        INT2 => (col(DataType::Int, "int2"), Kind::Int),
-        INT4 => (col(DataType::Int, "int4"), Kind::Int),
-        INT8 => (col(DataType::Int, "int8"), Kind::Int),
-        FLOAT4 => (col(DataType::Float, "float4"), Kind::Float),
-        FLOAT8 => (col(DataType::Float, "float8"), Kind::Float),
-        TEXT => (col(DataType::Text, "text"), Kind::Text),
-        BPCHAR => (col(DataType::Text, "bpchar"), Kind::Text),
-        VARCHAR => (col(DataType::Text, "varchar"), Kind::Text),
-        BYTEA => (col(DataType::Bytes, "bytea"), Kind::Bytea),
-        DATE => (col(DataType::Timestamp, "date"), Kind::Text),
-        TIMESTAMP => (col(DataType::Timestamp, "timestamp"), Kind::Text),
-        TIMESTAMPTZ => (col(DataType::Timestamp, "timestamptz"), Kind::Text),
-        UUID => (
-            col(DataType::Text, "uuid")
-                .note("uuid taken as `text`; it can be indexed with `@hash`"),
-            Kind::Text,
-        ),
-        INT2_ARRAY | INT4_ARRAY | INT8_ARRAY => (
-            col(DataType::List(Box::new(DataType::Int)), "int[]"),
-            Kind::Array(Box::new(Kind::Int)),
-        ),
-        FLOAT4_ARRAY | FLOAT8_ARRAY => (
-            col(DataType::List(Box::new(DataType::Float)), "float[]"),
-            Kind::Array(Box::new(Kind::Float)),
-        ),
-        TEXT_ARRAY => (
-            col(DataType::List(Box::new(DataType::Text)), "text[]"),
-            Kind::Array(Box::new(Kind::Text)),
-        ),
-        NUMERIC => (
+    // The type's name and how a cell is read; the fenecdb type is the
+    // name's, by the table SQL's `create table` reads types by too
+    // (`fenec_ql::sqltypes`), so the two cannot part.
+    let (tyname, kind, list) = match f.oid {
+        POINT => ("point", Kind::Point, false),
+        BOOL => ("bool", Kind::Bool, false),
+        INT2 => ("int2", Kind::Int, false),
+        INT4 => ("int4", Kind::Int, false),
+        INT8 => ("int8", Kind::Int, false),
+        FLOAT4 => ("float4", Kind::Float, false),
+        FLOAT8 => ("float8", Kind::Float, false),
+        TEXT => ("text", Kind::Text, false),
+        BPCHAR => ("bpchar", Kind::Text, false),
+        VARCHAR => ("varchar", Kind::Text, false),
+        BYTEA => ("bytea", Kind::Bytea, false),
+        DATE => ("date", Kind::Text, false),
+        TIMESTAMP => ("timestamp", Kind::Text, false),
+        TIMESTAMPTZ => ("timestamptz", Kind::Text, false),
+        UUID => ("uuid", Kind::Text, false),
+        INT2_ARRAY | INT4_ARRAY | INT8_ARRAY => ("int", Kind::Array(Box::new(Kind::Int)), true),
+        FLOAT4_ARRAY | FLOAT8_ARRAY => ("float", Kind::Array(Box::new(Kind::Float)), true),
+        TEXT_ARRAY => ("text", Kind::Array(Box::new(Kind::Text)), true),
+        NUMERIC => ("numeric", Kind::Text, false),
+        JSON => ("json", Kind::Json, false),
+        JSONB => ("jsonb", Kind::Json, false),
+        other => {
+            return (
+                Column::unsupported(name, format!("oid {other}"), "unrecognised PostgreSQL type"),
+                Kind::Text,
+            )
+        }
+    };
+    let source = match list {
+        true => format!("{tyname}[]"),
+        false => tyname.to_string(),
+    };
+    match fenec_ql::sqltypes::postgres(tyname, &[]) {
+        Some(fenec_ql::sqltypes::Mapped::Type(ty, _)) => {
+            let ty = match list {
+                true => DataType::List(Box::new(ty)),
+                false => ty,
+            };
+            let c = col(ty, &source);
+            let c = match f.oid {
+                POINT => c.note("point (x,y) taken as [lon, lat]"),
+                UUID => c.note("uuid taken as `text`; it can be indexed with `@hash`"),
+                _ => c,
+            };
+            (c, kind)
+        }
+        _ => (
             Column::unsupported(
                 name,
-                "numeric",
+                source,
                 "fenecdb has no decimal; `text` keeps the exact value, `float` rounds it",
             ),
-            Kind::Text,
-        ),
-        JSON => (col(DataType::Json, "json"), Kind::Json),
-        JSONB => (col(DataType::Json, "jsonb"), Kind::Json),
-        other => (
-            Column::unsupported(name, format!("oid {other}"), "unrecognised PostgreSQL type"),
-            Kind::Text,
+            kind,
         ),
     }
 }
@@ -678,6 +658,66 @@ pub(crate) fn quote_ident(name: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fenec_core::value::VecPrec;
+
+    /// SQL's `create table` reads a type as a PostgreSQL column of it
+    /// imports: one table, `fenec_ql::sqltypes`, held here type by type --
+    /// each name a column of that OID is written as, and its spellings --
+    /// and `numeric` refused by both.
+    #[test]
+    fn create_table_reads_a_type_as_a_column_of_it_imports() {
+        let oids = VectorOids {
+            vector: Some(90_001),
+            halfvec: Some(90_002),
+            sparsevec: Some(90_003),
+            citext: Some(90_004),
+            ..VectorOids::default()
+        };
+        for (oid, typmod, sql) in [
+            (BOOL, -1, "bool"),
+            (BOOL, -1, "boolean"),
+            (INT2, -1, "smallint"),
+            (INT4, -1, "integer"),
+            (INT4, -1, "int4"),
+            (INT8, -1, "bigint"),
+            (FLOAT4, -1, "real"),
+            (FLOAT8, -1, "double precision"),
+            (TEXT, -1, "text"),
+            (BPCHAR, -1, "char(3)"),
+            (VARCHAR, -1, "varchar(80)"),
+            (VARCHAR, -1, "character varying(80)"),
+            (BYTEA, -1, "bytea"),
+            (DATE, -1, "date"),
+            (TIMESTAMP, -1, "timestamp"),
+            (TIMESTAMP, -1, "timestamp(3) without time zone"),
+            (TIMESTAMPTZ, -1, "timestamptz"),
+            (TIMESTAMPTZ, -1, "timestamp with time zone"),
+            (UUID, -1, "uuid"),
+            (INT4_ARRAY, -1, "integer[]"),
+            (FLOAT8_ARRAY, -1, "float8[]"),
+            (TEXT_ARRAY, -1, "text[]"),
+            (JSON, -1, "json"),
+            (JSONB, -1, "jsonb"),
+            (POINT, -1, "point"),
+            (90_001, 3, "vector(3)"),
+            (90_002, 3, "halfvec(3)"),
+            (90_003, 9, "sparsevec(9)"),
+            (90_004, -1, "citext"),
+        ] {
+            let (c, _) = map_oid(&f("a", oid, typmod), &oids);
+            let st = fenec_ql::parse_one(&format!("create table t (a {sql})"))
+                .unwrap_or_else(|e| panic!("{sql}: {e}"));
+            let fenec_core::query::Statement::CreateCollection { schema, .. } = st else {
+                panic!("{sql}")
+            };
+            let field = &schema.fields[0];
+            assert_eq!(Some(&field.ty), c.ty.as_ref(), "{sql}");
+            assert_eq!(field.nocase, c.nocase, "{sql}");
+        }
+        let (c, _) = map_oid(&f("a", NUMERIC, -1), &oids);
+        assert_eq!(c.ty, None);
+        assert!(fenec_ql::parse("create table t (a numeric(10, 2))").is_err());
+    }
 
     fn f(name: &str, oid: i32, typmod: i32) -> FieldDesc {
         FieldDesc {

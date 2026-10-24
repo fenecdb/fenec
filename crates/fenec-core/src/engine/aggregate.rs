@@ -1362,6 +1362,7 @@ impl Database {
             columns: f.columns(),
             groups,
             nested,
+            flat: None,
         })
     }
 }

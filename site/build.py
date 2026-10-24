@@ -134,7 +134,8 @@ KEYWORDS = {
     "sql": """INSTALL LOAD ATTACH AS SELECT FROM WHERE GROUP BY COPY TO TYPE
         FORMAT count avg sum INSERT INTO VALUES UPDATE SET DELETE ON CONFLICT DO
         NOTHING RETURNING ORDER LIMIT OFFSET DESC ASC AND OR NOT IN BETWEEN LIKE
-        ILIKE ESCAPE IS NULL DISTINCT HAVING""".split(),
+        ILIKE ESCAPE IS NULL DISTINCT HAVING JOIN INNER LEFT OUTER EXISTS CREATE
+        TABLE INDEX UNIQUE PRIMARY KEY USING WITH""".split(),
     "swift": """import let var func return if else for in while do try await async
         throws catch struct class enum init self some any guard case switch
         nil true false as is static private public""".split(),
@@ -1052,14 +1053,17 @@ LLMS_BRIEF = """\
 Writing FenecQL -- the reference below spells it out in full:
 
 - It is not SQL, but it reads SQL's everyday spellings as the statements
-  they mean: `INSERT INTO t (a, b) VALUES (1, 'x')`, `UPDATE t SET a = 1
-  WHERE ...`, `IN (1, 2)`, `BETWEEN`, `LIKE` and `ILIKE`, `ON CONFLICT DO
-  NOTHING` and `DO UPDATE SET`, single quotes and `||`
+  they mean: `CREATE TABLE` and `CREATE INDEX`, `INSERT INTO t (a, b)
+  VALUES (1, 'x')`, `UPDATE t SET a = 1 WHERE ...`, `IN (1, 2)`,
+  `BETWEEN`, `LIKE` and `ILIKE`, `ON CONFLICT DO NOTHING` and `DO UPDATE
+  SET`, `DISTINCT`, `EXISTS`, single quotes and `||`
   (https://fenecdb.com/docs/sql). A double-quoted word is text, never a
   column: a field is written bare, `where name = 'Ada'`. Every row has an
-  `id` (an int the database makes; no `rowid`, no `_id`). There is no
-  JOIN: related rows come from `lookup`, and a
-  filter by another collection's rows from an uncorrelated
+  `id` (an int the database makes; no `rowid`, no `_id`). A JOIN on a
+  key is read as `lookup`, which FenecQL writes `get orders lookup users on
+  id = user_id` -- each order with its user nested; the clauses after
+  `lookup` are the looked-up collection's -- and a filter by another
+  collection's rows is an uncorrelated
   `in (get <collection> select <field> where ...)`, or `not in (...)` for
   the rows it does not name. There is no interactive
   transaction: a `/batch` of statements (in the page, a `run` of several)
@@ -1069,7 +1073,7 @@ Writing FenecQL -- the reference below spells it out in full:
   null), `count(distinct f)`, `sum`, `avg`, `min`, `max`, `first(f by k)`,
   `last(f by k)` -- go in the select list, over every match or per
   `group <key>`, and `having` keeps groups. Distinct values are a group:
-  `select city, count(*) group city`.
+  `select city group city`.
 - Text: `like 'a%'` and `ilike` take SQL's `%` and `_`; `~` is a
   case-insensitive *contains* (`email ~ "@example.org"`), never a regular
   expression, and `match` ranks words over an `@text` field.

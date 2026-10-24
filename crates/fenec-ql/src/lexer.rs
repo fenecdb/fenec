@@ -38,6 +38,12 @@ pub enum Tok {
     Eq,
     Ne,
     Tilde,
+    /// pgvector's distance, `<->` L2, `<=>` cosine and `<#>` the negative
+    /// inner product: what SQL's `order by emb <-> $1` ranks by. No text
+    /// that lexed before reads otherwise -- a `<` cannot precede `->` or
+    /// `=>` in a statement that parsed -- but for `<#>`, which was a `<`
+    /// and a comment.
+    Distance(&'static str),
     /// `;`, which ends the statement before it: dropped as white space,
     /// it let a clause go on past it -- `del notes; where id = 3` was one
     /// statement to the parser, which ran it as `-c`, and two to a shell
@@ -80,6 +86,7 @@ impl Tok {
             Tok::Eq => "`=`".into(),
             Tok::Ne => "`!=`".into(),
             Tok::Tilde => "`~`".into(),
+            Tok::Distance(op) => format!("`{op}`"),
             Tok::Semi => "`;`".into(),
             Tok::Eof => "end of input".into(),
         }
@@ -162,6 +169,11 @@ pub struct Unclosed {
     /// Outside a string and a comment, the byte before was a `-`: one more
     /// starts a comment.
     dash: bool,
+    /// The byte before was a `<`: a `#` after it may be pgvector's `<#>`.
+    lt: bool,
+    /// The bytes before were `<#`: a `>` makes them `<#>`, an operator,
+    /// anything else a `<` and a comment.
+    lt_hash: bool,
 }
 
 impl Unclosed {
@@ -181,9 +193,17 @@ impl Unclosed {
                 }
                 continue;
             }
+            if std::mem::take(&mut self.lt_hash) {
+                if b != b'>' {
+                    self.comment = b != b'\n';
+                }
+                continue;
+            }
             let dash = std::mem::take(&mut self.dash);
+            let lt = std::mem::replace(&mut self.lt, b == b'<');
             match b {
                 b'"' | b'\'' => self.quote = b,
+                b'#' if lt => self.lt_hash = true,
                 b'#' => self.comment = true,
                 b'-' => match dash {
                     true => self.comment = true,
@@ -445,6 +465,17 @@ fn lex_with(src: &str, vectors: bool) -> Result<Vec<Token>> {
                     )));
                 }
             }
+            // pgvector's `<->`, `<=>` and `<#>`, before `<=` and the `#`
+            // that begins a comment.
+            '<' if matches!(b.get(i + 1), Some(b'-' | b'=' | b'#')) && next_is(i + 2, b'>') => {
+                let op = match b[i + 1] {
+                    b'-' => "<->",
+                    b'=' => "<=>",
+                    _ => "<#>",
+                };
+                i += 3;
+                Tok::Distance(op)
+            }
             '<' => {
                 i += 1;
                 if next_is(i, b'=') {
@@ -601,6 +632,12 @@ fn lex_with(src: &str, vectors: bool) -> Result<Vec<Token>> {
                         Some(b'.') if i + 1 < b.len() => at(i + 1).0,
                         _ => break,
                     };
+                    // SQL's `o.*`, every column of the table `o` names: a
+                    // dot before a `*` was no token at all.
+                    if next == '*' {
+                        i += 2;
+                        break;
+                    }
                     if !(next.is_alphabetic() || next == '_') {
                         break;
                     }
@@ -798,6 +835,18 @@ mod tests {
                         )));
                     }
                 }
+                // pgvector's distances, read since SQL's spellings were.
+                '<' if matches!(b.get(i + 1), Some('-' | '=' | '#'))
+                    && b.get(i + 2) == Some(&'>') =>
+                {
+                    let op = match b[i + 1] {
+                        '-' => "<->",
+                        '=' => "<=>",
+                        _ => "<#>",
+                    };
+                    i += 3;
+                    Tok::Distance(op)
+                }
                 '<' => {
                     i += 1;
                     if i < b.len() && b[i] == '=' {
@@ -920,8 +969,13 @@ mod tests {
                         while i < b.len() && (b[i].is_alphanumeric() || b[i] == '_') {
                             i += 1;
                         }
-                        // A path, `meta.lang`, since paths were read.
+                        // A path, `meta.lang`, since paths were read, and
+                        // SQL's `o.*` since its spellings were.
                         match (b.get(i), b.get(i + 1)) {
+                            (Some('.'), Some('*')) => {
+                                i += 2;
+                                break;
+                            }
                             (Some('.'), Some(&n)) if n.is_alphabetic() || n == '_' => i += 1,
                             _ => break,
                         }
@@ -1109,6 +1163,12 @@ mod tests {
             ",",
             ":",
             "\r\n",
+            // pgvector's `<#>`, no comment, beside the `#` that begins one.
+            "<",
+            ">",
+            "<#>",
+            "<#",
+            "<->",
         ];
         let mut x = 0x9E37_79B9_7F4A_7C15u64;
         let mut rnd = |n: usize| {

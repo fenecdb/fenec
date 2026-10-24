@@ -1086,7 +1086,7 @@ fn what_does_not_fold_is_refused() {
             "neither aggregated nor grouped",
         ),
         (
-            "get shops lookup orders on shop select status group status",
+            "get shops lookup orders on shop group status",
             "needs an aggregate",
         ),
         (

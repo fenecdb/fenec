@@ -611,6 +611,15 @@ refused naming the FenecQL to write, without consuming its word; `"name"`
 where SQL reads a column (`Parser::quoted`) and a regex-like `~`
 (`regex_like`) are refused, `<>` stays `!=`.
 
+**[A JOIN on a key is a `lookup` answered flat, or one table's `get` with
+the other's rows a filter](docs/design/fenecql.md#sql-joins-subqueries-and-schema)**
+(`join::relate`). The flat rows are `Select::flat`, set by SQL alone and
+rendered by `ResultSet::answered` after a token's masks; a join that would
+answer otherwise -- an order or an aggregate over a joined table's rows --
+is refused. `create table` maps types by `fenec_ql::sqltypes`, which `fenec
+import` maps by too; pgvector's `<->` is `near` held to the index's metric
+(`Near::metric`).
+
 **[`limit`, `offset` and `top` take a parameter, read where the plan reads
 them](docs/design/fenecql.md#count-parameters)** (`Count::at`); a value is
 refused as its literal is (`Select::check_counts`).

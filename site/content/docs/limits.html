@@ -14,8 +14,9 @@ behaviour worth knowing before it surprises you.</p>
 <ul>
   <li><b>FenecQL, not SQL.</b> <code>select a from t</code>, <code>insert
     into t (a) values (1)</code>, <code>update t set a = 1</code>,
-    <code>in (…)</code>, <code>between</code> and <code>like</code> work
-    (<a href="/docs/sql">From SQL</a>); JOINs do not. <code>lookup</code>
+    <code>in (…)</code>, <code>between</code>, <code>like</code> and a
+    <code>join</code> on an indexed key work (<a href="/docs/sql">From
+    SQL</a>); a join of any other condition does not. <code>lookup</code>
     covers related rows (below).</li>
   <li><b>One writer per file.</b> Readers run beside it, and a
     <code>/batch</code> holds the writer while it runs. Scale out with a file
@@ -571,8 +572,9 @@ SQLite or PostgreSQL, and can follow a PostgreSQL table as it changes.</p>
 
 <details class="deep"><summary>Details</summary>
 <ul>
-  <li>One table becomes one collection. JOINs and multi-table migration are out
-    of scope — there is no JOIN in fenecdb anyway.</li>
+  <li>One table becomes one collection. Multi-table migration is out of
+    scope; a <code>JOIN</code> on a key reads as a <code>lookup</code>
+    afterwards.</li>
   <li><code>fenec import</code> is in the default build but is a separate
     feature. A binary built with <code>--no-default-features</code> has no such
     subcommand, and says so before exiting.</li>

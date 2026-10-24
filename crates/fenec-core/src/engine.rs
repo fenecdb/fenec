@@ -2498,6 +2498,80 @@ fn lookup_key(schema: &Schema, field: &str, v: &Value) -> Option<Vec<u8>> {
     }
 }
 
+/// pgvector's operator, by the distance it orders by.
+fn operator(m: Metric) -> &'static str {
+    match m {
+        Metric::L2 => "<->",
+        Metric::Cosine => "<=>",
+        Metric::Dot => "<#>",
+    }
+}
+
+/// Refuses `order by <field> <op> $1`, read as `near`, where the field's
+/// index measures another distance than the operator: `near` orders by
+/// the index's, and the order would not be the one asked for. A field
+/// with no index is refused by `near` in its own words.
+#[inline(never)]
+fn metric_held(c: &Collection, field: &str, m: Metric) -> Result<()> {
+    let held = c.schema.field(field).and_then(|f| match (&f.ty, &f.index) {
+        (_, IndexKind::Vector(spec)) => Some(spec.metric),
+        (DataType::Sparse(_), IndexKind::Inverted) => Some(Metric::Dot),
+        _ => None,
+    });
+    // PostGIS's `<->` measures a plane, or a spheroid, and a point's
+    // `near` the sphere: read so, the order would be another.
+    if c.schema
+        .field(field)
+        .is_some_and(|f| matches!(f.ty, DataType::Geo))
+    {
+        return Err(Error::Query(format!(
+            "`{field}` holds points: the nearest are `near {field} <point>`"
+        )));
+    }
+    match held {
+        Some(h) if h != m => Err(Error::Query(format!(
+            "`{field} {}` orders by the {} distance, and its index measures {}: `{}` does",
+            operator(m),
+            m.name(),
+            h.name(),
+            operator(h),
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// A SQL join's flat page as its answer carries it ([`Nested::flat`]): its
+/// numbers worked out, and refused where two of its columns would answer
+/// under one name -- a row holds a name once, and SQL's `select *` over a
+/// join answers each table's `id`. `columns`: the `get`'s own.
+#[inline(never)]
+fn flat_page(f: &Flat, columns: &[String], n: &Nested, params: &[Value]) -> Result<Box<Flat>> {
+    let mut levels: Vec<&[String]> = vec![columns];
+    let mut level = Some(n);
+    while let Some(l) = level {
+        levels.push(&l.columns);
+        level = l.nested.as_deref();
+    }
+    let mut names: Vec<&str> = Vec::new();
+    for c in &f.columns {
+        let all = levels.get(c.level).copied().unwrap_or_default();
+        let one = std::slice::from_ref(&c.name);
+        for name in if c.column.is_empty() { all } else { one } {
+            if names.contains(&name.as_str()) {
+                return Err(Error::Query(format!(
+                    "the join answers two columns named `{name}`: name one with `as`"
+                )));
+            }
+            names.push(name);
+        }
+    }
+    Ok(Box::new(Flat {
+        columns: f.columns.clone(),
+        offset: Count::N(f.offset.at(params)),
+        limit: f.limit.map(|l| Count::N(l.at(params))),
+    }))
+}
+
 /// Where a query reads `name`: the position of its field, and for a path
 /// the keys past it. `None` for a name the schema has no field for, or a
 /// path it cannot read ([`Schema::path_of`] says why).
@@ -8614,6 +8688,9 @@ impl Database {
         params: &[Value],
         ctx: &EvalCtx,
     ) -> Result<Vec<(DocId, f32)>> {
+        if let Some(m) = near.metric {
+            metric_held(c, &near.field, m)?;
+        }
         match c.schema.field(&near.field).map(|f| &f.ty) {
             Some(DataType::Sparse(dim)) => {
                 return self.run_sparse_near(c, sel, near, *dim, want, params, ctx);
@@ -8976,6 +9053,7 @@ impl Database {
             vector: Expr::Lit(Value::Null),
             ef: None,
             exact: false,
+            metric: None,
         };
         let want = limit.saturating_add(sel.offset.at(params));
         plan(|| format!("order: distance from a point on {field}, by its point index"));
@@ -9786,6 +9864,7 @@ impl Database {
             columns,
             groups,
             nested,
+            flat: None,
         })
     }
 
@@ -9986,13 +10065,18 @@ impl Database {
         // `check` has already refused `count`, `near` and `match` alongside
         // `lookup`, which is what lets this sit at the end of every path
         // rather than forking one.
-        let nested = match &sel.lookup {
+        let mut nested = match &sel.lookup {
             None => None,
             Some(l) => {
                 let ids: Vec<DocId> = rows.iter().map(|r| r.id).collect();
                 Some(self.run_lookup(c, l, &ids, &ctx)?)
             }
         };
+        // A SQL join's: its rows answered flat, which a writer makes of
+        // the levels once a token's masks have read them.
+        if let (Some(f), Some(n)) = (&sel.flat, &mut nested) {
+            n.flat = Some(flat_page(f, &columns, n, params)?);
+        }
 
         Ok(ResultSet {
             columns,
@@ -11693,11 +11777,10 @@ fn build_docs(
 /// refused for a required one.
 fn doc_done(schema: &Schema, mut doc: Document) -> Result<Document> {
     for f in &schema.fields {
-        if doc.get(&f.name).is_none() {
-            if f.required {
-                return Err(Error::Type(format!("field `{}` is required", f.name)));
-            }
-            doc.set(&f.name, Value::Null);
+        match doc.get(&f.name) {
+            None | Some(Value::Null) if f.required => return Err(not_null(&f.name)),
+            None => doc.set(&f.name, Value::Null),
+            Some(_) => {}
         }
     }
     Ok(doc)
@@ -11875,11 +11958,26 @@ fn updated(
         }
         let v = a.calc.value(schema, old, ctx, new)?;
         match a.at {
-            Some(p) => doc.fields[p].1 = v.coerce(&schema.fields[p].ty)?,
+            Some(p) => {
+                if schema.fields[p].required && matches!(v, Value::Null) {
+                    return Err(not_null(&schema.fields[p].name));
+                }
+                doc.fields[p].1 = v.coerce(&schema.fields[p].ty)?
+            }
             None => set_field(schema, &mut doc, a.key, v)?,
         }
     }
     Ok(doc)
+}
+
+/// A required field left out or given `null`: SQL's `not null`, which
+/// `required` is -- the types `fenec types` writes, and the declared
+/// schema's `.notNull()`, read it never null.
+#[inline(never)]
+fn not_null(name: &str) -> Error {
+    Error::Type(format!(
+        "field `{name}` is required: it holds a value, never null"
+    ))
 }
 
 thread_local! {

@@ -4,6 +4,8 @@
 //! `<tr data-same>` the two parse to one statement, `<tr data-refused>` the
 //! SQL is refused and the FenecQL parses.
 
+use fenec_core::query::Statement;
+
 const PAGE: &str = include_str!("../../../site/content/docs/sql.html");
 
 #[test]
@@ -50,6 +52,28 @@ fn each_spelling_is_the_fenecql_beside_it() {
         let a = fenec_ql::parse_one(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
         let b = fenec_ql::parse_one(fenecql).unwrap_or_else(|e| panic!("{fenecql}: {e}"));
         assert_eq!(a, b, "{sql}");
+    }
+}
+
+/// `<tr data-as>`: the SQL is the FenecQL's statement answered as SQL
+/// answers it -- a join's `lookup` flat, pgvector's operator held to the
+/// index's distance -- which no FenecQL text asks for.
+#[test]
+fn each_join_is_the_lookup_beside_it_answered_flat() {
+    let rows = rows("as");
+    assert!(rows.len() >= 4, "{} rows", rows.len());
+    for codes in rows {
+        let (sql, fenecql) = (&codes[0], &codes[1]);
+        let Statement::Select(mut s) =
+            fenec_ql::parse_one(sql).unwrap_or_else(|e| panic!("{sql}: {e}"))
+        else {
+            panic!("{sql}")
+        };
+        let asked =
+            s.flat.take().is_some() || s.near.as_mut().and_then(|n| n.metric.take()).is_some();
+        assert!(asked, "{sql}: neither flat nor pgvector's");
+        let b = fenec_ql::parse_one(fenecql).unwrap_or_else(|e| panic!("{fenecql}: {e}"));
+        assert_eq!(Statement::Select(s), b, "{sql}");
     }
 }
 

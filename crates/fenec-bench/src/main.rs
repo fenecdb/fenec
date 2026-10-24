@@ -267,6 +267,7 @@ fn run_fenecdb(path: &str, rows: &[Row], queries: &[Vec<f32>], dim: usize) -> Re
             vector: Expr::Lit(Value::Vector(q.clone())),
             ef: None,
             exact,
+            metric: None,
         }),
         limit: Some(Count::N(10)),
         ..Default::default()

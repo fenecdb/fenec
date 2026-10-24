@@ -651,43 +651,27 @@ fn has_primary_key(tail: &str) -> bool {
 /// The fenecdb type from the declared one. It follows SQLite's affinity rules,
 /// but first checks the special cases that have a fenecdb counterpart.
 fn map_decl(name: &str, decl: &str) -> Column {
-    let d = decl.trim().to_ascii_uppercase();
+    use fenec_ql::sqltypes::{sqlite, Mapped, Why};
     let src = if decl.trim().is_empty() {
         "(untyped)".to_string()
     } else {
         decl.trim().to_string()
     };
-    let has = |k: &str| d.contains(k);
-
-    if has("BOOL") {
-        return Column::new(name, DataType::Bool, src);
-    }
-    if has("DATETIME") || has("TIMESTAMP") || d == "DATE" {
-        return Column::new(name, DataType::Timestamp, src);
-    }
-    if has("INT") {
-        return Column::new(name, DataType::Int, src);
-    }
-    if has("CHAR") || has("CLOB") || has("TEXT") {
-        return Column::new(name, DataType::Text, src);
-    }
-    if has("BLOB") {
-        return Column::new(name, DataType::Bytes, src);
-    }
-    if has("REAL") || has("FLOA") || has("DOUB") {
-        return Column::new(name, DataType::Float, src);
-    }
-    if has("DEC") || has("NUMERIC") || has("MONEY") {
-        return Column::unsupported(
+    // The rules SQL's `create table` reads a type by too
+    // (`fenec_ql::sqltypes`), so the two cannot part.
+    match sqlite(decl) {
+        Mapped::Type(ty, _) => Column::new(name, ty, src),
+        Mapped::Not(Why::Decimal) => Column::unsupported(
             name,
             src,
             "fenecdb has no decimal. SQLite stores this column as an int or a
              float too, so the exact value is already absent from the source;
              choose `--cast <field>=float` or `=int`",
-        );
+        ),
+        // An untyped column: resolved from a value sample, which the caller
+        // fills in.
+        Mapped::Not(_) => Column::unsupported(name, src, "no declared type"),
     }
-    // An untyped column: resolved from a value sample, which the caller fills in.
-    Column::unsupported(name, src, "no declared type")
 }
 
 /// The type inferred from sample values.
@@ -1012,6 +996,43 @@ mod tests {
         .unwrap();
         let names: Vec<&str> = d.iter().map(|x| x.name.as_str()).collect();
         assert_eq!(names, vec!["with space", "back", "double\"quote"]);
+    }
+
+    /// SQL's `create table` reads a declaration SQLite's way where it is
+    /// none of PostgreSQL's names, as a SQLite column of it imports: the
+    /// affinity rules are one, `fenec_ql::sqltypes`.
+    #[test]
+    fn create_table_reads_a_declaration_as_a_column_of_it_imports() {
+        for decl in [
+            "INTEGER",
+            "TINYINT",
+            "INT UNSIGNED",
+            "MEDIUMTEXT",
+            "NVARCHAR(30)",
+            "CLOB",
+            "BLOB",
+            "DOUBLE",
+            "FLOAT",
+            "BOOLEAN",
+            "DATETIME",
+            "DATE",
+        ] {
+            let st = fenec_ql::parse_one(&format!("create table t (a {decl})"))
+                .unwrap_or_else(|e| panic!("{decl}: {e}"));
+            let fenec_core::query::Statement::CreateCollection { schema, .. } = st else {
+                panic!("{decl}")
+            };
+            assert_eq!(
+                Some(&schema.fields[0].ty),
+                map_decl("a", decl).ty.as_ref(),
+                "{decl}"
+            );
+        }
+        for decl in ["DECIMAL(10,2)", "NUMERIC", "STRING"] {
+            assert_eq!(map_decl("a", decl).ty, None, "{decl}");
+            let sql = format!("create table t (a {decl})");
+            assert!(fenec_ql::parse(&sql).is_err(), "{decl}");
+        }
     }
 
     #[test]

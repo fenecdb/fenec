@@ -171,6 +171,19 @@ FIRST = [
     (r"expected a single statement", "several statements"),
     # The SQL-spellings parser's (#356) word for a quoted name.
     (r"double quotes make text here", "double-quoted identifier"),
+    # Part 2's words for a join or a subquery it reads and refuses.
+    (r"put in order by the first table's columns", "JOIN ordered by a joined table's column"),
+    (r"an aggregate or `distinct` over a join", "aggregate or DISTINCT over a join's two tables"),
+    (r"a join pairs a column of each table|a JOIN pairs its columns|names the columns it pairs",
+     "JOIN with no key equality"),
+    (r"needs a hash index", "JOIN or lookup on an unindexed key"),
+    (r"answers two columns named", "JOIN answering two columns of one name"),
+    (r"reads the rows it kept with nulls", "WHERE on a LEFT JOIN's table"),
+    (r"compares one value", "scalar subquery: = (SELECT ...)"),
+    (r"a row of another collection beside each row is a join", "subquery in the select list"),
+    (r"an `exists` reads the row around it", "EXISTS not correlated by one equality"),
+    (r"pgvector's distance", "pgvector distance outside ORDER BY"),
+    (r"no `default`, `references`", "CREATE TABLE constraint (DEFAULT, REFERENCES, CHECK)"),
 ]
 # A construct the statement holds, where the error is one it brings about
 # away from where it stands.

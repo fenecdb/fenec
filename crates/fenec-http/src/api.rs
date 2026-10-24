@@ -833,6 +833,7 @@ fn near_from_body(schema: &Schema, req: &Request) -> Result<Select> {
             vector: Expr::Lit(vector),
             ef: as_usize("ef")?,
             exact: matches!(get("exact"), Some(Value::Bool(true))),
+            metric: None,
         }),
         limit: as_usize("limit")?.map(Count::N),
         offset: Count::N(as_usize("offset")?.unwrap_or(0)),
