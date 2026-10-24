@@ -22,7 +22,7 @@ mod wire;
 
 use fenec_shard::directory::Directory;
 use fenec_shard::{Config, Router};
-use nodes::{call, node, placed, query, until, Node};
+use nodes::{call, node, placed, query, until, written, Node};
 use wire::*;
 
 /// The lease of the test that waits for one to lapse: long enough that its
@@ -109,14 +109,16 @@ fn acme(c: &Cluster) -> String {
         None,
     );
     assert_eq!(status, 201, "{body}");
+    // Each once `acme` is leased on n1 ([`nodes::fenced`]): at background
+    // QoS beside busy loops and other suites, the ten-second lease of the
+    // test that waits for one to lapse lapsed as these were sent.
     for made in [
-        "create collection notes (title text)",
-        "create collection jobs (run_at timestamp @sorted, owner text)",
+        "create collection if not exists notes (title text)",
+        "create collection if not exists jobs (run_at timestamp @sorted, owner text)",
+        r#"put notes {id: 1, title: "before"}"#,
     ] {
-        let (status, body) = query(c.port, PATH, made);
-        assert_eq!(status, 200, "{made}: {body}");
+        written(c.port, "acme", made);
     }
-    assert_eq!(query(c.port, PATH, r#"put notes {title: "before"}"#).0, 200);
     let replica = placed(c.port, "acme").1.expect("acme has a replica");
     until(
         c.port_of(&replica),

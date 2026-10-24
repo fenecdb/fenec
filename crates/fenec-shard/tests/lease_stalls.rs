@@ -126,24 +126,6 @@ fn written_meanwhile(port: u16, tenant: &str, what: &str) {
     }
 }
 
-/// Whether a write answered `status` and `body` met the lease's fence: its
-/// node held no lease naming the tenant -- none yet, one lapsed, or one
-/// naming it elsewhere, the directory flipped before the grant reached its
-/// new node -- and wrote nothing, 503 with `retry_after`; or its lease
-/// lapsed before the write it took was answered, 500, the outcome unknown.
-/// A node stops writing as its lease lapses by its own clock, which on a
-/// machine that runs the router's threads seconds late -- at background QoS
-/// beside eight busy loops and three other suites, every round of a 3 s
-/// lease late -- it did as a test was setting up (8 tests of 14 in 1 run
-/// of 2): the fence working, which the next renewal ends. A client is told
-/// to send the write again, and these tests do, for what sets them up: a
-/// tenant made, which a refused schema takes back off the node and out of
-/// the directory, and a row put by its id, which written twice is one row.
-fn fenced(status: u16, body: &str) -> bool {
-    (status == 503 && body.contains("retry_after"))
-        || (status == 500 && body.contains("lease from its router no longer let it write"))
-}
-
 /// Makes `tenant` on `node` with a collection to write, through the router:
 /// once it is leased there ([`fenced`]).
 fn tenant_on(port: u16, tenant: &str, node: &str) {
@@ -163,29 +145,6 @@ fn tenant_on(port: u16, tenant: &str, node: &str) {
         assert!(
             fenced(status, &made) && Instant::now() < deadline,
             "{tenant} on {node}: {status} {made}"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-/// Writes `sql` to `tenant` through the router once it is leased where it
-/// is ([`fenced`]): a write that is one row however often it lands -- a
-/// `put` naming its id, a `create ... if not exists`. So it is sent again
-/// where the router cut it at its node's failover too, 502 saying it may
-/// have run, which a write run twice would make two rows of: a node whose
-/// lease lapsed so is failed over, and was during a test's setup.
-fn written(port: u16, tenant: &str, sql: &str) {
-    let path = format!("/t/{tenant}/query");
-    let deadline = Instant::now() + WITHIN;
-    loop {
-        let (status, body) = query(port, &path, sql);
-        if status == 200 {
-            return;
-        }
-        let cut = status == 502 && body.contains("was failed over while this request was out");
-        assert!(
-            (fenced(status, &body) || cut) && Instant::now() < deadline,
-            "{sql} to {tenant}: {status} {body}"
         );
         std::thread::sleep(Duration::from_millis(20));
     }
