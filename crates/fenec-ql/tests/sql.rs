@@ -312,6 +312,16 @@ const SAME: &[(&str, &str)] = &[
         "CREATE INDEX docs_body ON docs USING GIN (to_tsvector('english', body))",
         "create index on docs (body) @text",
     ),
+    // SQL's arrays every way written: the length not held.
+    (
+        "CREATE TABLE t (a int ARRAY, b text array, c integer ARRAY[3], d int[], e text[4])",
+        "create collection t (a [int], b [text], c [int], d [int], e [text])",
+    ),
+    // An `exists` asks no page: a `limit` from 1 changes nothing.
+    (
+        "SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.k = t.id LIMIT 1)",
+        "get t where id in (get u select k)",
+    ),
 ];
 
 #[test]
@@ -429,7 +439,7 @@ const REFUSED: &[(&str, &str)] = &[
     ),
     (
         "SELECT * FROM a LEFT JOIN b ON b.a_id = a.id AND a.k = 1",
-        "a LEFT JOIN's `on` keeps every row of the tables before it",
+        "a condition there on a table before it keeps that table's rows",
     ),
     (
         "SELECT * FROM a JOIN b ON b.a_id = a.id WHERE a.x = b.y",
@@ -475,6 +485,27 @@ const REFUSED: &[(&str, &str)] = &[
     (
         "SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u)",
         "an `exists` reads the row around it by one equality",
+    ),
+    (
+        "SELECT DISTINCT FROM t",
+        "`distinct` makes each row of the list once",
+    ),
+    ("SELECT * FROM t ORDER BY 2", "`*` names none"),
+    (
+        "SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.k = t.id LIMIT 0)",
+        "an `exists` query's `limit` is a number from 1",
+    ),
+    (
+        "SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.k = t.id LIMIT $1)",
+        "an `exists` query's `limit` is a number from 1",
+    ),
+    (
+        "CREATE INDEX ON docs USING hnsw (emb vector_l2_ops) WITH (m = 1)",
+        "pgvector's `m` is from 2 to 100",
+    ),
+    (
+        "CREATE INDEX ON docs USING hnsw (emb) WITH (m = 16, ef_construction = 20)",
+        "at least twice `m`",
     ),
     (
         "SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.a = t.a AND u.b = t.b)",

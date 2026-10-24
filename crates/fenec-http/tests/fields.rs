@@ -480,6 +480,37 @@ fn a_lookup_is_keyed_by_shown_fields_and_masked_a_level_each() {
     );
 }
 
+/// A SQL join's `x.*` beside a column named as a field no rule grants: the
+/// engine checked the names before the levels were masked, so `as
+/// dropoff` was refused as two columns named `dropoff` where `as nosuch`
+/// was answered -- the hidden field's name told. A name the token is shown
+/// twice is still refused.
+#[test]
+fn a_joins_star_names_no_field_the_token_is_not_shown() {
+    let policy = "orders read(pickup, status) for spy\nstops read for spy\n";
+    let n = start_with(policy, SETUP, false);
+    let spy = n.token(r#"{"sub":"s","role":"spy"}"#);
+    let sql = |name: &str| {
+        format!("SELECT s.place AS {name}, o.* FROM stops s JOIN orders o ON o.id = s.order")
+    };
+    let (a, hidden) = n.query(&spy, &sql("dropoff"), "");
+    let (b, missing) = n.query(&spy, &sql("nosuch"), "");
+    assert_eq!((a, b), (200, 200), "{hidden}\n{missing}");
+    assert_eq!(
+        hidden.replace("dropoff", "X"),
+        missing.replace("nosuch", "X"),
+        "a hidden field and a missing one are answered alike"
+    );
+    assert_eq!(rows_of(&hidden).len(), 4);
+    assert!(
+        hidden.starts_with(r#"[{"dropoff":"s1","id":1,"status":"ready","pickup":"P1"}"#),
+        "{hidden}"
+    );
+    let (status, body) = n.query(&spy, &sql("pickup"), "");
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("two columns named `pickup`"), "{body}");
+}
+
 /// An inner `get`'s column is made of the rows showing it: a list of the
 /// ready orders' doors was the doors themselves, read through `in`.
 #[test]

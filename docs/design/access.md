@@ -122,7 +122,10 @@ rules, `returning`, a stream's seed and changes and the MCP tools. A field
 no rule grants is not there: dropped from `select *`, from `describe`,
 `/collections`, `/_schema` and MCP `schema` (`Scope::shown_schema`), and
 refused by name (403) as a name the collection lacks is, so a name tried
-says nothing. Masking alone leaked the field through everything else a
+says nothing -- a SQL join's `x.*` too, whose names the engine checks for
+a clash before the levels are masked: `hold` hands it what each level
+shows (`Flat::shown`), where `s.place as code` beside `x.*` was refused as
+two columns named `code` and `as nosuch` answered. Masking alone leaked the field through everything else a
 statement does with it: `where dropoff = $1` answered the order going
 there, `order dropoff` sorted the doors, `{n: dropoff}` wrote one into a
 field the token reads, `1 / n` failed with an error naming the division.

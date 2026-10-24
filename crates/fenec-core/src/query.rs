@@ -2033,6 +2033,19 @@ pub struct Flat {
     /// parents as the page could need ([`Lookup`]'s keys).
     pub offset: Count,
     pub limit: Option<Count>,
+    /// The fields a level shows, where a token's rules list them
+    /// (fenec-http's `fields::hold`): the engine checks a `*`'s names for a
+    /// clash before the levels are masked, and a field no rule grants,
+    /// named in its refusal, told the token it was there -- `x.*` beside
+    /// `s.place as code` was refused where `as nosuch` was answered.
+    pub shown: Vec<(usize, Vec<String>)>,
+    /// The names the join's statement wrote with no table, which the
+    /// parser, reading no schema, takes for the first table's: the engine
+    /// refuses one its collection has no field of, which was a joined
+    /// table's -- read as the first's it was null in every row, or failed
+    /// at the first row, and over no rows not at all. A statement read off
+    /// a join without flat rows carries them in a `Flat` with no columns.
+    pub bare: Vec<String>,
 }
 
 /// A column of a [`Flat`] row: the level it is read from -- 0 the `get`'s
@@ -2173,7 +2186,7 @@ impl Select {
             }
         }
         // A SQL join's flat rows are its `lookup`'s, levels and all.
-        if let Some(f) = &self.flat {
+        if let Some(f) = self.flat.as_deref().filter(|f| !f.columns.is_empty()) {
             let levels = self.lookup.as_ref().map_or(0, |l| l.chain().count());
             if levels == 0
                 || self.count

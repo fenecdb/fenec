@@ -163,7 +163,7 @@ fn conds(side: &Side) -> &'static [&'static str] {
 #[test]
 fn a_join_answers_the_rows_sql_does() {
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-    let (mut checked, mut ways) = (0, [0; 3]);
+    let (mut checked, mut ways, mut folded) = (0, [0; 3], [0; 2]);
     for _ in 0..6 {
         let db = shop(&mut rng);
         let tabs: BTreeMap<&str, _> = ["c", "o", "l"]
@@ -189,8 +189,10 @@ fn a_join_answers_the_rows_sql_does() {
             // the first alone, of the second alone, or a count -- which
             // reach each reading: a `lookup` flattened, the other table a
             // filter, the joined table's rows with the first's a filter.
+            // Mode 4: aggregates over the pairs -- `count(*)`, a `sum` and
+            // a `max` of either table's -- with or without `DISTINCT`.
             let mode = match n {
-                2 => rng.below(4),
+                2 => rng.below(5),
                 _ => rng.below(2),
             };
             let mode = if mode == 3 && left && shape != 0 {
@@ -217,7 +219,16 @@ fn a_join_answers_the_rows_sql_does() {
                 list.reverse();
             }
             let counted = mode == 3;
-            let distinct = n == 2 && (mode == 1 || (mode == 2 && !left)) && rng.below(3) == 0;
+            let folds = mode == 4;
+            let distinct =
+                n == 2 && (mode == 1 || (mode == 2 && !left) || folds) && rng.below(3) == 0;
+            // `sum(t.f) AS s, max(t.g) AS m`, each of a table drawn.
+            let numeric = |s: &Side| match s.name {
+                "c" => "rank",
+                "o" => "total",
+                _ => "qty",
+            };
+            let (st, mt) = (rng.below(2) as usize, rng.below(2) as usize);
             // Conditions: the first table's in the `where`; the others'
             // in the `on` of a LEFT JOIN, in the `where` of an inner.
             let cond: Vec<&str> = sides
@@ -245,6 +256,15 @@ fn a_join_answers_the_rows_sql_does() {
             if counted {
                 sql.push_str("count(*) AS n");
             }
+            if folds {
+                sql.push_str(&format!(
+                    "count(*) AS n, sum({}.{}) AS s, max({}.{}) AS m",
+                    sides[st].alias,
+                    numeric(sides[st]),
+                    sides[mt].alias,
+                    numeric(sides[mt])
+                ));
+            }
             sql.push_str(&format!(" FROM {} {}", sides[0].name, sides[0].alias));
             let mut wheres = Vec::new();
             if !cond[0].is_empty() {
@@ -270,7 +290,7 @@ fn a_join_answers_the_rows_sql_does() {
             if !wheres.is_empty() {
                 sql.push_str(&format!(" WHERE {}", wheres.join(" AND ")));
             }
-            let ordered = rng.below(3) != 0 && !distinct && !counted;
+            let ordered = rng.below(3) != 0 && !distinct && !counted && !folds;
             let key = sides[0].fields[rng.below(sides[0].fields.len() as u64) as usize];
             let desc = rng.below(2) == 1;
             if ordered {
@@ -347,10 +367,51 @@ fn a_join_answers_the_rows_sql_does() {
             if counted {
                 want = vec![vec![Value::Int(paths.len() as i64)]];
             }
+            if folds {
+                // SQL's: nulls passed over, a `sum` or `max` of none null.
+                let of = |t: usize| -> Vec<i64> {
+                    paths
+                        .iter()
+                        .filter_map(|p| match value(p, t, numeric(sides[t])) {
+                            Value::Int(i) => Some(i),
+                            _ => None,
+                        })
+                        .collect()
+                };
+                let (sums, maxes) = (of(st), of(mt));
+                want = vec![vec![
+                    Value::Int(paths.len() as i64),
+                    match sums.is_empty() {
+                        true => Value::Null,
+                        false => Value::Int(sums.iter().sum()),
+                    },
+                    maxes.iter().max().map_or(Value::Null, |m| Value::Int(*m)),
+                ]];
+                // Over pairs a row of the first table counts once a
+                // match: answered where each row matches one at most,
+                // refused otherwise, never answered otherwise.
+                let refused = match parse_one(&sql) {
+                    Err(e) => Some(e.to_string()),
+                    Ok(st) => db.query(&st, &[]).err().map(|e| e.to_string()),
+                };
+                if let Some(e) = refused {
+                    assert!(
+                        e.contains("over a join reads one table's columns"),
+                        "{sql}: {e}"
+                    );
+                    folded[1] += 1;
+                    checked += 1;
+                    continue;
+                }
+                folded[0] += 1;
+            }
             let (columns, mut got) = answer(&db, &sql);
             let mut names: Vec<String> = list.iter().map(|x| x.2.clone()).collect();
             if counted {
                 names.push("n".into());
+            }
+            if folds {
+                names.extend(["n", "s", "m"].map(String::from));
             }
             assert_eq!(columns, names, "{sql}");
             if !ordered {
@@ -375,6 +436,9 @@ fn a_join_answers_the_rows_sql_does() {
     assert_eq!(checked, 720);
     // Flat rows, a filter of the other table's, and the join dropped.
     assert!(ways.iter().all(|&n| n > 40), "{ways:?}");
+    // Aggregates over a join answered, and refused where a row would be
+    // counted once a match.
+    assert!(folded.iter().all(|&n| n > 10), "{folded:?}");
 }
 
 /// The join is the `lookup` it reads as, answered flat: the hand-written
@@ -456,6 +520,37 @@ fn a_join_is_its_lookup_flattened() {
         .unwrap_err()
         .to_string();
     assert!(e.contains("needs a hash index"), "{e}");
+    // A name only the joined table has, read as the first table's, is
+    // refused naming the table to write -- over no rows of it too, where a
+    // filter over a field it lacks failed at the first row or not at all.
+    for q in [
+        "SELECT od.id FROM o od JOIN c cu ON cu.id = od.cid WHERE country = 'IT'",
+        "SELECT od.id, name FROM o od JOIN c cu ON cu.id = od.cid",
+        "SELECT od.id FROM o od JOIN c cu ON cu.id = od.cid WHERE od.total > 999 AND rank > 1",
+    ] {
+        let e = db
+            .query(&parse_one(q).unwrap(), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("is no field of `o`, the join's first table"),
+            "{q}: {e}"
+        );
+    }
+    let mut empty = Database::new();
+    run(
+        &mut empty,
+        "create collection o (cid int @hash, total int); create collection c (city text)",
+    );
+    let e = empty
+        .query(
+            &parse_one("SELECT od.id FROM o od JOIN c cu ON cu.id = od.cid WHERE city = 'L'")
+                .unwrap(),
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("`city` is no field of `o`"), "{e}");
     // A page with a parameter, cut from the flat rows.
     let st = parse_one(
         "SELECT cu.name, od.total FROM c cu JOIN o od ON od.cid = cu.id ORDER BY cu.id LIMIT $1 \
@@ -495,4 +590,31 @@ fn a_join_is_written_flat_and_a_lookup_nested() {
     assert!(!flat.contains("\"c\":["), "{flat}");
     let nested = json("get o select id order id limit 1 lookup c on id = cid select name");
     assert!(nested.contains("\"c\":["), "{nested}");
+}
+
+/// A join that finds the joined table's row by its `id`, and asks nothing
+/// else of it, reads each row's match by that id, the `lookup`'s probe:
+/// read as `user_id in (get users select id)`, the list held every user's
+/// id, and past 100 000 of them the plain join was refused.
+#[test]
+fn a_join_by_id_over_a_large_table_is_probed_not_listed() {
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection users (n int); create collection orders (user_id int @hash, total int)",
+    );
+    let docs: Vec<Value> = (0..100_001)
+        .map(|i| Value::object(vec![("n".into(), Value::Int(i))]).unwrap())
+        .collect();
+    db.execute_with(&parse_one("put users $1").unwrap(), &[Value::List(docs)])
+        .unwrap();
+    run(
+        &mut db,
+        "put orders [{user_id: 5, total: 1}, {user_id: 100001, total: 2}, {user_id: 100002, total: 3}]",
+    );
+    let (_, rows) = answer(
+        &db,
+        "SELECT o.total FROM orders o JOIN users u ON u.id = o.user_id ORDER BY o.id",
+    );
+    assert_eq!(rows, [vec![Value::Int(1)], vec![Value::Int(2)]]);
 }

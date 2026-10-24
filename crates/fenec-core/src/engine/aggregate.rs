@@ -808,7 +808,7 @@ impl<'q> Folding<'q> {
                     match self.folded {
                         false => {
                             for t in &self.terms {
-                                crate::codec::encode_value(&mut g.key, &env[*t]);
+                                crate::codec::encode_key(&mut g.key, &env[*t]);
                             }
                         }
                         true => {

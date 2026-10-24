@@ -616,9 +616,12 @@ the other's rows a filter](docs/design/fenecql.md#sql-joins-subqueries-and-schem
 (`join::relate`). The flat rows are `Select::flat`, set by SQL alone and
 rendered by `ResultSet::answered` after a token's masks; a join that would
 answer otherwise -- an order or an aggregate over a joined table's rows --
-is refused. `create table` maps types by `fenec_ql::sqltypes`, which `fenec
-import` maps by too; pgvector's `<->` is `near` held to the index's metric
-(`Near::metric`).
+is refused. A name with no table is held to the first table's fields
+(`Flat::bare`), a `*`'s names to what a token's rules show (`Flat::shown`).
+`create table` maps types by `fenec_ql::sqltypes`, which `fenec import`
+maps by too; pgvector's `<->` is `near` held to the index's metric
+(`Near::metric`). SQL's `order by 1` names the list's first item, the one
+deliberate change of a tree that parsed before.
 
 **[`limit`, `offset` and `top` take a parameter, read where the plan reads
 them](docs/design/fenecql.md#count-parameters)** (`Count::at`); a value is

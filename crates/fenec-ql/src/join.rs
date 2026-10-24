@@ -257,8 +257,10 @@ pub(crate) fn relate(
                 rest.push(t);
             } else {
                 return Err(
-                    "a LEFT JOIN's `on` keeps every row of the tables before it: a \
-                            condition on those goes in the `where`",
+                    "a LEFT JOIN's `on` reads its own table's columns beside the key: a \
+                     condition there on a table before it keeps that table's rows and drops \
+                     only their matches, which no `lookup` says -- in the `where` it would \
+                     drop the rows",
                 );
             }
         }
@@ -355,7 +357,15 @@ pub(crate) fn relate(
         reads |= 1 << t;
         first_more |= t == 0 && !(one_key && bare == keys[1].1[0]);
     }
-    let folds = !sel.aggregate.is_empty() || !sel.group.is_empty() || sel.having.is_some();
+    // The names no table qualifies, read as the first table's: the engine
+    // holds them to its fields ([`Flat::bare`]), since a name only a joined
+    // table has read null there, or failed at the first row.
+    let mut bare = read.clone();
+    for t in &filters[0] {
+        t.referenced_fields(&mut bare);
+    }
+    bare.retain(|f| from.owner(f).0.is_none() && f != "id" && !f.contains('('));
+    let folds = items_fold(&items) || !sel.group.is_empty() || sel.having.is_some();
     let inner: Vec<bool> = from.joins.iter().map(|j| !j.left).collect();
     if one_key {
         let (child, parent) = (&keys[1].0[0], &keys[1].1[0]);
@@ -370,7 +380,14 @@ pub(crate) fn relate(
         // each answered once where the joined table holds one match a
         // row, by its `id`, or where `distinct` counts a row once -- or,
         // for `where o.id is null`, the rows it holds none for.
-        if none || reads & !1 == 0 && (child == "id" || once) {
+        //
+        // Not where the joined table is found by its `id` with nothing
+        // asked of it but to be there, and the rows are the first table's
+        // as they come: the `lookup`'s probe, a row's id looked up, reads
+        // what the list would have read whole -- held to 100 000 values, a
+        // join over a larger table failed.
+        let probe = child == "id" && inner[0] && filters[1].is_empty() && !folds && !distinct;
+        if none || reads & !1 == 0 && (child == "id" || once) && !probe {
             if inner[0] || none {
                 let some = semi(from, 1, child, parent, &mut filters[1]);
                 filters[0].push(match none {
@@ -378,12 +395,16 @@ pub(crate) fn relate(
                     false => some,
                 });
             }
+            sel.flat = bare_flat(bare);
             return Ok(driving(sel, from, items, filters.swap_remove(0), None));
         }
         // The joined table's, the first table's a filter -- its key read
         // as the joined table's, which an inner join's rows hold too.
         if inner[0] && reads & !3 == 0 && !first_more && (parent == "id" || once) {
-            let some = semi(from, 0, parent, child, &mut filters[0]);
+            let mut some = semi(from, 0, parent, child, &mut filters[0]);
+            if let Expr::InSelect(_, first) = &mut some {
+                first.flat = bare_flat(bare);
+            }
             filters[1].push(some);
             let own = filters.swap_remove(1);
             return Ok(driving(sel, from, items, own, Some((parent, child))));
@@ -392,7 +413,18 @@ pub(crate) fn relate(
     if folds || distinct {
         return Err(FOLDED);
     }
-    flat(sel, from, items, filters, keys, &inner)
+    flat(sel, from, items, filters, keys, &inner, bare)
+}
+
+/// What a statement read off a join carries of its names with no table
+/// ([`Flat::bare`]): no flat rows of its own, only the names.
+fn bare_flat(bare: Vec<String>) -> Option<Box<Flat>> {
+    (!bare.is_empty()).then(|| {
+        Box::new(Flat {
+            bare,
+            ..Flat::default()
+        })
+    })
 }
 
 /// The item a name with no table names -- by its `as`, or its label
@@ -630,6 +662,7 @@ fn flat(
     mut filters: Vec<Vec<Expr>>,
     keys: Vec<(Vec<String>, Vec<String>)>,
     inner: &[bool],
+    unqualified: Vec<String>,
 ) -> Result<Select, &'static str> {
     let n = from.tables.len();
     order_by_items(&mut sel, from, &items);
@@ -731,6 +764,7 @@ fn flat(
     let by_id = keys[1..].iter().all(|(c, _)| c.len() == 1 && c[0] == "id");
     let mut page = Flat {
         columns,
+        bare: unqualified,
         ..Flat::default()
     };
     if !by_id {

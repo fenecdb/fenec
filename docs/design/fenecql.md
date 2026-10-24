@@ -170,13 +170,25 @@ refused. **pgvector's `order by emb <-> $1 limit k`** -- `<->`, `<=>`,
 holds to the index's distance (`metric_held`), refusing another with the
 operator to write; `_score` is the L2 distance, 1 minus the cosine
 distance, and the inner product. The corpus of every FenecQL text main's
-tree holds -- the docs' blocks and inline code, both golden files, the
-brief, every JS, Python, Go, C#, Swift, Kotlin and Dart string and the
-Rust crates' literals that begin a statement: 6 926 texts, 13 852 parses
-with `parse` and `parse_exact` -- parsed on main and the branch: no tree
-changed, none broken; 44 parse that were refused (SQL's tables, indexes,
-joins, `distinct`, `exists`, pgvector's operator, and `select g group g`),
-104 are refused in other words.
+tree holds -- the docs' `fenecql` and `sql` blocks and inline code, both
+golden files, the brief, every JS, Python, Go, C#, Swift, Kotlin and Dart
+string and the Rust crates' literals that begin a statement, with the
+review's own texts: 7 620 texts, 15 240 parses with `parse` and
+`parse_exact` -- parsed on main and the branch: of the repository's texts
+no tree changed and none broke; 34 parse that were refused, 42 are refused
+in other words. **The exception, deliberate:** SQL's `order by <n>` and
+`group by <n>` in a `select ... from` -- written with `by`; FenecQL's
+`order 1` and `group 1` keep their trees -- name the list's items, where
+main read the number as a key the same in every row, which ordered nothing
+and grouped every row as one: never SQL's meaning, and no text of the
+repository's writes it. So `select name from users order by 1`, `select
+name, n from t order by 2 desc`, `select a, b from t order by 1, 2` and
+`select status, count(*) from t group by status, 1` parse to other trees,
+and `select * from t order by 2` (a number over `*`, whose places a parser
+reading no schema cannot count) and `select count(*) from t group by 1` (an
+aggregate as a group's key, which SQL refuses) are refused where main
+parsed them; `select distinct from t`, refused on main for its `distinct`,
+is refused in other words.
 
 **What the eval refused after the first pass.** An item's name without
 `as` -- `count(*) c` -- is read where the list goes on or ends at `from`
@@ -198,12 +210,43 @@ than one row returned by a subquery used as an expression", which the
 engine has no place for -- and `->>`, whose text is not the json value a
 path reads (`'5'` against `5`).
 
+**What the review found.** An ungrouped aggregate over a join counted
+each row once a match: `items` takes the list out of the select before
+`folds` was asked of it, so `select distinct count(*) from users u join
+orders o on o.user_email = u.email` took the semi-join and answered 2
+where SQLite answers 4, and `count(*)` or `sum` over pairs was refused
+with "unknown function" where FOLDED's words belong; `folds` reads the
+items now (`items_fold`). A token's `x.*` beside `s.place as code` told it
+a field it may not read was there (`Flat::shown`, access.md). A plain
+inner join found by the joined table's `id` read every one of its ids as
+the list of an `in (get ...)`, refused past 100 000: asked nothing else of
+the joined table, it is the `lookup`'s probe, a row's id looked up, at any
+size (`probe` in `relate`); an aggregate, `distinct` or `exists` over a
+larger joined table still reads the list and is refused past it, never
+cut. `exists (... limit 0)` was true, and a `limit` there is held to a
+number from 1. `int array` mapped to an `int` (`array` read into the
+type's words). `--mcp-max-rows` counted a join's parents: it bounds the
+flat rows, its `limit` put on the flat page. `-0.0` and `0.0` were two
+groups, two distinct values and two facet values (`encode_folded`, the
+group key). A LEFT JOIN's `on` condition on a table before it was told to
+go in the `where`, which drops the rows; `hnsw with (m = 1)` was clamped,
+where pgvector refuses it; and a name only a joined table has, read as the
+first table's, read null in every row or failed at the first, and over no
+rows not at all: the engine holds such names to the first table's fields
+(`Flat::bare`). `tests/join.rs` evaluates each table's conditions through
+FenecQL, so `fenec-bench`'s `tests/joins_sqlite.rs` holds 1 104 joins,
+`exists`, `not exists`, `left join ... is null`, names with no table and
+aggregates and `distinct` over pairs to SQLite's answer over rows with
+nulls in keys and conditions: 864 answered as SQLite does, 240 refused
+(`cargo test -p fenec-bench`).
+
 **What it costs.** The agent eval (`tools/agent-eval`, condition C, two
 runs a task and model, B on main the same day): SQL's first try 60% ->
 74-75% for haiku and 75% -> 91-94% for sonnet, within three 98% -> 98-100%
 and 100%, refused statements 36 -> 7 over 160 runs. The browser module grew
-59.8 KB, 24.6 KB gzip, 19.5 KB brotli (792.1, 325.5, 269.5), the test
-builds 19.5 and 20.0 KB brotli: `join.rs` 16.4 KB (`exists`'s `correlate`
+63.4 KB, 26.1 KB gzip, 20.6 KB brotli (795.6, 326.9, 270.6), the test
+builds 20.7 and 21.0 KB brotli -- the review's fixes 3.6 KB and 1.1 KB
+brotli of it: `join.rs` 16.4 KB (`exists`'s `correlate`
 2.5 of it), the parser's readings 24.1 (`create table` and `create index`
 with their columns and keys about 11, `exists` 1.3, the select's
 `distinct`, ordinals, distance and alias 3.7), `sqltypes` 1.9, the flat
@@ -216,7 +259,7 @@ its `char` formatting (about 5.5 KB), the SQL readings out of line (0.4 KB
 brotli), the
 refusals' text shortened and their `String`s made `&'static str`.
 Natively `fenec-server` grew 113 KB, its code 95.2 (fenec-ql 103.6 ->
-179.0 at `opt-level = 3`), `fenec-shard` 97 KB, the shell 113 (81 under
+179.0 at `opt-level = 3`), `fenec-shard` 97 KB, the shell 113 (97 under
 `--profile cli`). The parse, ABBA against main at loads of 2.6-2.9, ns,
 medians of four runs a side: a row by id 782.8 -> 792.6 (+1.2%), a filtered
 `get` 2 368 -> 2 392 (+1.0%), a `set` 1 184 -> 1 188 (+0.3%), a 128-dim

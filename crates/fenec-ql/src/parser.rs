@@ -1245,12 +1245,24 @@ impl Parser {
                     ));
                 };
                 let mut spec = VectorIndexSpec::default();
+                // pgvector's bounds, refused past as pgvector refuses them:
+                // clamped, `m = 1` built another index than it asked for.
+                const BOUNDS: &str = "pgvector's `m` is from 2 to 100 and `ef_construction` \
+                                      from 4 to 1000, at least twice `m`";
+                let mut ef = false;
                 for (k, v) in std::mem::take(&mut with) {
                     match k.as_str() {
-                        "m" => spec.m = (v.max(2)) as usize,
-                        "ef_construction" => spec.ef_construction = (v.max(8)) as usize,
+                        "m" if (2..=100).contains(&v) => spec.m = v as usize,
+                        "ef_construction" if (4..=1000).contains(&v) => {
+                            spec.ef_construction = v as usize;
+                            ef = true;
+                        }
+                        "m" | "ef_construction" => return self.err(BOUNDS),
                         _ => return self.err(format!("unknown hnsw parameter `{k}`")),
                     }
+                }
+                if ef && spec.ef_construction < 2 * spec.m {
+                    return self.err(BOUNDS);
                 }
                 match metric {
                     Some(m) => {
@@ -1418,8 +1430,9 @@ impl Parser {
         if fenec {
             ty = self.data_type()?;
         } else {
-            const ENDS: [&str; 12] = [
+            const ENDS: [&str; 13] = [
                 "primary",
+                "array",
                 "not",
                 "null",
                 "unique",
@@ -1478,15 +1491,21 @@ impl Parser {
                     });
                 }
             };
-            // `text[]`, `integer array`: a list.
-            if matches!(self.peek(), Tok::LBracket) {
+            // `text[]`, `integer array`, `int array[3]`: a list, its length
+            // not held, as PostgreSQL holds none.
+            let array = self.eat_kw("array");
+            // `[3]` is a vector of one to the lexer.
+            if matches!(self.peek(), Tok::Vector(v) if v.len() == 1) {
+                self.next();
+                ty = DataType::List(Box::new(ty));
+            } else if matches!(self.peek(), Tok::LBracket) {
                 self.next();
                 if matches!(self.peek(), Tok::Int(_)) {
                     self.next();
                 }
                 self.expect(Tok::RBracket)?;
                 ty = DataType::List(Box::new(ty));
-            } else if self.eat_kw("array") {
+            } else if array {
                 ty = DataType::List(Box::new(ty));
             }
         }
@@ -2191,6 +2210,14 @@ impl Parser {
         {
             self.next();
             distinct = self.subqueries == 0;
+            // Read as a list of one field named `distinct` before SQL was,
+            // which SQL refuses.
+            if self.peek_kw("from") {
+                return self.err(
+                    "`distinct` makes each row of the list once, and takes the list: \
+                     `select distinct city from users`",
+                );
+            }
             if self.peek_kw("on") {
                 return self.err(
                     "`distinct on` is a group: `select city, first(name by signup) as name ... \
@@ -2228,7 +2255,7 @@ impl Parser {
     /// first, where SQL's order names the list -- a number there was a
     /// key the same in every row, which ordered nothing.
     #[inline(never)]
-    fn ordinals(&self, sel: &mut Select) -> Result<()> {
+    fn ordinals(&self, sel: &mut Select, (group_by, order_by): (bool, bool)) -> Result<()> {
         let names: Vec<String> = match (&sel.project, sel.aggregate.is_empty()) {
             (_, false) => sel.aggregate.iter().map(|c| c.name.clone()).collect(),
             (Some(p), true) => p.clone(),
@@ -2241,19 +2268,23 @@ impl Parser {
         let at = |n: i64| -> Result<String> {
             match names.get((n as usize).wrapping_sub(1)).filter(|_| n > 0) {
                 Some(name) => Ok(name.clone()),
+                None if names.is_empty() => self.err(format!(
+                    "a key `{n}` names an item of the list by its place, and `*` names none: \
+                     name the columns, or order by the field"
+                )),
                 None => self.err(format!(
                     "a key `{n}` names an item of the list by its place, and the list holds {}",
                     names.len()
                 )),
             }
         };
-        for g in &mut sel.group {
+        for g in sel.group.iter_mut().filter(|_| group_by) {
             if let Some(n) = item(g) {
                 *g = Expr::Field(at(n)?);
             }
         }
         let grouped = !sel.aggregate.is_empty() || !sel.group.is_empty();
-        for s in &mut sel.order {
+        for s in sel.order.iter_mut().filter(|_| order_by) {
             let Some(n) = s.expr.as_ref().and_then(item) else {
                 continue;
             };
@@ -2291,6 +2322,8 @@ impl Parser {
             ..Default::default()
         };
 
+        // Whether the `group` and the `order` were written with SQL's `by`.
+        let mut by = (false, false);
         loop {
             if self.eat_kw("select") {
                 let l = self.select_list()?;
@@ -2303,6 +2336,9 @@ impl Parser {
                 continue;
             }
             if self.eat_kw("group") {
+                // SQL's `group by 1` names the list's first item; FenecQL's
+                // `group 1`, written before SQL was read, keeps its tree.
+                by.0 |= self.peek_kw("by");
                 sel.group = self.group_list()?;
                 continue;
             }
@@ -2406,6 +2442,7 @@ impl Parser {
                 continue;
             }
             if self.eat_kw("order") {
+                by.1 |= self.peek_kw("by");
                 self.order_list(&mut sel.order)?;
                 continue;
             }
@@ -2463,7 +2500,7 @@ impl Parser {
             }
         }
         if sql {
-            self.ordinals(&mut sel)?;
+            self.ordinals(&mut sel, by)?;
         }
         if let Some(from) = from {
             sel = match crate::join::relate(sel, from, distinct) {
@@ -3544,9 +3581,17 @@ impl Parser {
             unreachable!("set just before")
         };
         let filter = filter?;
-        // Whether a row exists asks no page.
+        // Whether a row exists asks no page: a `limit` of 1 or more changes
+        // nothing, and one of 0 -- or a parameter bound to it -- asks of
+        // no row, false where read as the list.
         if self.eat_kw("limit") {
-            self.count("limit")?;
+            if !matches!(self.peek(), Tok::Int(n) if *n >= 1) {
+                return self.err(
+                    "an `exists` query's `limit` is a number from 1, which changes nothing: \
+                     `limit 0` asks of no row",
+                );
+            }
+            self.next();
         }
         if !matches!(self.peek(), Tok::RParen) {
             return Err(self.taught("an `exists` query is `select 1 from <collection> where ...`"));

@@ -2431,7 +2431,9 @@ fn encode_folded(out: &mut Vec<u8>, v: &Value, fold: Option<CaseFold>) {
             out.push(crate::codec::TAG_TEXT);
             crate::codec::encode_str(out, &crate::case::fold(t, f));
         }
-        _ => crate::codec::encode_value(out, v),
+        // `-0.0` one group, one value counted and one facet value with
+        // `0.0`, as SQL makes them.
+        _ => crate::codec::encode_key(out, v),
     }
 }
 
@@ -2556,7 +2558,15 @@ fn flat_page(f: &Flat, columns: &[String], n: &Nested, params: &[Value]) -> Resu
     for c in &f.columns {
         let all = levels.get(c.level).copied().unwrap_or_default();
         let one = std::slice::from_ref(&c.name);
+        // A `*`'s columns as the token is shown them ([`Flat::shown`]).
+        let shown = f.shown.iter().find(|(l, _)| *l == c.level).map(|(_, s)| s);
         for name in if c.column.is_empty() { all } else { one } {
+            let hidden = c.column.is_empty()
+                && name != "id"
+                && shown.is_some_and(|s| !s.iter().any(|f| f == name));
+            if hidden {
+                continue;
+            }
             if names.contains(&name.as_str()) {
                 return Err(Error::Query(format!(
                     "the join answers two columns named `{name}`: name one with `as`"
@@ -2569,6 +2579,8 @@ fn flat_page(f: &Flat, columns: &[String], n: &Nested, params: &[Value]) -> Resu
         columns: f.columns.clone(),
         offset: Count::N(f.offset.at(params)),
         limit: f.limit.map(|l| Count::N(l.at(params))),
+        shown: Vec::new(),
+        bare: Vec::new(),
     }))
 }
 
@@ -6525,6 +6537,24 @@ impl Database {
         }))
     }
 
+    /// A SQL join's names with no table held to the first table's fields
+    /// ([`Flat::bare`]).
+    #[cold]
+    #[inline(never)]
+    fn bare_names(&self, collection: &str, names: &[String]) -> Result<()> {
+        let c = self.collection(collection)?;
+        match names
+            .iter()
+            .find(|n| c.schema.field(n.split('.').next().unwrap_or(n)).is_none())
+        {
+            Some(n) => Err(Error::Query(format!(
+                "`{n}` is no field of `{collection}`, the join's first table, which a column \
+                 with no table is read as: name a joined table's with its table, `u.{n}`"
+            ))),
+            None => Ok(()),
+        }
+    }
+
     /// [`Self::answered`] for a `get`, which an inner one is as well,
     /// `depth` levels down.
     fn answered_select<'s>(
@@ -6553,6 +6583,9 @@ impl Database {
         // included, since each is answered through here too -- and read
         // where the plan reads it (`Count::at`).
         sel.check_counts(params)?;
+        if let Some(f) = sel.flat.as_deref().filter(|f| !f.bare.is_empty()) {
+            self.bare_names(&sel.collection, &f.bare)?;
+        }
         // Every collection a read reads passes here, so here is where one
         // declaring what this build lacks is refused.
         if !crate::FULL {

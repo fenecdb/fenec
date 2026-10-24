@@ -1041,7 +1041,7 @@ fn query(ctx: &Ctx, args: Args) -> Checked<String> {
     // for one past it, a read that has more says so with one row more.
     if let Statement::Select(sel) = &mut stmt {
         let one_row = sel.count || (!sel.aggregate.is_empty() && sel.group.is_empty());
-        let asked = match sel.limit {
+        let at = |c: Option<Count>| match c {
             None => None,
             Some(Count::N(n)) => Some(n),
             Some(Count::Param(i)) => match params.get(i) {
@@ -1049,13 +1049,25 @@ fn query(ctx: &Ctx, args: Args) -> Checked<String> {
                 _ => None,
             },
         };
-        if !one_row && asked.is_none_or(|n| n > max) {
-            sel.limit = Some(Count::N(max + 1));
+        // A SQL join's rows are the flat ones, several a parent where a
+        // level holds several: bounded there, since a bound on the parents
+        // could cut the rows a later parent would bring.
+        match &mut sel.flat {
+            Some(f) => {
+                if at(f.limit).or(at(sel.limit)).is_none_or(|n| n > max) {
+                    f.limit = Some(Count::N(max + 1));
+                }
+            }
+            None => {
+                if !one_row && at(sel.limit).is_none_or(|n| n > max) {
+                    sel.limit = Some(Count::N(max + 1));
+                }
+            }
         }
     }
     let resp = read(ctx, stmt, &params)?;
     if let Response2::Rows(rs) = &resp {
-        if rs.rows.len() > max {
+        if rs.answered().rows.len() > max {
             return Err(Outcome::refused(
                 413,
                 format!(
