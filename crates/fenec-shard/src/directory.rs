@@ -40,7 +40,10 @@ pub const HOME: char = '@';
 const SCHEMA: [&str; 11] = [
     "create collection if not exists nodes \
      (name text @hash, addr text, token text, region text, zone text)",
-    "create collection if not exists tenants (name text @hash, node text @hash, state text)",
+    // `failed_from` (`TENANT_FIELDS`): the node a failover took the tenant
+    // off, written with the placement on the copy it promoted.
+    "create collection if not exists tenants \
+     (name text @hash, node text @hash, state text, failed_from text)",
     // Which node replicates which. A collection of its own rather than a
     // field on `nodes`: a directory written before this existed opens as it
     // is, and the engine had no `alter` to add one then.
@@ -114,6 +117,19 @@ const SCHEMA: [&str; 11] = [
 /// `name, addr, token` as it always did -- it forwards every tenant where
 /// it is, and places without regard to regions.
 const NODE_FIELDS: [&str; 2] = ["region", "zone"];
+
+/// The fields `tenants` took after directories were first written:
+/// `failed_from`, the node a failover took the tenant off, written in the
+/// very statement that places it on the copy promoted
+/// ([`Directory::place_promoted`]) and cleared by every other placement
+/// ([`Directory::place`]). A router following the directory tells a
+/// failover from a move by it ([`FailedOver`]): a move's source still
+/// answers and refuses its frozen writes on its own, so what is out to it
+/// is left to it, where a node failed over answers nothing. Added to a
+/// directory from before it as `NODE_FIELDS` are; a router from before it
+/// neither writes nor reads it, and one following such a directory ends
+/// nothing, as before.
+const TENANT_FIELDS: [&str; 1] = ["failed_from"];
 
 /// The fields `readers` took after it was first written: `lineage`, added
 /// to one written before it as `NODE_FIELDS` are. Selected only where the
@@ -216,6 +232,19 @@ pub struct Reader {
     pub lineage: Option<String>,
 }
 
+/// A tenant the directory's maps, brought up to what a router it follows
+/// wrote ([`Directory::refresh`]), show failed over off the node they had
+/// placed it on: that node's name and address. What the router following
+/// had out to the node for the tenant is to be ended, as the router that
+/// failed it over ended its own (`Router::cut_moved`): the node failed
+/// over answers nothing, and a node gone with no reset closes nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FailedOver {
+    pub tenant: String,
+    pub node: String,
+    pub addr: String,
+}
+
 pub struct Directory {
     /// Shared, because a standby follows it: the follower thread applies the
     /// primary's writes to the same database (`fenec-shard --replica-of`).
@@ -258,6 +287,10 @@ pub struct Directory {
     /// maps; a write of this router's own leaves them behind, and the next
     /// refresh reads everything again.
     ids: Ids,
+    /// The tenants the changes read since the last [`Self::refresh`]
+    /// showed failed over off the node the maps had them on, which that
+    /// refresh hands over.
+    failed_over: Vec<FailedOver>,
 }
 
 /// Document id -> key, one map a collection: nodes, tenants, pairs,
@@ -300,6 +333,7 @@ impl Directory {
                 }
                 for (coll, fields) in [
                     ("nodes", &NODE_FIELDS[..]),
+                    ("tenants", &TENANT_FIELDS[..]),
                     ("readers", &READER_FIELDS[..]),
                     ("lineages", &LINEAGE_FIELDS[..]),
                 ] {
@@ -328,6 +362,7 @@ impl Directory {
             scope: None,
             arrived: false,
             ids: Ids::default(),
+            failed_over: Vec::new(),
         };
         d.reload()?;
         Ok(d)
@@ -353,12 +388,40 @@ impl Directory {
 
     /// Brings the maps up to the database when it has moved: from the
     /// changes since they were read where the change ring can say what
-    /// they were, and by reading them again where it cannot.
-    pub fn refresh(&mut self) -> Result<()> {
+    /// they were, and by reading them again where it cannot. The tenants
+    /// those changes placed on the copy a failover promoted, off the node
+    /// the maps had them on ([`FailedOver`], `failed_from`): what a router
+    /// following this directory had out there for each is to be ended. A
+    /// move is none, nor is a failover off a node the maps had not placed
+    /// the tenant on -- the changes read at once took it there by a move,
+    /// whose source still answers -- nor one the changes read at once moved
+    /// on from, `failed_from` cleared: that node's requests wait as before.
+    pub fn refresh(&mut self) -> Result<Vec<FailedOver>> {
         if self.stale() && !self.catch_up()? {
             self.reload()?;
         }
-        Ok(())
+        Ok(std::mem::take(&mut self.failed_over))
+    }
+
+    /// The tenant of `row` -- `tenants`' fields as [`tenant_fields`] names
+    /// them -- failed over off the node the maps place it on, where it is:
+    /// asked before the maps take the row.
+    fn failed_over_off(&self, row: &[Value]) -> Option<FailedOver> {
+        let (Value::Text(tenant), Value::Text(to), Some(Value::Text(from))) =
+            (&row[0], &row[1], row.get(3))
+        else {
+            return None;
+        };
+        let was = self.tenants.get(tenant.as_str())?;
+        if was.node != *from || to == from {
+            return None;
+        }
+        let addr = self.nodes.get(from)?.addr.clone();
+        Some(FailedOver {
+            tenant: tenant.clone(),
+            node: from.clone(),
+            addr,
+        })
     }
 
     fn reload(&mut self) -> Result<()> {
@@ -374,8 +437,11 @@ impl Directory {
             nodes.insert(text(&row[0]), node_of(&row));
         }
         let (mut tenants, mut homes) = (HashMap::new(), HashMap::new());
-        for (id, row) in rows(&g, "tenants", "get tenants select name, node, state")? {
+        let mut failed_over = Vec::new();
+        let select = format!("get tenants select {}", tenant_fields(&g).join(", "));
+        for (id, row) in rows(&g, "tenants", &select)? {
             ids.tenants.insert(id, text(&row[0]));
+            failed_over.extend(self.failed_over_off(&row));
             put_tenant(&mut tenants, &mut homes, text(&row[0]), &row);
         }
         let mut pairs = Pairs::new();
@@ -429,6 +495,7 @@ impl Directory {
         self.lineages = lineages;
         self.ids = ids;
         self.arrived = g.collection("tenants").is_ok();
+        self.failed_over.extend(failed_over);
         Ok(())
     }
 
@@ -475,7 +542,7 @@ impl Directory {
             Some(lineages),
         ) = (
             changes("nodes", &node_fields(&g))?,
-            changes("tenants", &["name", "node", "state"])?,
+            changes("tenants", &tenant_fields(&g))?,
             changes("pairs", &["node", "standby"])?,
             changes("replicas", &["tenant", "node"])?,
             changes("quotas", &["tenant", "quota"])?,
@@ -487,6 +554,15 @@ impl Directory {
         else {
             return Ok(false);
         };
+        // Asked of the maps as they were, before any of them takes these
+        // changes: the node a tenant was placed on, and where it is.
+        let failed: Vec<FailedOver> = tenants
+            .puts
+            .rows
+            .iter()
+            .filter_map(|r| self.failed_over_off(&r.values))
+            .collect();
+        self.failed_over.extend(failed);
         let ids = &mut self.ids;
         apply(&mut ids.nodes, nodes, |k, v| match v {
             Some(v) => drop(self.nodes.insert(k.into(), node_of(v))),
@@ -904,26 +980,35 @@ impl Directory {
         .map(|_| self.history_noted(tenant, history))
     }
 
-    /// Records `tenant` placed on `node` as a promotion there left it, and
-    /// the history that promotion forked ([`Self::set_history`]): one
+    /// Records `tenant` placed on `node` as a promotion there left it, the
+    /// node `from` it was failed over off (`failed_from`, [`FailedOver`]),
+    /// and the history that promotion forked ([`Self::set_history`]): one
     /// block, one sync -- the history a statement of its own was a second
     /// fsync for every tenant a failover promotes, under the router's
-    /// write lock.
+    /// write lock. `from` goes in the placement's own statement, so a
+    /// router following the directory reads the two together or neither.
     pub fn place_promoted(
         &mut self,
         tenant: &str,
         node: &str,
         history: Option<&str>,
+        from: Option<&str>,
     ) -> Result<()> {
-        let place = match self.exists(tenant) {
-            true => "set tenants {node: $2, state: $3} where name = $1",
-            false => "put tenants {name: $1, node: $2, state: $3}",
+        let kept = self.keeps_failed_from();
+        let place = match (self.exists(tenant), kept) {
+            (true, true) => "set tenants {node: $2, state: $3, failed_from: $4} where name = $1",
+            (false, true) => "put tenants {name: $1, node: $2, state: $3, failed_from: $4}",
+            (true, false) => "set tenants {node: $2, state: $3} where name = $1",
+            (false, false) => "put tenants {name: $1, node: $2, state: $3}",
         };
-        let params = vec![
+        let mut params = vec![
             Value::Text(tenant.into()),
             Value::Text(node.into()),
             Value::Text(State::Active.as_str().into()),
         ];
+        if kept {
+            params.push(from.map_or(Value::Null, |f| Value::Text(f.into())));
+        }
         let mut stmts = vec![(place, params.clone())];
         stmts.extend(history.and_then(|h| self.history_change(tenant, h)));
         self.write_block(&stmts)?;
@@ -1193,19 +1278,37 @@ impl Directory {
     /// `node` [`HOME`] and a region, at home in a region keeping its own
     /// directory. One statement either way, so a tenant leaving for such a
     /// region, or coming back, is never in neither.
+    ///
+    /// No failover: `failed_from` is cleared, so a router following the
+    /// directory reads this placement as the move or the create it is, not
+    /// as the failover an earlier placement of the row was.
     pub fn place(&mut self, tenant: &str, node: &str, state: State) -> Result<()> {
         let params = [
             Value::Text(tenant.into()),
             Value::Text(node.into()),
             Value::Text(state.as_str().into()),
+            Value::Null,
         ];
-        if self.exists(tenant) {
-            self.run("set tenants {node: $2, state: $3} where name = $1", &params)?;
-        } else {
-            self.run("put tenants {name: $1, node: $2, state: $3}", &params)?;
+        match (self.exists(tenant), self.keeps_failed_from()) {
+            (true, true) => self.run(
+                "set tenants {node: $2, state: $3, failed_from: $4} where name = $1",
+                &params,
+            )?,
+            (true, false) => self.run(
+                "set tenants {node: $2, state: $3} where name = $1",
+                &params[..3],
+            )?,
+            (false, _) => self.run("put tenants {name: $1, node: $2, state: $3}", &params[..3])?,
         }
         put_tenant(&mut self.tenants, &mut self.homes, tenant.into(), &params);
         Ok(())
+    }
+
+    /// Whether `tenants` has `failed_from`: a standby router promoted
+    /// where it stood, over a directory a router from before it wrote,
+    /// never added it.
+    fn keeps_failed_from(&self) -> bool {
+        tenant_fields(&read(&self.db)).len() > 3
     }
 
     /// Records `tenant` at home in `region`, which keeps its own directory.
@@ -1328,6 +1431,20 @@ fn node_fields(db: &Database) -> Vec<&'static str> {
     if let Ok(c) = db.collection("nodes") {
         fields.extend(
             NODE_FIELDS
+                .iter()
+                .filter(|f| c.schema.field_pos(f).is_some()),
+        );
+    }
+    fields
+}
+
+/// The fields a tenant is read by: `failed_from` where the collection has
+/// it -- a standby's, following a primary from before it, has not.
+fn tenant_fields(db: &Database) -> Vec<&'static str> {
+    let mut fields = vec!["name", "node", "state"];
+    if let Ok(c) = db.collection("tenants") {
+        fields.extend(
+            TENANT_FIELDS
                 .iter()
                 .filter(|f| c.schema.field_pos(f).is_some()),
         );
@@ -1581,7 +1698,7 @@ mod tests {
         assert_eq!(d.history("acme").as_deref(), Some("aaaaaaaa000000bb"));
         assert_eq!(d.lineage("acme").as_deref(), Some("aaaaaaaa"));
         // A promotion's placement and history, in one block.
-        d.place_promoted("acme", "n2", Some("aaaaaaaa000000ff"))
+        d.place_promoted("acme", "n2", Some("aaaaaaaa000000ff"), Some("n1"))
             .unwrap();
         d.reload().unwrap();
         assert_eq!(d.placement("acme").map(|p| p.node.as_str()), Some("n2"));
@@ -1785,6 +1902,138 @@ mod tests {
         d.refresh().unwrap();
         let read = Directory::load(Arc::clone(d.db())).unwrap();
         assert_eq!(maps(&d), maps(&read));
+    }
+
+    /// What the changes since the maps were read show failed over off the
+    /// node the maps placed a tenant on: a promotion's placement, naming
+    /// the node it left (`failed_from`). Not a move, nor a failover off a
+    /// node the maps had not placed the tenant on -- a move took it there
+    /// in the same changes, and that move's source still answers -- nor
+    /// one the same changes moved on from, nor a later change of a row a
+    /// failover wrote. Told the same from the change ring and from reading
+    /// the maps again, and the node's address is the one the maps had,
+    /// though the same changes took the node out.
+    #[test]
+    fn a_failover_is_told_from_a_move() {
+        let base = [
+            r#"put nodes {name: "n1", addr: "a1", token: "t"}"#,
+            r#"put nodes {name: "n2", addr: "a2", token: "t"}"#,
+            r#"put nodes {name: "n3", addr: "a3", token: "t"}"#,
+            r#"put tenants {name: "acme", node: "n1", state: "active"}"#,
+        ];
+        let failover = |from: &str, to: &str| {
+            format!(
+                r#"set tenants {{node: "{to}", state: "active", failed_from: "{from}"}} where name = "acme""#
+            )
+        };
+        let moved = |to: &str| {
+            [
+                r#"set tenants {state: "moving"} where name = "acme""#.to_string(),
+                format!(
+                    r#"set tenants {{node: "{to}", state: "active", failed_from: null}} where name = "acme""#
+                ),
+            ]
+        };
+        let told = vec![FailedOver {
+            tenant: "acme".into(),
+            node: "n1".into(),
+            addr: "a1".into(),
+        }];
+        let cases: Vec<(&str, Vec<String>, Vec<FailedOver>)> = vec![
+            ("a failover", vec![failover("n1", "n2")], told.clone()),
+            ("a move", moved("n2").to_vec(), vec![]),
+            (
+                "a move, then a failover",
+                {
+                    let mut c = moved("n2").to_vec();
+                    c.push(failover("n2", "n3"));
+                    c
+                },
+                vec![],
+            ),
+            (
+                "a failover, then a move",
+                {
+                    let mut c = vec![failover("n1", "n2")];
+                    c.extend(moved("n3"));
+                    c
+                },
+                vec![],
+            ),
+            (
+                "a failover, its node taken out",
+                vec![
+                    failover("n1", "n2"),
+                    r#"del nodes where name = "n1""#.to_string(),
+                ],
+                told.clone(),
+            ),
+        ];
+        for (what, changes, want) in cases {
+            for reread in [false, true] {
+                let mut d = Directory::in_memory();
+                for sql in base {
+                    underneath(&d, sql);
+                }
+                assert_eq!(d.refresh().unwrap(), vec![], "{what}: the base");
+                for sql in &changes {
+                    underneath(&d, sql);
+                }
+                // Read again: as an image adopted or a ring outrun has it.
+                if reread {
+                    d.ids.kept = false;
+                }
+                assert_eq!(d.refresh().unwrap(), want, "{what}, read again: {reread}");
+                assert_eq!(d.refresh().unwrap(), vec![], "{what}: told once");
+            }
+        }
+        // A row a failover wrote, changed again for another reason: no
+        // failover of this change's.
+        let mut d = Directory::in_memory();
+        for sql in base {
+            underneath(&d, sql);
+        }
+        d.refresh().unwrap();
+        underneath(&d, &failover("n1", "n2"));
+        assert_eq!(d.refresh().unwrap(), told);
+        underneath(&d, r#"set tenants {state: "moving"} where name = "acme""#);
+        assert_eq!(d.refresh().unwrap(), vec![]);
+    }
+
+    /// A promotion's placement names the node it left, and every other
+    /// placement clears it; a directory from before the field takes it as
+    /// it opens.
+    #[test]
+    fn a_promotion_names_the_node_it_left_and_a_move_clears_it() {
+        let left = |d: &Directory| {
+            let g = read(&d.db);
+            let stmt = fenec_ql::parse_one(r#"get tenants select failed_from where name = "acme""#);
+            match g.query(&stmt.unwrap(), &[]).unwrap() {
+                Response::Rows(rs) => rs.rows[0].values[0].clone(),
+                other => panic!("{other:?}"),
+            }
+        };
+        let mut d = Directory::in_memory();
+        d.place("acme", "n1", State::Active).unwrap();
+        assert_eq!(left(&d), Value::Null);
+        d.place_promoted("acme", "n2", None, Some("n1")).unwrap();
+        assert_eq!(left(&d), Value::Text("n1".into()));
+        assert_eq!(d.placement("acme").map(|p| p.node.as_str()), Some("n2"));
+        d.place("acme", "n3", State::Moving).unwrap();
+        assert_eq!(left(&d), Value::Null);
+
+        let mut db = Database::new();
+        for sql in [
+            "create collection tenants (name text @hash, node text @hash, state text)",
+            r#"put tenants {name: "acme", node: "n1", state: "active"}"#,
+        ] {
+            db.execute(&fenec_ql::parse_one(sql).unwrap()).unwrap();
+        }
+        let mut d = Directory::load(Arc::new(RwLock::new(db))).unwrap();
+        assert!(d.keeps_failed_from());
+        assert_eq!(left(&d), Value::Null);
+        d.place_promoted("acme", "n2", None, Some("n1")).unwrap();
+        assert_eq!(left(&d), Value::Text("n1".into()));
     }
 
     /// A directory written before nodes had a region and a zone takes the
