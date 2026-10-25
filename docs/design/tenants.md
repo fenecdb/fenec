@@ -564,11 +564,11 @@ tenants, whose copy is the standby's, as missing theirs. A router without
 
 `tests/replica_retries.rs`, a binary of its own (in `all` its proxies'
 threads took the binary past macOS's threads a process, and other tests'
-spawns failed -- and so is `tests/read_replicas.rs` now: its tests held up
-to 1 195 threads at once and the rest of `all` 868, together 2 028 to 2 045
-of the 2 048 on main, past them once the repairs its routers' failed
-attaches run again went on beside), puts a proxy before a node that
-refuses a request (503),
+spawns failed -- as `tests/read_replicas.rs`, apart since #372, would have
+again: its tests held up to 1 195 threads at once and the rest of `all`
+868, together 2 028 to 2 045 of the 2 048, past them once the repairs its
+routers' failed attaches run again went on beside), puts a proxy before a
+node that refuses a request (503),
 answers it itself, holds it, or sends it on and swallows the answer, the
 connection ended with nothing said, and holds, each failing with its part
 taken out (in parentheses, what it met then): a create whose follow was
