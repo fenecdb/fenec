@@ -624,12 +624,23 @@ fn a_standby_s_cut_write_whose_bucket_another_failover_moves_still_waits_for_the
         .find(|t| fenec_shard::upstream::same_bucket(t, "acme"))
         .expect("one in 64 names is in a bucket");
     let at = format!("/_shard/tenants/{beta}");
-    let (status, b) = call(p.primary, "PUT", &at, r#"{"node":"n1"}"#, None);
+    let made = r#"{"node":"n1","schema":"create collection notes (title text)"}"#;
+    let (status, b) = call(p.primary, "PUT", &at, made, None);
     assert_eq!(status, 201, "{b}");
     let beta_replica = placed(p.primary, &beta).1.expect("beta has a replica");
     assert_ne!(
         beta_replica, replica,
         "beta's copy is on the node acme's is not"
+    );
+    // Its copy holds its collection, its primary's image taken: one that
+    // has not is of a lineage of its own, which its node refuses to promote
+    // (409), and `beta` stayed on n1 where its image was held two seconds
+    // at n1's wire.
+    until(
+        p.port_of(&beta_replica),
+        &format!("/t/{beta}/query"),
+        "get notes count",
+        "\"count\":0",
     );
     until_placed(p.standby, "acme", "n1");
     until_placed(p.standby, &beta, "n1");

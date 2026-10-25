@@ -473,6 +473,14 @@ fn a_region_cut_off_keeps_writing_and_fails_over_inside_itself() {
     until("the standby's directory arrives", || {
         query(w.standby, "acme", r#"put notes {title: "standby"}"#).0 == 200
     });
+    // Its copy on us2 holds them, its primary's image taken: the failover
+    // below promotes it. A copy that has not is of a lineage of its own,
+    // which its node refuses to promote (409), and cut off from us1 it
+    // never takes the image: acme stayed on us1.
+    until("acme's copy on us2 holds its writes", || {
+        let (status, rows) = query(w.us_nodes[1].port, "acme", "get notes select title");
+        status == 200 && rows.contains("\"standby\"")
+    });
     // The global directory names its region and no node; us's router has
     // the placement.
     let (_, list) = shard(w.global, "GET", "/_shard/tenants", "");
