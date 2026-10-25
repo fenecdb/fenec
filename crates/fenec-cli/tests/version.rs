@@ -87,6 +87,21 @@ fn a_version_after_a_file_answers_and_opens_it_not() {
 }
 
 #[test]
+fn minus_c_takes_a_v_as_its_text() {
+    // `-c -V` is a statement that reads "-V", run as any other text is (and
+    // refused, since it is none), not a version asked for.
+    let dir = Dir::new("text");
+    let out = fenec(&dir.0, &["-c", "-V"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(
+        !text(&out.stdout).contains(env!("CARGO_PKG_VERSION")),
+        "{}",
+        text(&out.stdout)
+    );
+    assert!(!text(&out.stderr).is_empty());
+}
+
+#[test]
 fn version_without_dashes_is_still_a_file() {
     let dir = Dir::new("word");
     let out = fenec(&dir.0, &["version", "-c", "create collection t (n int)"]);

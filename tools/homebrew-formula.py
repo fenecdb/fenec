@@ -69,10 +69,11 @@ end
 
 # The first release whose binaries take `--version`: each says
 # `<name> <version>` on stdout and exits 0. The formula of a release before it
-# -- the tap's 0.1.12, or one written again for an older tag -- must still
-# pass `brew test`, so it reads the version where those binaries put it, the
-# first line of `fenec-server --help`, on stderr; `fenec --version` there is
-# an unknown option. tools/linux-packages-check.sh cuts over at the same
+# -- whichever of those the tap holds, or one written again for an older tag
+# -- must still pass `brew test`, so it reads the version where those
+# binaries put it, the first line of `fenec-server --help`, on stderr;
+# `fenec --version` there is an unknown option, and that formula comes out as
+# it did before the flag. tools/linux-packages-check.sh cuts over at the same
 # release.
 VERSION_FLAG = (0, 1, 13)
 

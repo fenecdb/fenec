@@ -87,9 +87,10 @@ class Render(unittest.TestCase):
 
 class TestDo(unittest.TestCase):
     """The formula's `test do`: a release's binaries asked what they have.
-    `--version` came with 0.1.13; a formula for a release before it, the
-    tap's 0.1.12 among them, reads the first line of `fenec-server --help`,
-    or `brew test` would fail on a binary that refuses the flag."""
+    `--version` came with 0.1.13; a formula for a release before it, which
+    the tap may hold or the release job may write again, reads the first
+    line of `fenec-server --help`, or `brew test` would fail on a binary
+    that refuses the flag."""
 
     def block_of(self, version):
         text = formula.render(version, formula.parse_sums(sums(version)))
@@ -131,10 +132,10 @@ class TestDo(unittest.TestCase):
         self.assertTrue(formula.has_version_flag("0.1.13"))
         self.assertTrue(formula.has_version_flag("0.10.0"))
 
-    def test_the_tap_formula_of_0_1_12_is_written_as_before(self):
-        # The text 0.1.12's formula had, byte for byte, before the flag: the
-        # tap holds it, and a run of the release job again for v0.1.12 must
-        # not change it.
+    def test_a_formula_from_before_the_flag_is_written_as_before(self):
+        # The text 0.1.12's formula had, byte for byte, before the flag: a
+        # formula for a release without it, in the tap or written again for
+        # its tag, must not change.
         block = self.block_of("0.1.12")
         self.assertEqual(
             block,

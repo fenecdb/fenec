@@ -58,3 +58,17 @@ fn a_version_among_the_flags_opens_no_directory() {
     );
     assert!(left.is_empty(), "{left:?}");
 }
+
+#[test]
+fn a_flags_value_is_not_the_flag() {
+    // `--token -V` is a token that reads "-V", not a version asked for: the
+    // router goes on to its start, here refused by the flag after.
+    let out = shard(&["--token", "-V", "--no-such-flag"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "");
+    assert!(
+        text(&out.stderr).contains("unknown option: --no-such-flag"),
+        "{}",
+        text(&out.stderr)
+    );
+}

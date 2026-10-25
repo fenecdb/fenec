@@ -26,11 +26,22 @@
 
 set -eu
 
-# at_least X.Y.Z[-pre] A.B.C: whether the first, any pre-release part left
-# out, is A.B.C or later, compared number by number (0.1.9 is before 0.1.13).
+# at_least VERSION A.B.C: whether VERSION, what follows a `-`, `~` or `+` in
+# it left out (0.2.0-rc1, a package's 0.2.0~rc1, a build's +meta), is A.B.C
+# or later, compared number by number (0.1.9 is before 0.1.13). Either one
+# not three numbers is refused, rather than read: `[` taking `12~rc1` for a
+# number errs, and the comparison went on past it to a yes.
 at_least() {
-    have=${1%%-*}
-    want=$2
+    have=${1%%[-~+]*}
+    want=${2%%[-~+]*}
+    for v in "$have" "$want"; do
+        case $v in
+            *[!0-9.]* | .* | *. | *..* | *.*.*.*) ;;
+            *.*.*) continue ;;
+        esac
+        echo "not a version of three numbers: [$v], from [$1] or [$2]" >&2
+        exit 2
+    done
     for _ in 1 2 3; do
         h=${have%%.*}
         w=${want%%.*}
