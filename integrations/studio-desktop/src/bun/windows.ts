@@ -72,7 +72,8 @@ export type StudioWindow = { win: BrowserWindow; view: BrowserView };
  * So the window is made with no page, and the view is made in it with a store
  * of its own: `persist:remote-<id>` for a saved server (kept between runs, and
  * apart from every other saved server's), a name without `persist:` for a file
- * (a store that exists only for this window).
+ * (a store that exists only for this window). The window's own view is removed
+ * first, which costs nothing: with it kept, idle memory was 20 MB more.
  */
 export async function openStudioWindow(opts: { key: string; title: string; session: StudioSession; partition: string }): Promise<StudioWindow> {
 	const { origin } = opts.session;
@@ -82,6 +83,10 @@ export async function openStudioWindow(opts: { key: string; title: string; sessi
 	const extra = __TESTABLE__ ? (await import("./testhooks.ts")).pagePreload(origin) : "";
 	const f = frame(1280, 820);
 	const win = new BrowserWindow({ title: opts.title, url: null, html: null, frame: f, sandbox: true, allowedProtocols: { views: false, appData: false } });
+	// The window's own view, blank and in the shared store, is not wanted under
+	// the page's: it would be a second web view per window for nothing, and the
+	// shared store is the one thing this is made to avoid.
+	win.webview?.remove();
 	const view = new BrowserView({
 		url: `${origin}/_studio/`,
 		preload: sessionPreload(opts.session) + extra,

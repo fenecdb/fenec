@@ -14,14 +14,32 @@
 import Electrobun, { Utils } from "electrobun/main";
 import { anythingOpen, isQuitting, openFile, serversBusy, stopAll } from "./app.ts";
 import { startMenu } from "./menu.ts";
-import { showLauncher } from "./pages.ts";
+import { closeLauncher, showLauncher } from "./pages.ts";
 import { strays } from "./registry.ts";
+
+const started = Date.now();
+/** The launcher was shown because nothing else was opening, not because someone asked for it. */
+let autoLauncher = false;
+/** A file was handed over by the system (Finder), and when. */
+let handedOver = false;
+const AUTO_LAUNCHER_GRACE_MS = 5000;
 
 // Finder: a .fenec file double-clicked (macOS; Info.plist from app.fileAssociations).
 Electrobun.events.on("open-url", (event: any) => {
 	const url = String(event?.data?.url ?? "");
 	if (__TESTABLE__) void import("./testhooks.ts").then((h) => h.report("open-url", { url }));
-	if (url.startsWith("file:")) void openFile(decodeURIComponent(new URL(url).pathname));
+	if (url.startsWith("file:")) {
+		// The test variant can hold the event back, as a slow launch does.
+		const hold = __TESTABLE__ ? Number(process.env["FENEC_DESKTOP_HOLD_OPEN_URL"] ?? 0) : 0;
+		setTimeout(() => {
+			// A file handed over after the launcher was shown on its own (the launch
+			// was slow, and the 400 ms below was not enough) is what the launch was
+			// for: the launcher, which nobody has had time to use, is closed.
+			handedOver = true;
+			if (autoLauncher && Date.now() - started < AUTO_LAUNCHER_GRACE_MS) closeLauncher();
+			void openFile(decodeURIComponent(new URL(url).pathname));
+		}, hold);
+	}
 });
 
 // The Dock icon clicked with no window open.
@@ -58,4 +76,9 @@ if (__TESTABLE__) {
 // A launch from Finder with a file arrives as `open-url` a moment after the
 // process starts: wait for it before showing the launcher over the file's window.
 if (!opened) await Bun.sleep(400);
-if (!opened && !anythingOpen()) await showLauncher();
+if (!opened && !anythingOpen()) {
+	autoLauncher = true;
+	await showLauncher();
+	// The file may have come while the launcher was being made.
+	if (handedOver) closeLauncher();
+}

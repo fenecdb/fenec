@@ -195,8 +195,9 @@ option, so the window is made with no page and the view made in it with one
 `persist:` is `nonPersistentDataStore`, one store for that window, which a file
 gets; `persist:remote-<id>` is `dataStoreForIdentifier`, kept between runs and
 apart from every other saved server's, cleared with `Session.clearStorageData`
-when the connection is removed. The window keeps the blank view Electrobun made
-for it, under the page's. `checks/storage.mjs` holds it: two saved servers on one
+when the connection is removed. The blank view Electrobun made for the window is
+removed (`win.webview.remove()`; kept, idle memory was about 20 MB more, a second
+WebKit view per window). `checks/storage.mjs` holds it: two saved servers on one
 address do not share, a saved server's survives its window, a file's does not,
 the page is the window's size and has focus.
 
@@ -327,7 +328,14 @@ that maps it, so a total is an upper bound, and a window is a server process:
 the server's share is per open file. Not taken again: the first launch from the
 DMG (3.7 s, n=1, in the spike) and the 100 000 x 128 file with a graph (64 MB,
 server 145 MB, total 392 MB there). The figures are the test variant's, which is
-the shipped app plus the hooks (10 KB of JavaScript).
+the shipped app plus the hooks (10 KB of JavaScript). They are of the window as it was
+before each got a data store of its own (a window with no page, and the page's
+view made in it). The two were measured side by side afterwards, the commit
+before and this one, interleaved, on a Mac whose load other jobs moved between
+2 and 25: launch to the studio and idle memory are the same within that noise
+(for the 50-row file, idle RSS 215-246 MB before and 212-219 MB after, medians of
+five); with the window's own blank view left under the page's it was about 20 MB
+more, which is why it is removed.
 
 ## deploy
 

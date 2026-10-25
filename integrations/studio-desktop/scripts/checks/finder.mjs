@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { APP, CONTROL, REPORT, R, assertClean, data, logName, quit, step, waitFor, waitStudio, log } from './lib.mjs';
+import { APP, CONTROL, REPORT, R, assertClean, cmd, data, lines, logName, quit, step, until, waitFor, waitStudio, log } from './lib.mjs';
 
 assertClean('before');
 const original = data('finder', 20);
@@ -16,21 +16,41 @@ mkdirSync(`${R}/data/with space`, { recursive: true });
 const FILE = `${R}/data/with space/şirket 1.fenec`;
 copyFileSync(original, FILE);
 
-step('open -a <the app> <file>, the app not running');
-logName('finder');
-rmSync(REPORT, { force: true });
-writeFileSync(CONTROL, '');
-const r = spawnSync('open', ['-a', APP, '--env', `FENEC_DESKTOP_REPORT=${REPORT}`, '--env', `FENEC_DESKTOP_CONTROL=${CONTROL}`, FILE], { encoding: 'utf8' });
-assert.equal(r.status, 0, r.stderr);
-const url = await waitFor((l) => l.what === 'open-url', 30000, 'the open-url event');
-log('arrived as', url.url);
-assert.ok(url.url.startsWith('file://'));
-const started = await waitFor((l) => l.what === 'server-started', 20000, 'the server for it');
-assert.equal(started.path, FILE);
-await waitStudio(`file:${FILE}`);
-// With a file to show, no launcher over it.
-assert.ok(!(await import('./lib.mjs')).lines().some((l) => l.what === 'page-text' && l.key === 'launcher'), 'no launcher window');
+/**
+ * `open -a <the app> <file>`, the app not running; `hold` is how long the test
+ * variant holds the file back, as a slow launch does (the app shows its
+ * launcher when nothing opens within 400 ms).
+ */
+async function launch(hold) {
+  logName('finder');
+  rmSync(REPORT, { force: true });
+  writeFileSync(CONTROL, '');
+  const env = ['--env', `FENEC_DESKTOP_REPORT=${REPORT}`, '--env', `FENEC_DESKTOP_CONTROL=${CONTROL}`, ...(hold ? ['--env', `FENEC_DESKTOP_HOLD_OPEN_URL=${hold}`] : [])];
+  const r = spawnSync('open', ['-a', APP, ...env, FILE], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const url = await waitFor((l) => l.what === 'open-url', 30000, 'the open-url event');
+  log('arrived as', url.url);
+  assert.ok(url.url.startsWith('file://'));
+  const started = await waitFor((l) => l.what === 'server-started', 30000, 'the server for it');
+  assert.equal(started.path, FILE);
+  await waitStudio(`file:${FILE}`);
+  // With a file to show, no launcher over it: none was shown, or, if the file was
+  // handed over after it had been (a slow launch), it is closed once it is.
+  await until(async () => {
+    const n = lines().length;
+    cmd({ cmd: 'sessions' });
+    const seen = await waitFor((l, i) => i >= n && l.what === 'sessions', 5000, 'sessions');
+    return !seen.pages.includes('launcher');
+  }, 15000, 'no launcher window over the file');
+  return lines().some((l) => l.what === 'page-text' && l.key === 'launcher');
+}
 
+step('open -a <the app> <file>, the app not running');
+await launch(0);
+await quit({ exited: Promise.resolve() });
+
+step('the same, the file handed over late: the launcher was shown first, and is closed when the file comes');
+assert.equal(await launch(1500), true, 'the launcher was up before the file came (the test holds it back 1.5 s)');
 step('quit');
 await quit({ exited: Promise.resolve() });
 log('clean');

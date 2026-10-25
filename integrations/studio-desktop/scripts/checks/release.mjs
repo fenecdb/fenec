@@ -33,7 +33,7 @@ function bundle(app) {
   return read('bun/index.js');
 }
 
-const HOOKS = ['FENEC_DESKTOP_REPORT', 'FENEC_DESKTOP_CONTROL', 'FENEC_DESKTOP_OPEN', 'FENEC_DESKTOP_LAUNCHER', 'FENEC_SERVER_BIN', '"close-direct"', 'reaped-strays'];
+const HOOKS = ['FENEC_DESKTOP_REPORT', 'FENEC_DESKTOP_CONTROL', 'FENEC_DESKTOP_OPEN', 'FENEC_DESKTOP_LAUNCHER', 'FENEC_DESKTOP_HOLD_OPEN_URL', 'FENEC_SERVER_BIN', '"close-direct"', 'reaped-strays'];
 
 const shipped = bundle(release);
 const testing = existsSync(test) ? bundle(test) : null;

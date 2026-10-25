@@ -204,9 +204,8 @@ before would show the earlier file's history. So the window is made empty and
 its page's view is made in it (`windows.ts`) with a store of its own: a name
 without `persist:` for a file (a store that exists for the window), and
 `persist:remote-<id>` for a saved server (kept between runs, apart from every
-other saved server's, and cleared when the connection is removed). The window
-has a second, blank view under the page, which Electrobun makes for every
-window.
+other saved server's, and cleared when the connection is removed). Electrobun's
+own view of the window, blank and in the shared store, is removed first.
 
 **New database…** is a small window of the app's own (Electrobun has no save
 panel): the folder from the folder dialog, a name, and the app creates the
