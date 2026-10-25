@@ -385,6 +385,16 @@ names.](docs/design/access.md#tenant-binding)** `route_tenant` asks it,
 and no route below `/t/<t>/` may skip it; every tenant's database installs
 the `Check` hook (`Tenants::check_scoped_writes`).
 
+**[A token is taken only from the issuers, for the audiences and clients,
+a server was told.](docs/design/access.md#whom-a-token-is-for)**
+`Demands::whom` asks `iss`, `aud` (a text or a list) and `azp` (else
+`client_id`) in `Access::check`, after the signature and before a token is
+kept, so every route meets it through `authenticate`; a refusal is 401
+naming the check, never the token's value, and a server told none takes
+every token its keys sign. A policy names top-level claims alone, quoted
+where not a word (`claim_name`): a path into a nested object is refused at
+startup, never read.
+
 **[An empty token is no token.](docs/design/access.md#empty-tokens)**
 A variable set empty is unset (`env_secret`, fenec-shard's `env`); a token
 flag, a JWT secret's file or a key file given empty is refused at the

@@ -131,6 +131,20 @@ usage: fenec-server [options]
                             (--mint-token gives one an hour)
       --jwt-max-age <s>     refuse a token whose `exp` lies further ahead
                             than this (0 = no bound, the default)
+      --jwt-issuer <iss>    take only a token whose `iss` is this, as written
+                            (a trailing / and all); repeatable, any one of
+                            them. Without it, any issuer the keys sign for
+      --jwt-audience <aud>  take only a token whose `aud`, a text or a list,
+                            holds this; repeatable, any one of them. Without
+                            it, any audience. Set both whenever the keys
+                            sign tokens for more than one app: a Cloudflare
+                            Access team, a Cognito pool, an Auth0 tenant
+      --jwt-client <id>     take only a token whose `azp` -- or `client_id`
+                            where it has none, as Cognito's access tokens,
+                            which have no `aud` -- is this; repeatable
+                            A token these refuse is 401 naming the check
+      --jwt-role-claim <name>  the claim a rule's `for <role>` reads, a text
+                            or a list holding the role  default: role
       --jwt-tenant-claim <name>  with --dir, the claim naming the tenant a
                             token is for: it reaches /t/<t>/ only when the
                             claim names <t> (a text, or a list holding it)
@@ -146,10 +160,17 @@ usage: fenec-server [options]
                             [for <role>], the grants read, insert, update,
                             delete and write (all three) joined by commas;
                             `<collection> append-only` refuses every
-                            update and delete a token asks for there
+                            update and delete a token asks for there. A
+                            claim is $jwt.<name>, or $jwt.\"<name>\" for a
+                            name of other characters ($jwt.\"cognito:groups\"),
+                            a top-level one: a path into a nested object
+                            is refused
       --mint-token <claims> print a token for this JSON object of claims,
                             signed with the secret or the first `oct` key,
-                            and exit
+                            and exit. Claims naming no `exp` get one an
+                            hour away, and none naming `iss`, `aud` or
+                            `azp` the first --jwt-issuer, --jwt-audience or
+                            --jwt-client given
       --http-cors <origin>  `Access-Control-Allow-Origin` (e.g. * or
                             https://example.com). Without it, no CORS header
       --http-read-only      turn off writes
@@ -283,6 +304,16 @@ fn fail(msg: &str) -> ! {
 /// deployment's environment file leaves a line it does not use.
 fn env_secret(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|t| !t.is_empty())
+}
+
+/// What a JWT flag was told, refused at the start where it is empty.
+fn told(value: &str, flag: &str) -> String {
+    if value.is_empty() {
+        fail(&format!(
+            "{flag} is empty -- a variable given it unset? Give it a value, or leave the flag out"
+        ));
+    }
+    value.to_string()
 }
 
 /// Whether `path` is this process's stdin by any name: `/dev/stdin` or
@@ -560,6 +591,21 @@ fn main() {
             }
             "--jwt-tenant-claim" => demands.tenant_claim = next(&mut i, "--jwt-tenant-claim"),
             "--jwt-unbound-tenants" => demands.unbound_tenants = true,
+            // Given empty -- `--jwt-audience "$AUD"` with AUD unset -- each
+            // is refused at the start: a server told `""` would take no
+            // token, and none told would take every one.
+            "--jwt-issuer" => demands
+                .issuers
+                .push(told(&next(&mut i, "--jwt-issuer"), "--jwt-issuer")),
+            "--jwt-audience" => demands
+                .audiences
+                .push(told(&next(&mut i, "--jwt-audience"), "--jwt-audience")),
+            "--jwt-client" => demands
+                .clients
+                .push(told(&next(&mut i, "--jwt-client"), "--jwt-client")),
+            "--jwt-role-claim" => {
+                demands.role_claim = told(&next(&mut i, "--jwt-role-claim"), "--jwt-role-claim")
+            }
             "--jwt-max-age" => {
                 let v = next(&mut i, "--jwt-max-age");
                 let secs: u64 = v

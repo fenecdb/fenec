@@ -66,6 +66,11 @@ These are deliberate, and README explains each one:
 - **`--jwt-unbound-tenants` takes a token naming no tenant for every tenant**
   of a `--dir` node. By default such a token is refused there (403), and a
   token naming a tenant reaches that tenant alone.
+- **Without `--jwt-issuer` and `--jwt-audience`, every token the keys sign
+  is taken.** An identity provider's keys sign tokens for every app of its
+  tenant, pool or team; told an issuer and an audience (or `--jwt-client`),
+  the server refuses the tokens issued for another (401). Leaving them out
+  where the keys sign for more than one app is the operator's call.
 - **A score is of the rows the request may read.** A scoped token's
   `match` takes BM25's statistics over the rows its filter selects, so its
   scores say nothing of rows it cannot read; the server's own token scores

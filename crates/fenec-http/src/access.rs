@@ -20,10 +20,15 @@
 //! ```
 //!
 //! A rule without `for` applies to every token; one with it, to tokens whose
-//! `role` claim names that role (a text, or a list holding it). Rules on one
-//! collection widen each other, as permissive policies do. A collection no
-//! rule grants a token anything does not exist as far as that token can
-//! tell.
+//! `role` claim -- or the claim `--jwt-role-claim` names -- names that role
+//! (a text, or a list holding it). Rules on one collection widen each other,
+//! as permissive policies do. A collection no rule grants a token anything
+//! does not exist as far as that token can tell.
+//!
+//! **A claim's name** is letters, digits and `_` as they stand
+//! (`$jwt.sub`), or any other in double quotes: `$jwt."cognito:groups"`,
+//! `$jwt."https://example.com/roles"`. A top-level claim alone: a path into
+//! a nested object is refused ([`claim_name`] says why).
 //!
 //! **Grants** are `read`, `insert`, `update` and `delete`, and `write` is
 //! the three writes. `update(balance, held)` grants an update of those
@@ -160,6 +165,16 @@
 //! rotation: add the new key, sign with it, and take the old one out once
 //! the tokens it signed have expired. A file that no longer reads keeps the
 //! keys read last.
+//!
+//! **Whom a token is for.** A provider's keys sign every token it issues,
+//! for every app of a tenant, team or pool: a good signature says who
+//! issued a token, not that it was issued for this database. Told issuers,
+//! audiences or clients ([`Demands`]: `--jwt-issuer`, `--jwt-audience`,
+//! `--jwt-client`), the server takes only a token whose `iss` is one of
+//! them, whose `aud` (a text or a list) holds one, whose `azp` -- or
+//! `client_id`, where it names no `azp` -- is one; told none, it asks
+//! nothing of them, as before. A refusal is 401 naming the check, never the
+//! token's value.
 
 use crate::crypto::{b64url_decode, b64url_encode, ct_eq, hmac_sha256, RsaKey};
 use fenec_core::prelude::*;
@@ -237,6 +252,28 @@ pub struct Demands {
     /// there: a policy's `owner = $jwt.sub` matches the same user in every
     /// tenant's file, so a token for one tenant read every other.
     pub unbound_tenants: bool,
+    /// The issuers a token's `iss` must be one of (`--jwt-issuer`); none
+    /// asks nothing of it. A provider's keys sign every token it issues:
+    /// one key file read by servers of more than one provider's -- an `oct`
+    /// key shared, a file of several providers' keys -- takes any of their
+    /// tokens. Compared as written, a trailing `/` and all (Auth0's issuer
+    /// ends in one).
+    pub issuers: Vec<String>,
+    /// The audiences a token's `aud` -- a text, or a list -- must hold one
+    /// of (`--jwt-audience`); none asks nothing of it. One issuer's keys
+    /// sign for every app it serves -- a Cloudflare Access team's every
+    /// application, a Cognito pool's every app client, an Auth0 tenant's
+    /// every API -- and a token for another is told apart by its `aud`.
+    pub audiences: Vec<String>,
+    /// The clients a token's `azp`, or its `client_id` where it names no
+    /// `azp`, must be one of (`--jwt-client`); none asks nothing of it.
+    /// Cognito's access tokens carry no `aud`, only the app client's id in
+    /// `client_id`; Auth0's, Keycloak's and Clerk's name the app in `azp`.
+    pub clients: Vec<String>,
+    /// The claim a rule's `for <role>` reads (`--jwt-role-claim`, `role`
+    /// unless told): a text, or a list holding the role. A provider names
+    /// its own -- Cognito's `cognito:groups`, Auth0's a namespaced URL.
+    pub role_claim: String,
 }
 
 impl Default for Demands {
@@ -246,7 +283,52 @@ impl Default for Demands {
             max_age: None,
             tenant_claim: "tenant".into(),
             unbound_tenants: false,
+            issuers: Vec::new(),
+            audiences: Vec::new(),
+            clients: Vec::new(),
+            role_claim: "role".into(),
         }
+    }
+}
+
+/// What a 401 says of a token the demands refuse: the check it failed,
+/// never the value the token holds -- which a refused request's own sender
+/// knows, and a log or a proxy in between need not.
+const NO_ISSUER: &str = "the token names no issuer (iss) this server takes";
+const NO_AUDIENCE: &str = "the token names no audience (aud) this server takes";
+const NO_CLIENT: &str = "the token names no client (azp, or client_id) this server takes";
+
+impl Demands {
+    /// Whether `claims` name an issuer, an audience and a client this
+    /// server takes, where it was told any. An empty text names none, as
+    /// an empty token is none: a server told `""` takes no token.
+    fn whom(&self, claims: &[(String, Value)]) -> std::result::Result<(), &'static str> {
+        let claim = |name: &str| claims.iter().find(|(k, _)| k == name).map(|(_, v)| v);
+        let one_of = |v: Option<&Value>, list: &[String]| match v {
+            Some(Value::Text(t)) => !t.is_empty() && list.iter().any(|x| x == t),
+            _ => false,
+        };
+        if !self.issuers.is_empty() && !one_of(claim("iss"), &self.issuers) {
+            return Err(NO_ISSUER);
+        }
+        if !self.audiences.is_empty() {
+            // RFC 7519: a list of texts, or a single text.
+            let held = match claim("aud") {
+                Some(Value::List(l)) => l.iter().any(|a| one_of(Some(a), &self.audiences)),
+                a => one_of(a, &self.audiences),
+            };
+            if !held {
+                return Err(NO_AUDIENCE);
+            }
+        }
+        // `azp` where the token names one: a token naming both is judged
+        // by the party it was issued to, not by a `client_id` beside it.
+        if !self.clients.is_empty()
+            && !one_of(claim("azp").or_else(|| claim("client_id")), &self.clients)
+        {
+            return Err(NO_CLIENT);
+        }
+        Ok(())
     }
 }
 
@@ -545,9 +627,14 @@ impl Access {
         })
     }
 
-    /// The same keys and policy, holding tokens to `demands`.
+    /// The same keys and policy, holding tokens to `demands`. A token kept
+    /// passed the demands it was checked under ([`Access::check`]), so
+    /// those kept are let go.
     pub fn demanding(mut self, demands: Demands) -> Access {
         self.demands = demands;
+        for v in &self.verified {
+            v.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        }
         self
     }
 
@@ -584,16 +671,42 @@ impl Access {
     /// prints.
     /// Signed with the first HS256 key, its `kid` named. Claims naming no
     /// `exp` get one [`MINTED_FOR`] seconds from now: a server refuses a
-    /// token without one ([`Demands::require_exp`]).
+    /// token without one ([`Demands::require_exp`]). On a server told an
+    /// issuer, an audience or a client, claims naming none get the first
+    /// it was told (`iss`, `aud`, `azp`), or it would refuse the token it
+    /// minted.
     pub fn mint(&self, claims: &str) -> std::result::Result<String, String> {
         let parsed = fenec_core::json::parse_object(claims).map_err(|e| e.to_string())?;
+        let mut more = String::new();
+        let mut stamp = |name: &str, value: &str| {
+            if !parsed.iter().any(|(k, _)| k == name) {
+                more.push_str(&format!(",\"{name}\":{value}"));
+            }
+        };
+        stamp("exp", &(unix_now() + MINTED_FOR).to_string());
+        let d = &self.demands;
+        for (name, told) in [
+            ("iss", &d.issuers),
+            ("aud", &d.audiences),
+            ("azp", &d.clients),
+        ] {
+            if let Some(first) = told.first() {
+                let mut text = String::new();
+                fenec_core::json::escape_into(&mut text, first);
+                stamp(name, &text);
+            }
+        }
         let stamped;
-        let claims = if parsed.iter().any(|(k, _)| k == "exp") {
+        let claims = if more.is_empty() {
             claims
         } else {
             let open = claims.trim().strip_suffix('}').unwrap_or("{").trim_end();
-            let comma = if open.ends_with('{') { "" } else { "," };
-            stamped = format!(r#"{open}{comma}"exp":{}}}"#, unix_now() + MINTED_FOR);
+            let more = if open.ends_with('{') {
+                &more[1..]
+            } else {
+                &more
+            };
+            stamped = format!("{open}{more}}}");
             &stamped
         };
         let keys = self.keys.read().unwrap_or_else(|e| e.into_inner()).clone();
@@ -621,8 +734,9 @@ impl Access {
     pub fn scope(&self, token: &str, now: u64) -> std::result::Result<Scope, &'static str> {
         let claims = self.verify(token, now)?;
         let claim = |name: &str| claims.iter().find(|(k, _)| k == name).map(|(_, v)| v);
-        // A role is a text, or a list of them, the token holding each.
-        let has_role = |role: &str| match claim("role") {
+        // A role is a text, or a list of them, the token holding each, in
+        // the claim the server reads roles from (`role` unless told).
+        let has_role = |role: &str| match claim(&self.demands.role_claim) {
             Some(Value::Text(r)) => r == role,
             Some(Value::List(l)) => l.iter().any(|v| v.as_text() == Some(role)),
             _ => false,
@@ -800,6 +914,11 @@ impl Access {
             });
         }
         let claims = Arc::new(object(body)?);
+        // Asked once, before the token is kept, as its signature is: the
+        // demands are fixed with the `Access`, unlike the time `exp` is
+        // asked against. After the signature, so a token no key signed is
+        // told nothing of what this server takes.
+        self.demands.whom(&claims)?;
         let mut kept = self.verified[shard(token)]
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -924,13 +1043,7 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         let mut s = text;
         while let Some(at) = s.find("$jwt.") {
             out.push_str(&s[..at]);
-            let name: String = s[at + 5..]
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            if name.is_empty() {
-                return Err("`$jwt.` names no claim".into());
-            }
+            let (name, len) = claim_name(&s[at + 5..])?;
             let k = match claims.iter().position(|c| *c == name) {
                 Some(k) => k,
                 None => {
@@ -949,7 +1062,7 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
             } else {
                 out.push_str(&format!("${}", k + 1));
             }
-            s = &s[at + 5 + name.len()..];
+            s = &s[at + 5 + len..];
         }
         out.push_str(s);
         let stmt = fenec_ql::parse_one(&format!("get _ where {out}"))
@@ -1056,6 +1169,67 @@ fn usable(v: &Value, list: bool) -> bool {
         Value::List(items) => list && items.iter().all(|i| usable(i, false)),
         _ => false,
     }
+}
+
+/// The claim `$jwt.` names at the start of `rest`, and the bytes it takes
+/// there: letters, digits and `_` as they stand (`$jwt.sub`), or any other
+/// name in double quotes -- `$jwt."cognito:groups"`, `$jwt."https://example.com/roles"`
+/// -- where a `.`, a `:` or a `/` is part of the name, never a path.
+///
+/// A top-level claim alone. A path into a nested object
+/// (`$jwt.app_metadata.role`) is refused rather than read: providers keep
+/// what a user may edit of themselves in such objects (Supabase's and
+/// Auth0's `user_metadata`) beside what only the app may (`app_metadata`),
+/// a word apart in a rule, and one reading the wrong object lets a user
+/// grant themselves its rows. A claim at the top is one the provider was told to
+/// sign there.
+fn claim_name(rest: &str) -> std::result::Result<(String, usize), String> {
+    let (name, len) = match rest.strip_prefix('"') {
+        Some(quoted) => {
+            let close = quoted
+                .find('"')
+                .ok_or("`$jwt.\"` is not closed: a quoted claim is `$jwt.\"<name>\"`")?;
+            let name = &quoted[..close];
+            // A token's member names are read unescaped; one holding `"`
+            // or `\` is no provider's, and a policy that could write one
+            // would be read two ways.
+            if name.contains('\\') {
+                return Err(format!(
+                    "`$jwt.\"{name}\"`: a quoted claim name is taken as written, with no `\\`"
+                ));
+            }
+            (name.to_string(), close + 2)
+        }
+        None => {
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            let len = name.len();
+            (name, len)
+        }
+    };
+    if name.is_empty() {
+        let why = "`$jwt.` names no claim: `$jwt.sub`, or `$jwt.\"cognito:groups\"` for a name \
+                   of other characters";
+        return Err(why.into());
+    }
+    let path = rest[len..]
+        .strip_prefix('.')
+        .is_some_and(|p| p.starts_with(|c: char| c.is_alphanumeric() || c == '_' || c == '"'));
+    if path {
+        let written: String = rest
+            .chars()
+            .take_while(|c| !c.is_whitespace() && !matches!(c, ')' | ',' | ']'))
+            .collect();
+        return Err(format!(
+            "`$jwt.{written}`: a policy reads a token's top-level claims alone -- a nested \
+             object is where a provider keeps what a user may edit of themselves, and a path \
+             into it would let one grant themselves rows; have the provider sign the claim at \
+             the top of the token"
+        ));
+    }
+    Ok((name, len))
 }
 
 /// The collections the inner `get`s of a rule's filter read, at any depth,
@@ -2882,6 +3056,240 @@ mod tests {
                 };
                 assert!(admitted, "{e:?} as {loose:?} over {:?}", row.0);
             }
+        }
+    }
+
+    /// An HS256 token for `claims` exactly as given: `mint` stamps what
+    /// claims leave out.
+    fn signed(claims: &str) -> String {
+        let head = b64url_encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let body = b64url_encode(claims.as_bytes());
+        let sig = hmac_sha256(SECRET, format!("{head}.{body}").as_bytes());
+        format!("{head}.{body}.{}", b64url_encode(&sig))
+    }
+
+    /// Told issuers, audiences and clients, a token is taken only where it
+    /// names one of each; told none, whatever it names, or not.
+    #[test]
+    fn whom_a_token_is_for_is_asked_where_told() {
+        let told = |d: Demands| access("").demanding(d);
+        let ask = |a: &Access, claims: &str| a.verify(&signed(claims), 1_000).map(|_| ());
+        let iss = told(Demands {
+            issuers: vec!["https://a.example/".into(), "https://b.example".into()],
+            ..Demands::default()
+        });
+        assert_eq!(
+            ask(&iss, r#"{"iss":"https://a.example/","exp":2000}"#),
+            Ok(())
+        );
+        assert_eq!(
+            ask(&iss, r#"{"iss":"https://b.example","exp":2000}"#),
+            Ok(())
+        );
+        for wrong in [
+            r#"{"iss":"https://a.example","exp":2000}"#,
+            r#"{"iss":"https://c.example","exp":2000}"#,
+            r#"{"iss":["https://a.example/"],"exp":2000}"#,
+            r#"{"iss":null,"exp":2000}"#,
+            r#"{"exp":2000}"#,
+        ] {
+            assert_eq!(ask(&iss, wrong), Err(NO_ISSUER), "{wrong}");
+        }
+
+        let aud = told(Demands {
+            audiences: vec!["notes-api".into()],
+            ..Demands::default()
+        });
+        assert_eq!(ask(&aud, r#"{"aud":"notes-api","exp":2000}"#), Ok(()));
+        assert_eq!(
+            ask(&aud, r#"{"aud":["other","notes-api"],"exp":2000}"#),
+            Ok(())
+        );
+        for wrong in [
+            r#"{"aud":"other","exp":2000}"#,
+            r#"{"aud":["other"],"exp":2000}"#,
+            r#"{"aud":[],"exp":2000}"#,
+            r#"{"aud":{"notes-api":true},"exp":2000}"#,
+            r#"{"exp":2000}"#,
+        ] {
+            assert_eq!(ask(&aud, wrong), Err(NO_AUDIENCE), "{wrong}");
+        }
+
+        // `azp` where the token names one, `client_id` (Cognito's access
+        // tokens) where it names none.
+        let client = told(Demands {
+            clients: vec!["app-1".into()],
+            ..Demands::default()
+        });
+        assert_eq!(ask(&client, r#"{"azp":"app-1","exp":2000}"#), Ok(()));
+        assert_eq!(ask(&client, r#"{"client_id":"app-1","exp":2000}"#), Ok(()));
+        for wrong in [
+            r#"{"azp":"app-2","client_id":"app-1","exp":2000}"#,
+            r#"{"client_id":"app-2","exp":2000}"#,
+            r#"{"aud":"app-1","exp":2000}"#,
+        ] {
+            assert_eq!(ask(&client, wrong), Err(NO_CLIENT), "{wrong}");
+        }
+
+        // An empty text names nothing: a server told one takes no token.
+        let empty = told(Demands {
+            issuers: vec![String::new()],
+            ..Demands::default()
+        });
+        assert_eq!(ask(&empty, r#"{"iss":"","exp":2000}"#), Err(NO_ISSUER));
+
+        // Told none, nothing is asked of them.
+        let open = access("");
+        assert_eq!(
+            ask(&open, r#"{"iss":5,"aud":{},"azp":[],"exp":2000}"#),
+            Ok(())
+        );
+
+        // A token kept before the demands were is let go by them.
+        let a = access("");
+        let t = signed(r#"{"iss":"https://c.example","exp":2000}"#);
+        assert!(a.verify(&t, 1_000).is_ok());
+        let a = a.demanding(Demands {
+            issuers: vec!["https://a.example/".into()],
+            ..Demands::default()
+        });
+        assert_eq!(a.verify(&t, 1_000).unwrap_err(), NO_ISSUER);
+
+        // A refusal names the check, never the value the token holds.
+        for why in [NO_ISSUER, NO_AUDIENCE, NO_CLIENT] {
+            assert!(!why.contains("example") && !why.contains("app-"), "{why}");
+        }
+
+        // A token minted here is one the server takes: the first of each
+        // stamped where the claims name none, never over one they name.
+        let all = told(Demands {
+            issuers: vec!["https://a.example/".into()],
+            audiences: vec!["notes-api".into(), "x".into()],
+            clients: vec!["app-1".into()],
+            ..Demands::default()
+        });
+        let minted = all.mint(r#"{"sub":"alice"}"#).unwrap();
+        assert!(all.verify(&minted, unix_now()).is_ok());
+        let body = minted.split('.').nth(1).unwrap();
+        let body = String::from_utf8(b64url_decode(body).unwrap()).unwrap();
+        assert!(
+            body.contains(r#""iss":"https://a.example/""#)
+                && body.contains(r#""aud":"notes-api""#)
+                && body.contains(r#""azp":"app-1""#),
+            "{body}"
+        );
+        let other = all.mint(r#"{"sub":"alice","aud":"y"}"#).unwrap();
+        assert_eq!(all.verify(&other, unix_now()).unwrap_err(), NO_AUDIENCE);
+        assert!(all.mint("{}").is_ok() && all.mint(" { } ").is_ok());
+    }
+
+    /// `for <role>` reads the claim the server names, a text or a list
+    /// holding the role; `role` unless told.
+    #[test]
+    fn a_role_is_read_from_the_claim_named() {
+        let policy = "notes read for editors\n";
+        let reads = |a: &Access, claims: &str| {
+            a.scope(&a.mint(claims).unwrap(), 0)
+                .unwrap()
+                .readable("notes")
+        };
+        let plain = access(policy);
+        assert!(reads(&plain, r#"{"sub":"a","role":"editors"}"#));
+        assert!(reads(&plain, r#"{"sub":"a","role":["x","editors"]}"#));
+        assert!(!reads(
+            &plain,
+            r#"{"sub":"a","cognito:groups":["editors"]}"#
+        ));
+        let groups = access(policy).demanding(Demands {
+            role_claim: "cognito:groups".into(),
+            ..Demands::default()
+        });
+        assert!(reads(
+            &groups,
+            r#"{"sub":"a","cognito:groups":["editors"]}"#
+        ));
+        assert!(reads(&groups, r#"{"sub":"a","cognito:groups":"editors"}"#));
+        // The claim named, and no other: `role` is a claim like any there.
+        assert!(!reads(&groups, r#"{"sub":"a","role":"editors"}"#));
+        assert!(!reads(
+            &groups,
+            r#"{"sub":"a","cognito:groups":["readers"]}"#
+        ));
+        // Neither a number nor an object compared as text.
+        assert!(!reads(
+            &groups,
+            r#"{"sub":"a","cognito:groups":{"editors":1}}"#
+        ));
+    }
+
+    /// `$jwt."<name>"` names a claim of any characters, top-level; a path
+    /// into a nested one is refused at startup.
+    #[test]
+    fn a_quoted_claim_name_is_read_whole() {
+        let a = access(
+            "notes read where team in $jwt.\"cognito:groups\"\n\
+             posts read,write where owner = $jwt.\"https://example.com/user\" and org = $jwt.org\n\
+             docs read where owner = $jwt.\"sub\"\n",
+        );
+        let s = a
+            .scope(
+                &a.mint(
+                    r#"{"sub":"alice","org":"o1","cognito:groups":["t1","t2"],"https://example.com/user":"u9"}"#,
+                )
+                .unwrap(),
+                0,
+            )
+            .unwrap();
+        let Some(Some(Expr::In(_, items))) = s.filter("notes", READ) else {
+            panic!("an in list");
+        };
+        assert_eq!(
+            items,
+            vec![
+                Expr::Lit(Value::Text("t1".into())),
+                Expr::Lit(Value::Text("t2".into()))
+            ]
+        );
+        let Some(Some(Expr::And(owner, _))) = s.filter("posts", INSERT) else {
+            panic!("an and");
+        };
+        let Expr::Cmp(CmpOp::Eq, _, v) = *owner else {
+            panic!("owner = ...");
+        };
+        assert_eq!(*v, Expr::Lit(Value::Text("u9".into())));
+        let Some(Some(Expr::Cmp(CmpOp::Eq, _, v))) = s.filter("docs", READ) else {
+            panic!("owner = ...");
+        };
+        assert_eq!(*v, Expr::Lit(Value::Text("alice".into())));
+        // `$jwt."sub"` and `$jwt.sub` are one claim, one parameter.
+        let r = rule(r#"notes read where owner = $jwt."sub" or editor = $jwt.sub"#).unwrap();
+        assert_eq!(r.claims, vec!["sub".to_string()]);
+        // A dot inside the quotes is part of the name.
+        let r = rule(r#"notes read where owner = $jwt."a.b""#).unwrap();
+        assert_eq!(r.claims, vec!["a.b".to_string()]);
+
+        for (bad, says) in [
+            ("notes read where x = $jwt.app_metadata.role", "top-level"),
+            (
+                r#"notes read where x = $jwt."app_metadata".role"#,
+                "top-level",
+            ),
+            (
+                r#"notes read where x = $jwt.app_metadata."role""#,
+                "top-level",
+            ),
+            (
+                r#"notes read where x in $jwt."https://x/".roles"#,
+                "top-level",
+            ),
+            (r#"notes read where x = $jwt."open"#, "not closed"),
+            (r#"notes read where x = $jwt."""#, "names no claim"),
+            (r#"notes read where x = $jwt."a\"b""#, "no `\\`"),
+            ("notes read where x = $jwt.", "names no claim"),
+            ("notes read where x = $jwt.'sub'", "names no claim"),
+        ] {
+            let e = Access::new(SECRET, bad).err().unwrap_or_default();
+            assert!(e.contains(says), "{bad}: {e}");
         }
     }
 

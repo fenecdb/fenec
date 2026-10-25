@@ -1,6 +1,6 @@
 # Access
 
-The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *Access*: scoped tokens, field lists, rules reading another collection, a token bound to its tenant, and empty tokens. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *Access*: scoped tokens, field lists, rules reading another collection, a token bound to its tenant, whom a token is for, and empty tokens. Each section below but *Whom a token is for*, added after the move, is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Scoped tokens
 
@@ -342,6 +342,76 @@ held it. A tenant's
 database installs the `Check` hook as a single one does
 (`Tenants::check_scoped_writes`, from `Server::with_tenants`): none did,
 and a scoped write to a tenant went unchecked.
+
+## Whom a token is for
+
+**A token is taken only from the issuers, for the audiences and clients, a
+server was told** (`Demands::whom`, `--jwt-issuer`, `--jwt-audience`,
+`--jwt-client`). A good signature says who issued a token, not whom for:
+an identity provider's keys sign every token it issues, and the recipes for
+Clerk, Auth0, Supabase Auth, Cognito and Cloudflare Access found each
+signing for more than one app under one set of keys -- a Cloudflare Access
+team's keys sign every application's token, a Cognito pool's every app
+client's, an Auth0 tenant's every API's and every application's ID tokens
+-- so a token a user was given for another app read this database under
+its policy. The policy could pin it (`'<tag>' in $jwt.aud` in every rule),
+which a rule forgotten, or a new one, left open, and nothing pinned the
+issuer. Told issuers, `iss` must be one of them; told audiences, `aud`, a
+text or a list (RFC 7519 allows both), must hold one; told clients, `azp`
+must be one of them or, where the token names no `azp`, `client_id`.
+Cognito's access tokens carry the app client's id in `client_id` and no
+`aud`, so `--jwt-audience` alone would refuse them; Auth0's, Keycloak's and
+Clerk's name the party in `azp` (Clerk's session tokens have no `aud`, and
+`azp` is the page's origin). A token naming both is judged by `azp`, the
+party it was issued to: the order is the claims', not a match on either.
+Okta's `cid` and other names stay a rule's (`$jwt.cid = "..."`), which
+applies to no token lacking the claim; a fourth spelling in the flag was
+not worth guessing at. Compared as written, as RFC 7519 compares a
+StringOrURI: `https://idp.example` is not `https://idp.example/` (Auth0's
+issuer ends in `/`), and a server that trimmed slashes or cases would take
+an issuer that differed. An empty text names nothing: a server told `""`
+takes no token rather than one whose claim is empty, the flags given empty
+are refused at the start (`told` in fenec-server's main), and a library
+`Demands` holding one refuses every token. Asked once a token, in
+`Access::check` after the signature -- so a token no key signed is told
+nothing of what the server takes -- and before it is kept in `verified`: a
+kept token passed them, the demands fixed with the `Access` (`demanding`
+lets the kept ones go). Every route reaches `Access::scope` through
+lib.rs's `authenticate` -- `/query`, REST, `/batch`, a subscription, MCP,
+`/_whoami`, a held write each time it runs -- and fenec-shard verifies no
+token, forwarding `Authorization` to the node that does. A refusal is 401
+naming the check (`NO_ISSUER`, `NO_AUDIENCE`, `NO_CLIENT`), never the
+value the token holds, which its sender knows and a log or proxy between
+need not. Told none, a server asks three `is_empty`s of a token's first
+check and takes what it took; told some, the first check scans the
+token's claims once more beside its signature's 2.9 us (HS256) or 38
+(RS256), and a kept token, every request after a client's first, pays
+nothing. `--mint-token` stamps the first issuer, audience and client told
+on claims naming none, as it stamps `exp`, or the server refused what it
+minted.
+
+`for <role>` reads the claim `--jwt-role-claim` names (`Demands::role_claim`,
+`role` unless told), a text or a list holding the role as `role` was, so a
+server told nothing reads roles as before; told another, `role` is a claim
+like any other there. Cognito puts groups in `cognito:groups`, Auth0 a
+namespaced URL. A policy names such a claim in double quotes
+(`$jwt."cognito:groups"`, `$jwt."https://example.com/roles"`,
+`claim_name`), a `.`, `:` or `/` inside part of the name; `$jwt.<name>`
+takes letters, digits and `_` as it did. A path into a nested object
+(`$jwt.app_metadata.role`) is refused at startup rather than read:
+Supabase and Auth0 keep what a user edits of themselves (`user_metadata`)
+beside what only the app may (`app_metadata`), one word apart in a rule, and
+a path into the wrong one is a user granting themselves rows; a claim at the
+top of the token is one the provider was told to sign there. Before this a
+path parsed as `$1.role`, a FenecQL error naming nothing of the cause. A
+quoted name holds no `\`: a token's member names are read unescaped, and a
+policy that could escape one would be read two ways. `tests/providers.rs`
+in fenec-http (every route, a refused token's 401 holding the check and not
+the value, `aud` as a text and a list, a client by `azp` or `client_id`, a
+role from a URL-named list, quoted claims in read and write rules, and the
+same server told nothing taking every token) and in fenec-server (the flags
+on the binary, `--mint-token`, the flags given empty and a nested claim
+refused at the start) fail without it.
 
 ## Empty tokens
 

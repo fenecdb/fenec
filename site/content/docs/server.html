@@ -70,6 +70,9 @@ href="/docs/sharding">Tenants and sharding</a>.</p>
 <tr><td><code>--http &lt;address&gt;</code></td><td>Where to listen. Default <code>127.0.0.1:8080</code>.</td></tr>
 <tr><td><code>--http-token &lt;value&gt;</code></td><td>Requires <code>Authorization: Bearer &lt;value&gt;</code>. Also read from <code>FENEC_HTTP_TOKEN</code>, since <code>argv</code> shows up in <code>ps</code>.</td></tr>
 <tr><td><code>--jwt-secret</code>, <code>--jwt-secret-file</code>, <code>--jwt-keys</code>, <code>--jwt-require-exp</code>, <code>--jwt-max-age</code>, <code>--jwt-tenant-claim</code>, <code>--jwt-unbound-tenants</code>, <code>--policy</code></td><td>Tokens held to rules: which collections, which rows (<a href="#security">Security</a>).</td></tr>
+<tr><td><code>--jwt-issuer &lt;iss&gt;</code>, <code>--jwt-audience &lt;aud&gt;</code></td><td>Takes only a token whose <code>iss</code> is one of the issuers given, and whose <code>aud</code> (a text or a list) holds one of the audiences given; each repeatable. A token refused is 401 naming the check. Without them any token the keys sign is taken, as before: set both whenever the keys sign tokens for more than one app (<a href="/docs/http-access#whom-a-token-is-for">Whom a token is for</a>).</td></tr>
+<tr><td><code>--jwt-client &lt;id&gt;</code></td><td>Takes only a token whose <code>azp</code>, or <code>client_id</code> where it names no <code>azp</code> (Cognito's access tokens, which carry no <code>aud</code>), is one of the clients given; repeatable.</td></tr>
+<tr><td><code>--jwt-role-claim &lt;name&gt;</code></td><td>The claim a rule's <code>for &lt;role&gt;</code> reads, a text or a list holding the role, such as <code>cognito:groups</code>. Default <code>role</code>.</td></tr>
 <tr><td><code>--sync off|always|&lt;ms&gt;</code></td><td>When writes reach the disk. Default <code>250</code> (<a href="#durability">Durability</a>).</td></tr>
 <tr><td><code>--no-checkpoint</code></td><td>Writes no checkpoint on shutdown.</td></tr>
 <tr><td><code>--exit-on-stdin-close</code></td><td>Shuts down as <code>SIGTERM</code> does once stdin ends. For an app that starts the server with a pipe on its stdin: however the app ends, <code>kill -9</code> too, the pipe closes and the server syncs, lets go of the file and exits 0. Stdin of <code>/dev/null</code> ends at once, and so does the server; a terminal is refused (<a href="#durability">Durability</a>).</td></tr>
@@ -160,7 +163,12 @@ secret, for testing, which expires in an hour unless the claims name an
 <code>exp</code>. A token with no <code>exp</code> is refused, since it
 would be good for ever (<code>--jwt-require-exp off</code> takes it), and
 <code>--jwt-max-age &lt;s&gt;</code> refuses one whose <code>exp</code> lies
-further ahead than that. On a <code>--dir</code> node a token reaches only
+further ahead than that. <code>--jwt-issuer</code> and
+<code>--jwt-audience</code> take only the tokens issued for this server --
+an identity provider's keys sign every token it issues, for every app --
+and <code>--jwt-role-claim</code> names the claim <code>for &lt;role&gt;</code>
+reads (<a href="/docs/http-access#whom-a-token-is-for">Whom a token is
+for</a>). On a <code>--dir</code> node a token reaches only
 the tenant its <code>tenant</code> claim names
 (<a href="/docs/sharding-reference#tokens">Tokens</a>). Pass the secret with <code>--jwt-secret-file</code> or
 <code>FENEC_JWT_SECRET</code> — <code>argv</code> shows up in <code>ps</code>
