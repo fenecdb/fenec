@@ -234,9 +234,14 @@ impl Router {
 
     /// Sends a request to `region`'s routers, from the one that answered
     /// last, moving to the next only where the one asked cannot have run
-    /// it ([`Tried`]): its answer's head. A held request watches `client`
-    /// as [`crate::upstream::Pool::send_held`] does: gone, the router asked
-    /// is let go of, and lets go of the node in turn.
+    /// it ([`Tried`]): its answer's head. A router that refused the
+    /// connection as it took it ran nothing either (`Answer::unserved`):
+    /// the next is asked, whatever the request, that one not noted as
+    /// having answered, and its 503 is the answer only where every router
+    /// gave one -- taken for any router's answer, one at its thread limit
+    /// kept the relay from its standby. A held request watches `client` as
+    /// [`crate::upstream::Pool::send_held`] does: gone, the router asked is
+    /// let go of, and lets go of the node in turn.
     pub(crate) fn relay_send(
         &self,
         region: &str,
@@ -248,6 +253,7 @@ impl Router {
     ) -> std::io::Result<Answer> {
         let start = self.first_router(region, routers);
         let mut last = None;
+        let mut refused = None;
         for k in 0..routers.len() {
             let i = (start + k) % routers.len();
             let sent = self.pool.send_tried(
@@ -260,6 +266,7 @@ impl Router {
                 client,
             );
             match sent {
+                Ok(a) if a.unserved() => refused = Some(a),
                 Ok(a) => {
                     self.note_answered(region, i);
                     return Ok(a);
@@ -268,12 +275,17 @@ impl Router {
                 Err(t @ Tried::MayHaveRun(_)) => return Err(t.into_error()),
             }
         }
+        if let Some(a) = refused {
+            return Ok(a);
+        }
         Err(last.unwrap_or_else(|| std::io::Error::other("no router is recorded")))
     }
 
     /// One call to `region`'s routers -- `""` the global directory's -- its
     /// whole answer: the status, the headers, the body. A router answering
-    /// that it follows another ran nothing, and the next is asked.
+    /// that it follows another ran nothing, and the next is asked; so did
+    /// one that refused the connection as it took it (`Answer::unserved`),
+    /// whose 503 is the answer where no router does better.
     pub(crate) fn call_routers(
         &self,
         region: &str,
@@ -297,6 +309,7 @@ impl Router {
     ) -> std::result::Result<Whole, String> {
         let start = self.first_router(region, routers);
         let mut last = String::from("no router is recorded");
+        let mut refused = None;
         for k in 0..routers.len() {
             let i = (start + k) % routers.len();
             let url = &routers[i];
@@ -310,12 +323,17 @@ impl Router {
                 None,
             ) {
                 Ok(a) => {
-                    let (status, hs) = (a.status, a.headers.clone());
+                    let (status, hs, unserved) = (a.status, a.headers.clone(), a.unserved());
                     let body = a
                         .read_body(pool, false)
                         .map_err(|e| format!("{url} broke off: {e}"))?;
                     if status == 409 && contains(&body, b"follows another") {
                         last = format!("{url} follows another router");
+                        continue;
+                    }
+                    if unserved {
+                        last = format!("{url} refused the connection unserved");
+                        refused = Some((status, hs, body));
                         continue;
                     }
                     self.note_answered(region, i);
@@ -325,7 +343,7 @@ impl Router {
                 Err(Tried::MayHaveRun(e)) => return Err(format!("{url}: {e}")),
             }
         }
-        Err(last)
+        refused.ok_or(last)
     }
 
     /// The headers of a call this router makes of another on its own: its

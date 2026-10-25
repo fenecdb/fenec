@@ -404,7 +404,7 @@ impl Server {
                 // page on another origin read a refusal without them as
                 // the network failing.
                 let answer = Response::retry_after(503, "too many connections", 1);
-                accept::refuse(stream, &cors(answer, &self.cfg), accept::Refusal::Ceiling);
+                accept::refuse(stream, cors(answer, &self.cfg), accept::Refusal::Ceiling);
                 continue;
             }
 
@@ -422,15 +422,8 @@ impl Server {
             // closed unanswered (`accept`'s comment).
             if let Err(unserved) = spawned {
                 self.live.fetch_sub(1, Ordering::SeqCst);
-                if let Some(stream) = unserved.stream {
-                    let answer = Response::retry_after(503, accept::NO_THREAD, 1);
-                    accept::no_thread(
-                        stream,
-                        &cors(answer, &self.cfg),
-                        &unserved.error,
-                        "fenec_connections_refused_total",
-                    );
-                }
+                let answer = cors(Response::retry_after(503, accept::NO_THREAD, 1), &self.cfg);
+                accept::no_thread(unserved, answer, "fenec_connections_refused_total");
             }
         }
         Ok(())

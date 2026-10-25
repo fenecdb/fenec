@@ -47,3 +47,9 @@ path = "tests/quotas.rs"
 [[test]]
 name = "join_lists"
 path = "tests/join_lists.rs"
+
+# Apart: the count of connections refused as they were taken is the
+# process's own.
+[[test]]
+name = "refused_counts"
+path = "tests/refused_counts.rs"

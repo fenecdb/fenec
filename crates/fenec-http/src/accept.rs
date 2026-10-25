@@ -11,19 +11,32 @@
 //! written whole, the connection ended before a byte of an answer, which
 //! is what a node that ran it and went down looks like. Such a connection
 //! is now answered as the ceiling answers one ([`refuse`]): 503 with
-//! `Retry-After` and `{"error", "retry_after"}`, which a router passes on
-//! and a client comes back after, both knowing the request never ran.
+//! `Retry-After`, `{"error", "retry_after"}` and [`UNSERVED_HEADER`],
+//! which a router passes on and a client comes back after, both knowing
+//! the request never ran.
 
 use crate::http::Response;
 use std::cell::Cell;
 use std::io::{self, Read};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::Builder;
+use std::time::{Duration, Instant};
 
 /// What a connection with no thread is told, the node's and the router's.
 pub const NO_THREAD: &str = "no thread for the connection: the server is at its thread limit";
+
+/// The header of an answer written as its connection was taken, before a
+/// byte of the request was read, the [`Refusal`]'s reason its value: the
+/// request ran nothing. No standard header says so -- `Retry-After` says
+/// when, not whether -- and with it the global entry and a router relaying
+/// to a region's routers send any request on to the next router, as one
+/// never run, and note this one as having answered nothing: final, as a
+/// router's own 503 is, a router at its thread limit kept every request
+/// from the standby beside it. A router drops it from a node's answer it
+/// forwards, its own connection having been served.
+pub const UNSERVED_HEADER: &str = "Fenec-Unserved";
 
 /// Why a connection was answered on the accepting thread and closed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,9 +59,9 @@ const ZERO: AtomicU64 = AtomicU64::new(0);
 /// so no shard.
 static REFUSED: [AtomicU64; 2] = [ZERO; 2];
 
-/// The Unix second a connection with no thread was last said in the log
-/// at; 0, never.
-static SAID: AtomicU64 = AtomicU64::new(0);
+/// When a connection with no thread was last said in the log: a moment of
+/// the monotonic clock, which a wall clock set back does not hold silent.
+static SAID: Mutex<Option<Instant>> = Mutex::new(None);
 
 /// How many connections were refused for `why`.
 pub fn refused(why: Refusal) -> u64 {
@@ -113,8 +126,8 @@ pub fn spawn(
     }
 }
 
-/// Answers `stream` with `answer` on the accepting thread, closes it, and
-/// counts it under `why`.
+/// Answers `stream` with `answer` on the accepting thread, marked
+/// [`UNSERVED_HEADER`], closes it, and counts it under `why`.
 ///
 /// The socket is made non-blocking first: the accepting thread is every
 /// connection's, and a client that reads nothing must not hold it. The
@@ -122,60 +135,96 @@ pub fn spawn(
 /// out whole in one write all the same; where it would not, it is let go
 /// of. The request is not read first -- what has not arrived cannot be
 /// waited for here, and the answer does not hang on it -- but what has
-/// arrived is read off after the answer, up to 64 KiB (`DRAIN`), non-blocking
-/// too: closed with its request unread, a socket is reset rather than
-/// ended, on macOS and on Linux alike (probed), and a client reading to
-/// the end read `Connection reset by peer` after the answer. A request
-/// that arrives after the close, or a body past what had arrived, still
-/// meets the reset, which a client reads after the answer, since both
+/// arrived is read off after the answer, up to 64 KiB (`DRAIN`),
+/// non-blocking too: closed with its request unread, a socket is reset
+/// rather than ended, on macOS and on Linux alike (probed), and a client
+/// reading to the end read `Connection reset by peer` after the answer. A
+/// request that arrives after the close, or a body past what had arrived,
+/// still meets the reset, which a client reads after the answer, since both
 /// systems hand a socket's received bytes over before its error.
-pub fn refuse(mut stream: TcpStream, answer: &Response, why: Refusal) {
-    REFUSED[why as usize].fetch_add(1, Ordering::Relaxed);
-    if stream.set_nonblocking(true).is_err() {
-        return;
-    }
-    // Its id goes out on the answer, as every answer's does.
-    crate::request_id::begin(None);
-    let _ = answer.write(&mut stream, false, false);
-    crate::request_id::end();
-    let mut buf = [0u8; 8 << 10];
-    let mut left = DRAIN;
-    while left > 0 {
-        match stream.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => left = left.saturating_sub(n),
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(_) => break,
-        }
-    }
+pub fn refuse(stream: TcpStream, answer: Response, why: Refusal) {
+    refuse_saying(stream, answer, why, || {});
 }
 
-/// [`refuse`]s `stream`, which no thread could be made for (`error`), and
-/// says so in the log a minute apart at most: a process at its thread
-/// limit refuses every connection it cannot serve, and a line each would
-/// be a line a request. `counted` names the family that counts each.
+/// [`refuse`], `say` run while the answer's request id is the thread's, so
+/// a line it writes carries it ([`crate::request_id::log`]).
+fn refuse_saying(mut stream: TcpStream, answer: Response, why: Refusal, say: impl FnOnce()) {
+    REFUSED[why as usize].fetch_add(1, Ordering::Relaxed);
+    let answer = answer.header(UNSERVED_HEADER, REFUSALS[why as usize]);
+    crate::request_id::begin(None);
+    if stream.set_nonblocking(true).is_ok() {
+        let _ = answer.write(&mut stream, false, false);
+        let mut buf = [0u8; 8 << 10];
+        let mut left = DRAIN;
+        while left > 0 {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => left = left.saturating_sub(n),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+    }
+    say();
+    crate::request_id::end();
+}
+
+/// Whether a connection with no thread is said in the log now: a minute
+/// after the last one said at least.
+fn due() -> bool {
+    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    if said.is_some_and(|at| now.duration_since(at) < Duration::from_secs(60)) {
+        return false;
+    }
+    *said = Some(now);
+    true
+}
+
+/// [`refuse`]s the stream no thread could be made for, and says so in the
+/// log a minute apart at most, the line carrying the answer's request id:
+/// a process at its thread limit refuses every connection it cannot serve,
+/// and a line each would be a line a request. `counted` names the family
+/// that counts each.
 #[cold]
 #[inline(never)]
-pub fn no_thread(stream: TcpStream, answer: &Response, error: &io::Error, counted: &str) {
-    let peer = stream.peer_addr().ok();
-    refuse(stream, answer, Refusal::NoThread);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let last = SAID.load(Ordering::Relaxed);
-    if now >= last + 60
-        && SAID
-            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-    {
-        let from = peer.map_or_else(|| "?".to_string(), |p| p.to_string());
-        crate::log!(
-            "no thread for a connection from {from}: {error}; answered 503 with Retry-After. \
-             The process is at its thread limit (a cgroup's pids.max, systemd's TasksMax=, \
-             ulimit -u, macOS's 2 048 a process): raise it, or lower --max-connections below \
-             it (said a minute apart at most; {counted} counts each)"
-        );
-    }
+pub fn no_thread(unserved: Unserved, answer: Response, counted: &str) {
+    let Unserved { stream, error } = unserved;
+    debug_assert!(
+        stream.is_some(),
+        "a spawn that failed dropped its closure on another thread"
+    );
+    let say = due();
+    let Some(stream) = stream else {
+        // Its closure dropped where no stream comes back from, it closed
+        // unanswered, as every such connection did before: counted, and
+        // said, all the same.
+        REFUSED[Refusal::NoThread as usize].fetch_add(1, Ordering::Relaxed);
+        if say {
+            crate::log!(
+                "no thread for a connection: {error}; it was closed unanswered, its stream \
+                 dropped with the closure that could not run. The process is at its thread \
+                 limit (said a minute apart at most; {counted} counts each)"
+            );
+        }
+        return;
+    };
+    // Its address only where it is said: a system call each otherwise.
+    let from = say.then(|| {
+        stream
+            .peer_addr()
+            .map_or_else(|_| "?".into(), |p| p.to_string())
+    });
+    refuse_saying(stream, answer, Refusal::NoThread, || {
+        if let Some(from) = from {
+            crate::log!(
+                "no thread for a connection from {from}: {error}; answered 503 with Retry-After. \
+                 The process is at its thread limit (a cgroup's pids.max, systemd's TasksMax=, \
+                 ulimit -u, macOS's 2 048 a process): raise it, or lower --max-connections \
+                 below it (said a minute apart at most; {counted} counts each)"
+            );
+        }
+    });
 }
 
 /// Spawns a test has fail ([`crate::Server::fail_spawns`]): the next `n`
@@ -273,18 +322,14 @@ mod tests {
         // waits for it, the one segment it went in.
         let mut one = [0u8; 1];
         assert_eq!(s.peek(&mut one).unwrap(), 1);
-        let before = refused(Refusal::NoThread);
-        refuse(
-            s,
-            &Response::retry_after(503, NO_THREAD, 1),
-            Refusal::NoThread,
-        );
-        assert!(refused(Refusal::NoThread) > before);
+        let answer = Response::retry_after(503, NO_THREAD, 1);
+        refuse(s, answer, Refusal::NoThread);
         let mut out = String::new();
         c.read_to_string(&mut out)
             .expect("the answer, then an end: no reset");
         assert!(out.starts_with("HTTP/1.1 503 "), "{out}");
         assert!(out.contains("\r\nRetry-After: 1\r\n"), "{out}");
+        assert!(out.contains("\r\nFenec-Unserved: no_thread\r\n"), "{out}");
         assert!(out.ends_with(r#""retry_after":1}"#), "{out}");
     }
 }

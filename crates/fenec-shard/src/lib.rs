@@ -704,7 +704,7 @@ impl Router {
             if self.cfg.max_connections > 0 && live > self.cfg.max_connections {
                 self.live.fetch_sub(1, Ordering::SeqCst);
                 let answer = self.cors(Response::retry_after(503, "too many connections", 1));
-                fenec_http::accept::refuse(stream, &answer, fenec_http::accept::Refusal::Ceiling);
+                fenec_http::accept::refuse(stream, answer, fenec_http::accept::Refusal::Ceiling);
                 continue;
             }
             let router = Arc::clone(self);
@@ -718,16 +718,13 @@ impl Router {
             // (`fenec_http::accept`'s comment).
             if let Err(unserved) = spawned {
                 self.live.fetch_sub(1, Ordering::SeqCst);
-                if let Some(stream) = unserved.stream {
-                    let answer =
-                        self.cors(Response::retry_after(503, fenec_http::accept::NO_THREAD, 1));
-                    fenec_http::accept::no_thread(
-                        stream,
-                        &answer,
-                        &unserved.error,
-                        "fenec_router_connections_refused_total",
-                    );
-                }
+                let answer =
+                    self.cors(Response::retry_after(503, fenec_http::accept::NO_THREAD, 1));
+                fenec_http::accept::no_thread(
+                    unserved,
+                    answer,
+                    "fenec_router_connections_refused_total",
+                );
             }
         }
         Ok(())
@@ -2621,13 +2618,16 @@ impl Router {
             // the ids leaves out. So do the router's CORS headers, where it
             // has its own: a page is told one rule, the one the router's
             // preflight told it. Whether the node verified a token is the
-            // router's to know and no one else's.
+            // router's to know and no one else's. A node's mark of a
+            // connection it served nothing on is about that connection, not
+            // the router's (`fenec_http::accept::UNSERVED_HEADER`).
             if k.eq_ignore_ascii_case(fenec_http::audit::VERIFIED_HEADER) {
                 verified = true;
             } else if !hop_by_hop(k)
                 && !k.eq_ignore_ascii_case("content-length")
                 && !k.eq_ignore_ascii_case(fenec_http::request_id::HEADER)
                 && !k.eq_ignore_ascii_case(region::SHARD_HEADER)
+                && !k.eq_ignore_ascii_case(fenec_http::accept::UNSERVED_HEADER)
                 && !(cors.is_some() && fenec_http::cors::is_cors_header(k, v))
             {
                 for part in [k.as_str(), ": ", v.as_str(), "\r\n"] {

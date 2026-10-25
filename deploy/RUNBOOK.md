@@ -188,7 +188,10 @@ a connection and refused it 503 (`reason="no_thread"`): it reached
 other threads -- a router's lease grants and failovers, a node's
 followers -- may be refused too. Raise `TasksMax`, or lower
 `--max-connections` well below it; `systemctl status` shows the unit's
-tasks against its limit.
+tasks against its limit. Prometheus's scrape is a connection too, refused
+the same way while the limit holds: `up` goes to 0, so the target-down
+alerts (`FenecNodeDown`, `FenecPrimaryRouterDown`, ...) are the other sign
+of it, and the count shows once a scrape gets its thread.
 
 `TimeoutStopSec` leaves a node 120 s to sync every open tenant and
 checkpoint their graphs on SIGTERM; a kill past it loses no write under
@@ -861,7 +864,11 @@ it short and says what it costs.
 - `FenecRouter5xx`: more than 1% of tenants' requests answered 5xx. 502 is
   a node the router could not reach (`FenecNodeUnreachable` names it), 503
   a tenant frozen for a move or a lease lapsed, 504 a replica behind the
-  read's position. Look at which, and at the node.
+  read's position. Look at which, and at the node. A router's own 503s
+  as it takes a connection -- past `--max-connections`, at its thread limit
+  -- are not among them: they never reach `fenec_router_requests_total`,
+  and are counted in `fenec_router_connections_refused_total` alone
+  (`FenecNoThreadForConnection`).
 - `FenecNodeUnreachable`: the router cannot reach a node. Before a lease
   lapses its tenants answer 502; past it the node is failed over.
 - `FenecStatementErrors`: more than 5% of a node's statements end in an

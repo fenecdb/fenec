@@ -1103,7 +1103,7 @@ fn the_connection_ceiling_refuses_with_the_cors_headers() {
 /// the ceiling answers one: 503, `Retry-After`, the seconds in the body
 /// and the CORS headers. It was closed with nothing said, and its client,
 /// its request sent, read a reset. The next connection, its thread made,
-/// is served, and counts the refusal.
+/// is served. Counted in `refused_counts.rs`, a binary of its own.
 #[test]
 fn a_connection_with_no_thread_is_answered_503_and_told_when_to_come_back() {
     fenec_http::audit::set_delay(0);
@@ -1130,17 +1130,9 @@ fn a_connection_with_no_thread_is_answered_503_and_told_when_to_come_back() {
         r.header("Access-Control-Allow-Origin"),
         Some("https://app.example")
     );
+    assert_eq!(r.header("Fenec-Unserved"), Some("no_thread"));
     let r = call_with(port, "GET", "/articles?count", None, &[]);
     assert_eq!(r.status, 200, "{}", r.body);
-    let r = call_with(port, "GET", "/_metrics", None, &[]);
-    let refused = r
-        .body
-        .lines()
-        .find_map(|l| l.strip_prefix(r#"fenec_connections_refused_total{reason="no_thread"} "#))
-        .and_then(|n| n.parse::<u64>().ok());
-    // At least this one: the count is the process's, and others' tests add
-    // to it, never take from it.
-    assert!(refused >= Some(1), "{}", r.body);
 }
 
 #[test]

@@ -493,7 +493,8 @@ ceiling is.](docs/design/http.md#connections-without-a-thread)** Both accept
 loops spawn through `accept::spawn`, which hands back the stream of a thread
 the system refused, and `accept::refuse` answers it on the accepting thread,
 non-blocking, then reads off what arrived so the close is no reset, counted
-by `reason`.
+by `reason` and marked `Fenec-Unserved`, which the entry and relays take as
+unrun.
 
 ### The HNSW graph
 
@@ -979,7 +980,7 @@ preflights and puts its own CORS headers in place of a node's
 cannot have run or may run twice.](docs/design/router.md#pooled-connections)**
 A request not sent whole goes again, one sent whole only if `replayable`
 (a `GET`, `HEAD`, `OPTIONS`, keyed or marked read), judged by `Stage`, not
-errno. Every dial goes through `dial::resolve`, caching nothing; every
+errno; head and body are one `writev`. Every dial goes through `dial::resolve`, caching nothing; every
 body read allocates through `zeroed` and refuses an answer with no length.
 A held request watches its client for the head (`answered_or_gone`,
 `relay_send` at a relay): an end goes on to the node, never taken for

@@ -193,6 +193,10 @@ test("an answer is a router's where it carries the router's mark, as every answe
   assert.equal(judged(answer(200)), 'router');
   assert.equal(judged(answer(502, { 'X-Request-Id': 'r', 'Fenec-Shard': '1' })), 'router');
   assert.equal(judged(answer(503, { 'Fenec-Shard': '1' })), 'router');
+  // Written as the router took the connection, the request never read.
+  assert.equal(judged(answer(503, { 'Fenec-Shard': '1', 'Fenec-Unserved': 'no_thread' })), 'unserved');
+  assert.equal(judged(answer(503, { 'Fenec-Shard': '1', 'Fenec-Unserved': 'ceiling' })), 'unserved');
+  assert.equal(judged(answer(503, { 'Fenec-Unserved': 'ceiling' })), 'unknown', 'not the router\'s without its mark');
   // A load balancer's 502 with a request id of its own is not a router's.
   assert.equal(judged(answer(502, { 'X-Request-Id': 'lb-1' })), 'unknown');
   // A tunnel's connector that could not reach the router, Cloudflare timing out.
@@ -798,6 +802,49 @@ test("a guessed region's router that cannot reach the home is passed for a read,
     assert.equal(home.seen.length, 1, 'no other region asked');
   } finally {
     for (const s of [cut, home, failing]) s.close();
+  }
+});
+
+test('a router that refused the connection as it took it is passed over for the next, a write too: it ran nothing', async () => {
+  // At its thread limit, or past its --max-connections: the router's 503,
+  // written before it read a byte of the request.
+  const busy = await standIn((req, res) => {
+    res.writeHead(503, {
+      'Content-Type': 'application/json',
+      'Retry-After': '1',
+      'Fenec-Shard': '1',
+      'Fenec-Unserved': 'no_thread',
+    });
+    res.end('{"error":"no thread for the connection","retry_after":1}');
+  });
+  const standby = await standIn((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Fenec-Shard': '1', 'Fenec-Home': 'us' });
+    res.end('{"affected":1}');
+  });
+  try {
+    let fetchOf = inNode({ REGIONS: JSON.stringify({ us: [busy.url, standby.url] }), HOMES_CACHE: 'off' });
+    const write = { method: 'POST', body: '{"query":"put notes {title: \\"t\\"}"}' };
+    const first = await fetchOf('/t/acme/query', write);
+    assert.equal(first.status, 200);
+    assert.equal(busy.seen.length, 1);
+    assert.equal(standby.seen.length, 1, 'the write sent on to the standby');
+    // The router that refused is not the one that answered last: the next
+    // request goes to the standby first.
+    assert.equal((await fetchOf('/t/acme/query', write)).status, 200);
+    assert.equal(busy.seen.length, 1);
+    assert.equal(standby.seen.length, 2);
+    // Every router refusing: the 503 is the client's, its mark of a
+    // connection served nothing left out -- the client's own was.
+    fetchOf = inNode({ REGIONS: JSON.stringify({ us: [busy.url] }), HOMES_CACHE: 'off' });
+    const refused = await fetchOf('/t/acme/query', write);
+    assert.equal(refused.status, 503);
+    assert.equal(refused.headers.get('retry-after'), '1');
+    assert.equal(refused.headers.get('fenec-unserved'), null);
+    assert.match(await refused.text(), /"retry_after":1/);
+    assert.equal(busy.seen.length, 2);
+  } finally {
+    busy.close();
+    standby.close();
   }
 });
 
