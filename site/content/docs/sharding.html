@@ -919,6 +919,15 @@ curl -X PUT localhost:8090/_shard/tenants/acme -d '{"node":"n1"}'
 <ul>
   <li><b>After a failover</b>, <code>POST /_shard/replicas</code> gives every
     tenant without a replica a new one.</li>
+  <li><b>A replica that did not take</b> — its node refused, or answered
+    after the router stopped waiting — is tried again on its own, a few
+    times over the next four minutes.</li>
+  <li><b><code>fenec_router_tenants_unreplicated</code></b> counts the tenants
+    with no copy to fail over to, by region (<a
+    href="monitoring.html#router">Monitoring</a>).</li>
+  <li><b>A file the router may have left on a node</b> is reported, never
+    deleted: every repair lists it under <code>left</code>, and
+    <code>fenec_router_files_left</code> counts it.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
@@ -949,8 +958,45 @@ over, and nothing of theirs is left lying there.</p>
 <pre data-lang="bash">curl -X POST localhost:8090/_shard/nodes/n1/failover
 {"node":"n1","promoted":[{"tenant":"acme","to":"n2"},{"tenant":"beta","to":"n3"}],"failed":[],"unreplicated":["gamma"]}
 curl -X POST localhost:8090/_shard/replicas
-{"replicated":[{"tenant":"acme","replica":"n1"},{"tenant":"beta","replica":"n1"},{"tenant":"gamma","replica":"n1"}],"failed":[]}
+{"replicated":[{"tenant":"acme","replica":"n1"},{"tenant":"beta","replica":"n1"},{"tenant":"gamma","replica":"n1"}],"left":[],"failed":[]}
 </pre>
+
+<p>A replica that did not take is tried again. A create, a move or a repair
+that gives a tenant its replica makes the file on the other node and tells
+it to follow the primary; where that node refuses, or takes the follow past
+the router's <code>--upstream-timeout</code> — a rename on a node under load
+took 13 s, longer than the deploy kit's 10 s — the answer names the tenant
+<code>unreplicated</code> and a repair runs again 2 s later, then 4, 8 and
+so on up to a minute apart, eight times, about four minutes in all. It asks
+again whether the tenant still needs one, so it is placed once, and it
+adopts a copy whose follow landed after the router stopped waiting: the
+node already holding the copy comes first among those of the zone the rule
+picks, so no second copy is made. A node that did not answer the repair's
+look is given no replica. A tenant whose region has no other node is not
+tried again: add a node, then <code>POST /_shard/replicas</code>.</p>
+
+<p>A file the router made on a node, or meant to take off one, that no
+placement names — a create taken back (its schema refused, say) whose
+<code>DELETE</code> the node did not take, a create whose <code>PUT</code>
+went unanswered, a move undone whose target kept the copy, a move's source
+that would not go, a copy a failed try made or found, a deleted tenant's
+copy that stayed, an old primary on a node that was silent as its tenant's
+replica went elsewhere — is noted in the directory with why, and reported:
+every repair lists it under <code>left</code>
+(<code>{"tenant","node","why"}</code>), <code>fenec_router_files_left</code>
+counts it, and <code>FenecFilesLeftOnNodes</code> alerts after half an
+hour. The router never deletes one. Neither it nor the node can tell the
+file it left from a later one at the same place: the tenant moved back
+onto that node, or made there again, or a file put there by hand. A create
+of the name on that node is answered 409 while the file is there. A
+repair's look forgets a file it finds gone, or one the directory now
+places, so an operator removes it by hand after looking at it, then runs a
+repair (<code>deploy/RUNBOOK.md</code>, <i>Files left on nodes</i>). Only a
+tenant left without its replica makes a repair answer 502. Tenants left
+without a copy are counted by
+<code>fenec_router_tenants_unreplicated{region}</code>, which
+<code>FenecTenantsWithoutReplica</code> in <code>deploy/alerts/</code>
+reads.</p>
 
 <p>Measured with <code>make shard-bench</code>, three nodes and the router in
 one process, 30 tenants: each is created with its replica in 33 ms, the

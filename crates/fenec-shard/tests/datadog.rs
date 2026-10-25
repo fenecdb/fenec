@@ -233,10 +233,13 @@ fn scrape() -> (BTreeMap<String, String>, String) {
     )
     .unwrap();
     dir.place("acme", "n1", State::Active).unwrap();
+    // Giving tenants replicas of their own (`--replicas`), as the kit's
+    // routers do: its scrape counts the tenants without a copy, acme.
     let router = Router::new(
         dir,
         Config {
             addr: "127.0.0.1:0".into(),
+            replicas: true,
             ..Config::default()
         },
     );
@@ -509,6 +512,8 @@ fn the_alert_rules_read_only_what_the_servers_expose() {
         "fenec_router_node_failed_over",
         "fenec_replica_behind",
         "fenec_router_same_zone_copies",
+        "fenec_router_tenants_unreplicated",
+        "fenec_router_files_left",
         "fenec_router_read_replicas_given_up",
         "fenec_quota_refused_total",
         "fenec_router_entry_clients_total",

@@ -406,3 +406,215 @@ tenant on its own replica, `POST /_shard/replicas` gives replicas back -- on
 a node holding a copy first, so a returning node's old primaries follow --
 and a move re-points the replica or, onto its node, places another. Three
 nodes, 10 tenants each: one node's failover took 57 ms, 5 onto each other.
+
+## Replicas tried again
+
+**A replica whose attach failed is tried again, and a file the router left
+on a node is reported** (`Router::replicate`, `repair`, `try_again`,
+`left_on`, `look_at_leftovers`, `directory::Leftover`). With `fenec-shard --replicas`
+a create, a move and a repair each give a tenant its replica on another
+node: the file made there (`PUT /_admin/tenants/<t>`) and told to follow
+the primary (`POST .../follow`). An attach that failed -- the node refused,
+or took the follow past the router's `--upstream-timeout`: a node's rename
+of `.follows` took 13.3 s beside eleven other suites, and the deploy kit's
+routers wait 10 -- was logged and named in the answer's `unreplicated`, and
+nothing tried it again. `repair_later` ran a repair again only for a tenant
+whose primary had not answered the repair's look, a repair's own failed
+attach went into its `failed`, and a repair runs only when a node failed
+over answers again or an operator asks: the tenant had no copy to fail over
+to until then, and under `--auto-failover` stayed on its primary as that
+died, writing nothing until the node was back. Now an attach that fails, on
+a create, a move or a repair, has a repair run again in a while
+(`try_again`: 2 s, then doubling to 60, eight in a row, about four
+minutes), as a tenant whose primary did not answer had, and so does a
+tenant another operation held as the repair came to it; a tenant whose
+region has no other node free to keep a replica is not tried again
+(`Unplaced::Nowhere`: nothing a while changes gives it one). The try after
+places once: the repair asks again under the tenant's claim whether it is
+still on that primary, active, in no pair and without a replica -- a
+create's own try, a move or a failover may have given it one, or taken it
+elsewhere, and two repairs may run at once, an operator's beside the
+router's -- and records one replica, as before. And it adopts what an
+earlier try left: where the follow landed after the router gave it up, a
+copy follows the primary that no directory names, which the repair's look
+sees (`GET /_admin/tenants`) and whose node ranks first among those of the
+zone the rule picks (`replica_node`'s `holding`, below the zone), the `PUT`
+finding the file (409) and the follow beginning its stream again. A node
+that did not answer the repair's look is given no replica (`replica_node`'s
+`answering`, the repair's alone): it would follow nothing from there, and a
+try at it each repair was a call bounded by the upstream timeout, the
+tenant without a copy meanwhile; free nodes none of which answered are a
+failed try, tried again. The rules a placement keeps are the repair's own,
+unchanged: a node of another zone first, never a standby or a node in a
+pair, none while the primary does not answer its look, the claim held
+across the calls -- so a failover on a lease finding the tenant held pins
+the copy it had then (`HeldTenant`), none where it had none -- and the
+replica recorded only once it follows.
+
+The tries are one count (`Retries`): a fresh failure is due
+`REPAIR_AGAIN_FIRST` after it whatever ran before -- counted from the last
+wait, an attach failing after a run of silent tries waited out its minute
+-- a failure that comes while a repair runs stays due though that repair
+left nothing undone, and eight in a row undone are given up on, said in the
+log. Only a tenant without its replica is tried again: a file left on a
+node schedules nothing (below), so nothing a while changes waits on one,
+and a file fails no repair. As this branch first stood, a failed take-back
+of such a file scheduled a repair too, which on a router without
+`--replicas` gave every tenant in no pair a replica nobody asked for; with
+no take-back the router starts no repair of its own on such a router, and
+one an operator asked, or a node back from a failover, runs whole as on
+main, its own tries after whole too.
+
+A file the router made on a node, or meant to take off one, that no
+placement records is noted in the directory (`leftovers`, keyed
+`<tenant>/<node>`, with why and the directory's change it was noted at;
+replicated with the rest, so a standby promoted knows them): a create
+taken back -- its placement unrecorded, its quota or its schema refused --
+whose `DELETE` the node did not take; a create whose `PUT` went unanswered,
+which the node may have made all the same; a move undone after its image
+was installed on the target (its quota refused there, the flip unrecorded)
+whose target kept the copy, and a move whose source would not go once it
+was done; a replica whose attach failed once its `PUT` was answered, made
+there (201) or found there (409); a replica detached, or a deleted tenant's
+replica or standby copy, that would not come off; and an old primary's file
+on a node that did not answer the repair's look, the node a failover took
+the tenant off (`failed_from`), where the tenant's replica went elsewhere
+-- answering, the node would have kept the replica, its file made to follow
+(`note_old_primary`). The `DELETE`s that took a create back ignored their
+failure, so the file stayed, unsaid: a create of the name sent again after
+the fence's 503 met the node's 409, and so did every create of it there
+after.
+
+**Such a file is reported, never taken off.** Every repair lists each under
+`left` (`{tenant, node, why}`, said too where its node did not answer the
+look), `fenec_router_files_left` counts them (no label: a tenant's name is
+in no label), and `FenecFilesLeftOnNodes` alerts once the count has held
+half an hour on the router keeping the directory; the RUNBOOK says how to
+look at one and remove it by hand. A repair's look forgets one it finds
+gone -- its node answered the look and lists no such tenant -- or that the
+directory gives its tenant now (`records_file`: placed there, its node's
+standby, its replica, a read replica), or whose node the directory no
+longer has (`look_at_leftovers`). The rows are read before the look, and a
+row is forgotten only where it was not noted again since
+(`Directory::forget_leftover`'s `noted`): a file noted again after a look
+began may be one the look missed. A create of the name on a node holding
+such a file is answered 409, as on main.
+
+Taking them back was this branch's first design, and two reviews found it
+lost tenants. Judged by the router -- the names a node listed, then a
+`DELETE` -- a standby router promoted behind its primary took back a
+tenant the primary had since made on the node and written. Judged by the
+node -- `POST /_admin/tenants/<t>/take-back {lineage, seq}`, deleting only
+a file that follows a node or stands at the lineage and change the router
+noted, under the slot's lock -- two losses remained, both reproduced. A
+move undone, its `DELETE` refused, noted the target's copy at the image's
+lineage and change; the tenant was later moved back onto that node and its
+copy elsewhere deleted, so the node held the tenant's one file at exactly
+that place, and the promoted standby's repair took it back, the tenant on
+neither node. And on nodes without `--replication-token` every lineage is
+none, so a tenant deleted and made again there with one row, at change 2,
+was taken back against a note of change 7. The node judged before the
+holders of an open tenant drained, too, so a write landing at change 2 was
+deleted after it was answered, and a take-back the router gave up on at
+`reader_timeout` could land after its next attach or create. Neither the
+router nor the node can tell the file it left from a later one at the same
+place: a lineage is the history's, a change the history's count, and both
+recur. Making the take-back safe needs a per-file instance id -- minted by
+the node at each create and import, changed at each follow and promotion,
+named in the `PUT` answers, kept in the row and required by the take-back
+-- which is roadmap row 47, a design of its own. Until then the rows record
+where the router may have left a file, and an operator judges each.
+
+Two removals stay as on main, and remove what a row may name: a move whose
+target answers 409 deletes the file there and installs the image (a copy of
+a move that died before its flip), and a repair placing a tenant's replica
+on a node holding a copy of it makes that copy follow (adoption, above) --
+over a reported file that is the tenant's, of another lineage, the follow
+takes the primary's image. Both predate this branch, and row 47 covers them.
+
+`fenec_router_tenants_unreplicated{region}`, with `--replicas`, counts the
+tenants with no copy a failover could promote -- no replica of their own and
+no standby on their node (`Directory::uncopied`, one pass at the scrape, as
+`same_zone_copies` is), every region a node names at 0 or not, no tenant
+in a label, the unnamed region unlabelled as `same_zone_copies` sends it --
+and `FenecTenantsWithoutReplica` reads it, its summary naming the region
+where there is one: the rule was the difference of `fenec_router_tenants`
+and `fenec_router_replicas` by router, which counted a paired node's
+tenants, whose copy is the standby's, as missing theirs. A router without
+`--replicas` sends none, its tenants in no pair kept with no copy by design.
+
+`tests/replica_retries.rs`, a binary of its own (in `all` its proxies'
+threads took the binary past macOS's threads a process, and other tests'
+spawns failed -- as `tests/read_replicas.rs`, apart since #372, would have
+again: its tests held up to 1 195 threads at once and the rest of `all`
+868, together 2 028 to 2 045 of the 2 048, past them once the repairs its
+routers' failed attaches run again went on beside), puts a proxy before a
+node that refuses a request (503), holds it, or sends it on and swallows
+the answer, the connection ended with nothing said, and holds, each failing
+with its part taken out (in parentheses, what it met then): a create whose
+follow was refused once given its replica by the repair after, the follow
+asked twice in all and the note of the copy forgotten as it is recorded
+(the create's try not tried again: never; the look not forgetting a placed
+copy: the count stays 1); a repair whose `PUT` was refused, leaving no file
+to wait on, tried again (its own failed attach not tried again: its 502 and
+nothing after); a follow that landed after the router gave it up adopted --
+the copy's node and another of its zone by then, first by name, which a try
+blind to the copy picks -- with no second copy (the copy's node not
+preferred: one on the other); two repairs at once, the first held at one
+tenant's follow while the second gives the next its replica, giving that
+one no second (no look again under the claim: a second on the node with
+fewer of the primary's replicas, the first left following unrecorded); a
+node silent at the repair's look given no replica though first by name (the
+silent one given it); and the gauge counting the tenant and clearing as the
+try lands (none sent: `datadog.rs`' rules fail on it too). Of the files
+left, each noted, reported with its why by the repair after and still on
+its node (unnoted: no word of it, the count 0; a take-back put back in the
+look: the file gone): a create taken back whose `DELETE` was refused, a
+create of the name there then answered 409 and no `DELETE` sent since, and
+once removed by hand the look forgetting it and the name made there (the
+look not forgetting a file gone: the count stays); a create whose `PUT`
+went unanswered; a deleted tenant's replica that would not come off; a move
+undone whose target kept the copy; a move's source that would not go; a
+copy a failed attach made where the replica then went to a node of a better
+zone; a replica detached that stayed; a file put there by hand that an
+attach found (409) and failed on, its rows in place; an old primary's file,
+its node silent as its tenant's replica went elsewhere (unnoted: no word of
+it); and a file on a node silent at the look, removed by hand meanwhile,
+reported with its node's silence and forgotten once the node answers (a
+silent node read as one without the file: forgotten unseen). The review's
+two losses each end with the tenant whole: a tenant moved back onto the
+node a move undone had left its copy on, its copy elsewhere deleted, and a
+standby router promoted with its directory from before the move back,
+whose repair reports the file and leaves it (a take-back: the tenant on
+neither node), the primary's own look forgetting the note as the tenant is
+placed there; and on nodes without `--replication-token`, a move's source
+noted, the tenant deleted and made again there by hand with one row,
+reported and kept (a take-back: the row gone). A router without
+`--replicas` and one of pairs alone schedule no repair for a file left
+(`Router::repair_due`, asked at once; a note scheduling one: a replica
+given 2 s after), and place no replica. The lib's tests hold the one count
+of tries: a fresh failure due 2 s after it, though the tries before waited
+out their minute, one that came while a repair ran still due, eight undone
+given up on. `directory::tests` hold the count by region and a pair's
+standby as a copy, and the files left noted once by tenant and node, noted
+again at a later change, forgotten by a look only where not noted again
+since it read them (the change ignored: the later note forgotten), kept
+across an open, and made where a directory lacks the collection.
+
+Nothing of it is on a request's path: the tries run on the repair's
+thread, and a create, a move and a delete write a row only where a call
+failed.
+`make shard-bench ARGS=latency`'s added p50 stayed 20.6 us (20.3-20.9)
+against main's 20.75 (20.6-21.8), eight runs a side in ABBA turns at loads
+of 1.8-2.05, the quartets' differences -0.65, 0, -0.2 and -0.35 us; a pass
+before it at loads of 2.2-2.5, other agents' work beside it, had outliers
+on both sides (main 21.8, this 27.7) and medians of 20.75 and 20.7.
+`fenec-shard`'s code grew 25.0 KB (`__text`, aarch64-apple-darwin,
+`size_report.py --bin`, 2 737.4 -> 2 762.4): the directory's `leftovers`,
+`failed_from` and `uncopied` 5.7 and `write_block` out of line now that two
+call it 3.5, noting a file 4.2 (`left_on` with the directory's write in it,
+`take_back`, `said`), the retries' waiting thread 2.3 net of
+`repair_later`'s, the repair's look and the move's notes 5.4 net of where
+inlining moved them (`repair` and `relocate` out of line, `admin` and
+`promote_on` smaller), the rest the delete's and the attach's notes and
+the gauge. `fenec-http`, and so `fenec-server`, is main's to the byte.

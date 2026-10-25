@@ -82,6 +82,13 @@ path = "tests/cuts.rs"
 name = "follower_cuts"
 path = "tests/follower_cuts.rs"
 
+# Apart: two or three nodes, a proxy and a router a test, a thread each
+# request the proxy carries -- in `all`, near macOS's threads a process
+# already, other tests' spawns failed beside them.
+[[test]]
+name = "replica_retries"
+path = "tests/replica_retries.rs"
+
 # Apart: each test's nodes, routers and links serve on until the process
 # ends, and these leave some 1 200 threads. In `all` beside the rest the
 # process stood at 1 939-2 047 of macOS's 2 048 threads a process under

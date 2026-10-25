@@ -37,7 +37,7 @@ use std::sync::{Arc, RwLock};
 /// in a region keeping its own: `@` and the region.
 pub const HOME: char = '@';
 
-const SCHEMA: [&str; 11] = [
+const SCHEMA: [&str; 12] = [
     "create collection if not exists nodes \
      (name text @hash, addr text, token text, region text, zone text)",
     // `failed_from` (`TENANT_FIELDS`): the node a failover took the tenant
@@ -109,7 +109,26 @@ const SCHEMA: [&str; 11] = [
     // of its own, read where asked, never mapped; a router from before it
     // neither reads nor writes it.
     "create collection if not exists leasing (ms int)",
+    // A tenant's file this directory's router may have left on a node --
+    // made, or meant to take off, and placed by nothing ([`Leftover`]): a
+    // create or a move taken back whose `DELETE` the node did not take, a
+    // create's `PUT` unanswered, a replica whose attach failed once its
+    // `PUT` was answered, a detached or deleted tenant's copy that stayed,
+    // a move's source that would not go, an old primary's file on a node
+    // silent as its tenant's replica went elsewhere. Keyed
+    // `<tenant>/<node>`, with why and the directory's change it was noted
+    // at. Reported to an operator -- every repair's `left`,
+    // `fenec_router_files_left` -- and forgotten once a repair's look finds
+    // the file gone or the directory gives it its tenant; never taken off
+    // by the router, which cannot tell the file it left from a later one
+    // at the same place. Ignored, it was an orphan that every create of the
+    // name on that node met as 409, unsaid. Read where asked, never mapped;
+    // a router from before it neither reads nor writes it.
+    LEFTOVERS,
 ];
+
+const LEFTOVERS: &str = "create collection if not exists leftovers \
+     (key text @hash, tenant text, node text, why text, noted int)";
 
 /// The fields `nodes` took after directories were first written, added to
 /// one written before them as the engine adds a field: its nodes read them
@@ -230,6 +249,20 @@ pub struct Reader {
     /// The lineage of the tenant it copies, where it was known as it was
     /// placed (`lineages`).
     pub lineage: Option<String>,
+}
+
+/// A tenant's file a router may have left on a node, placed by nothing
+/// (`leftovers`): reported, for an operator to look at and remove by hand.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Leftover {
+    pub tenant: String,
+    pub node: String,
+    /// What the router was doing, and what the node said.
+    pub why: String,
+    /// The directory's change as it was noted, noted again or not: a look
+    /// begun before then forgets nothing of it
+    /// ([`Directory::forget_leftover`]).
+    pub noted: i64,
 }
 
 /// A tenant the directory's maps, brought up to what a router it follows
@@ -1123,6 +1156,104 @@ impl Directory {
         self.run("del traces where key = $1", &[key])
     }
 
+    /// Every file a router noted as left on a node ([`Leftover`]), by key.
+    pub fn leftovers(&self) -> Result<Vec<Leftover>> {
+        let g = read(&self.db);
+        let found = rows(
+            &g,
+            "leftovers",
+            "get leftovers select tenant, node, why, noted order key",
+        )?;
+        Ok(found
+            .into_iter()
+            .map(|(_, row)| Leftover {
+                tenant: text(&row[0]),
+                node: text(&row[1]),
+                why: text(&row[2]),
+                noted: match row[3] {
+                    Value::Int(n) => n,
+                    _ => 0,
+                },
+            })
+            .collect())
+    }
+
+    /// How many files a router noted as left on nodes:
+    /// `fenec_router_files_left`.
+    pub fn files_left(&self) -> usize {
+        self.leftovers().map_or(0, |l| l.len())
+    }
+
+    /// Notes `tenant`'s file on `node` as left there, and why ([`Leftover`]):
+    /// noted again, at the change it is noted at now, so a look begun before
+    /// forgets nothing of it. A directory from before `leftovers`, led now
+    /// by a router that keeps them -- the standby of an older primary,
+    /// promoted -- is given the collection first.
+    pub fn note_leftover(&mut self, tenant: &str, node: &str, why: &str) -> Result<()> {
+        if read(&self.db).collection("leftovers").is_err() {
+            self.run(LEFTOVERS, &[])?;
+        }
+        let key = Value::Text(format!("{tenant}/{node}"));
+        let row = vec![
+            key.clone(),
+            Value::Text(tenant.into()),
+            Value::Text(node.into()),
+            Value::Text(why.into()),
+            Value::Int(read(&self.db).change_seq().min(i64::MAX as u64) as i64),
+        ];
+        self.write_block(&[
+            ("del leftovers where key = $1", vec![key]),
+            (
+                "put leftovers {key: $1, tenant: $2, node: $3, why: $4, noted: $5}",
+                row,
+            ),
+        ])
+    }
+
+    /// The node `tenant` was last failed over off (`failed_from`), where its
+    /// placement names one: read from the database, as nothing maps it.
+    pub fn failed_from(&self, tenant: &str) -> Option<String> {
+        let g = read(&self.db);
+        if !g
+            .collection("tenants")
+            .is_ok_and(|c| c.schema.field_pos("failed_from").is_some())
+        {
+            return None;
+        }
+        let stmt = fenec_ql::parse_one("get tenants select failed_from where name = $1").ok()?;
+        match g.query(&stmt, &[Value::Text(tenant.into())]) {
+            Ok(Response::Rows(rs)) => rs.rows.into_iter().find_map(|r| match &r.values[0] {
+                Value::Text(n) if !n.is_empty() => Some(n.clone()),
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Forgets `tenant`'s file on `node` as left there -- gone, or the
+    /// tenant's own copy now -- where it is noted, and, given `noted`, only
+    /// where it was noted then and not again since: a look that began
+    /// before a file was noted again may have missed it. Whether one went.
+    pub fn forget_leftover(
+        &mut self,
+        tenant: &str,
+        node: &str,
+        noted: Option<i64>,
+    ) -> Result<bool> {
+        let had = self
+            .leftovers()?
+            .into_iter()
+            .find(|l| l.tenant == tenant && l.node == node);
+        match had {
+            Some(l) if noted.is_none_or(|n| n == l.noted) => {
+                let key = Value::Text(format!("{tenant}/{node}"));
+                self.run("del leftovers where key = $1", &[key])?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     /// Forgets a tenant's read replica on `node`.
     pub fn remove_reader(&mut self, tenant: &str, node: &str) -> Result<()> {
         let key = format!("{tenant}/{node}");
@@ -1151,6 +1282,27 @@ impl Directory {
             .collect();
         for (t, p) in &self.tenants {
             if self.copy_of(t).is_some_and(|c| self.same_zone(&p.node, c)) {
+                *by.entry(self.region_of(&p.node)).or_default() += 1;
+            }
+        }
+        by
+    }
+
+    /// Per region, the tenants with no copy a failover could promote -- no
+    /// replica of their own and no standby on their node -- every region a
+    /// node names: what a scrape reports with `--replicas`, counted in one
+    /// pass. A tenant whose replica's attach failed is among them until a
+    /// repair's try lands, and so is one whose replica's node was failed
+    /// over, and one its region has no other node for.
+    pub fn uncopied(&self) -> BTreeMap<&str, usize> {
+        // Put in a region at a time: collected, the map was a stable sort
+        // of its own, 3.8 KB of the router's code.
+        let mut by: BTreeMap<&str, usize> = BTreeMap::new();
+        for n in self.nodes.values() {
+            by.entry(n.region.as_str()).or_insert(0);
+        }
+        for (t, p) in &self.tenants {
+            if self.copy_of(t).is_none() {
                 *by.entry(self.region_of(&p.node)).or_default() += 1;
             }
         }
@@ -2117,6 +2269,105 @@ mod tests {
         }
         d.set_node("e5", node("e5")).unwrap();
         assert!(!d.holds("e5"));
+    }
+
+    /// The tenants with no copy a failover could promote, by region: a
+    /// replica of its own is one, and so is its node's standby; every region
+    /// a node names is there, at 0 or not, so an alert over it sees a count
+    /// fall to nothing rather than vanish.
+    #[test]
+    fn a_tenant_without_a_copy_is_counted_in_its_region() {
+        let mut d = Directory::in_memory();
+        for (name, region) in [("e1", "eu"), ("e2", "eu"), ("e3", "eu"), ("u1", "us")] {
+            let mut n = node(name);
+            n.region = region.into();
+            d.set_node(name, n).unwrap();
+        }
+        assert_eq!(
+            d.uncopied().into_iter().collect::<Vec<_>>(),
+            [("eu", 0), ("us", 0)]
+        );
+        d.place("t1", "e1", State::Active).unwrap();
+        d.place("t2", "e1", State::Active).unwrap();
+        d.place("t3", "u1", State::Active).unwrap();
+        d.place("t4", "e3", State::Moving).unwrap();
+        assert_eq!((d.uncopied()["eu"], d.uncopied()["us"]), (3, 1));
+        d.set_replica("t1", Some("e2")).unwrap();
+        assert_eq!(d.uncopied()["eu"], 2);
+        // A pair's standby is t4's copy.
+        let mut e4 = node("e4");
+        e4.region = "eu".into();
+        d.set_node("e4", e4).unwrap();
+        d.set_standby("e3", Some("e4")).unwrap();
+        assert_eq!((d.uncopied()["eu"], d.uncopied()["us"]), (1, 1));
+        // A replica's node failed over: the tenant it kept a copy of has
+        // none now, until a repair.
+        d.set_replica("t1", None).unwrap();
+        assert_eq!(d.uncopied()["eu"], 2);
+    }
+
+    /// A file a router left on a node is noted once by its tenant and node,
+    /// with why and the change it was noted at, noted again at a later
+    /// change; forgotten by the two, and, given the change a look read it
+    /// at, only where it was not noted again since; kept across an open.
+    /// A directory without the collection -- an older primary's, which a
+    /// standby promoted now leads -- takes it as the first is noted, and
+    /// forgets none it never had.
+    #[test]
+    fn a_file_left_on_a_node_is_noted_by_its_tenant_and_node() {
+        let path =
+            std::env::temp_dir().join(format!("fenec-dir-left-{}.fenec", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let whys = |d: &Directory| -> Vec<(String, String, String)> {
+            d.leftovers()
+                .unwrap()
+                .into_iter()
+                .map(|l| (l.tenant, l.node, l.why))
+                .collect()
+        };
+        let owned = |t: &str, n: &str, w: &str| (t.to_string(), n.to_string(), w.to_string());
+        {
+            let mut d = Directory::open(&path).unwrap();
+            assert_eq!(d.leftovers().unwrap(), []);
+            assert_eq!(d.files_left(), 0);
+            d.note_leftover("acme", "n1", "a create taken back")
+                .unwrap();
+            d.note_leftover("acme", "n2", "a move undone").unwrap();
+            d.note_leftover("beta", "n1", "first").unwrap();
+            let first = d.leftovers().unwrap()[2].noted;
+            d.note_leftover("beta", "n1", "again").unwrap();
+            assert_eq!(
+                whys(&d),
+                [
+                    owned("acme", "n1", "a create taken back"),
+                    owned("acme", "n2", "a move undone"),
+                    owned("beta", "n1", "again"),
+                ]
+            );
+            assert_eq!(d.files_left(), 3);
+            // Read before it was noted again: not forgotten by that look.
+            assert!(!d.forget_leftover("beta", "n1", Some(first)).unwrap());
+            let now = d.leftovers().unwrap()[2].noted;
+            assert!(now > first);
+            assert!(d.forget_leftover("beta", "n1", Some(now)).unwrap());
+            assert!(d.forget_leftover("acme", "n1", None).unwrap());
+            assert!(!d.forget_leftover("acme", "n1", None).unwrap());
+            assert_eq!(whys(&d), [owned("acme", "n2", "a move undone")]);
+        }
+        {
+            let mut d = Directory::open(&path).unwrap();
+            assert_eq!(whys(&d), [owned("acme", "n2", "a move undone")]);
+            d.db()
+                .write()
+                .unwrap()
+                .execute(&fenec_ql::parse_one("drop collection leftovers").unwrap())
+                .unwrap();
+            assert_eq!(d.leftovers().unwrap(), []);
+            assert!(!d.forget_leftover("acme", "n2", None).unwrap());
+            d.note_leftover("gamma", "n3", "why").unwrap();
+            assert_eq!(whys(&d), [owned("gamma", "n3", "why")]);
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     /// A region's own directory names its region, and opens for that

@@ -329,7 +329,7 @@ groups:
             model:
               refId: A
               instant: true
-              expr: (sum by (instance) (fenec_router_tenants) - (sum by (instance) (fenec_router_replicas) or sum by (instance) (fenec_router_tenants) * 0) > 0) and on (instance) fenec_router_following == 0
+              expr: fenec_router_tenants_unreplicated > 0 and on (instance) fenec_router_following == 0
           - refId: B
             datasourceUid: __expr__
             model:
@@ -342,8 +342,35 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "{{ $values.A.Value }} tenants of {{ $labels.instance }} have no replica"
-          runbook: deploy/RUNBOOK.md#a-node-back
+          summary: "{{ $values.A.Value }} tenants on {{ $labels.instance }}{{ if $labels.region }} in {{ $labels.region }}{{ end }} have no copy to fail over to"
+          runbook: deploy/RUNBOOK.md#tenants-without-a-replica
+      - uid: fenec-files-left-on-nodes
+        title: FenecFilesLeftOnNodes
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: fenec_router_files_left > 0 and on (instance) fenec_router_following == 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $values.A.Value }} files {{ $labels.instance }} may have left on nodes are placed by nothing"
+          runbook: deploy/RUNBOOK.md#files-left-on-nodes
       - uid: fenec-same-zone-copies
         title: FenecSameZoneCopies
         condition: B
