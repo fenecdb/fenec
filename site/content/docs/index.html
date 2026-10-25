@@ -41,7 +41,7 @@ get articles select title, highlight(title)
   limit 10
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>One file, and search built in</summary>
 <p>fenecdb keeps its documents in one file and indexes them — hash,
 unique, ordered, text, points and vectors. The indexes are held in memory
 and built from the documents, the first time a query reads each, and a
@@ -166,7 +166,7 @@ is a brief with the rules FenecQL does not share with SQL, and
   <li><b>No decimals.</b> Store money as cents.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What it gave up, one by one</summary>
 <p>The list is short, and it is made of consequences of the design rather
 than a roadmap.</p>
 

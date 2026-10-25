@@ -112,7 +112,7 @@ fenecdb is at version {{version}}, and is alpha software.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Where the two differ in storage, connections and limits</summary>
 <p>PGlite's IndexedDB file system loads every file of the database into
 memory at the start and flushes them after each query that changed them;
 its OPFS file system needs a worker, and Safari's limit of 252 open sync
@@ -160,7 +160,7 @@ PGlite's files are about 21 times fenecdb's module.</p>
   <li><b>pgvector adds</b> a 45 KB archive, gzipped as published.</li>
 </ul>
 
-<details class="deep"><summary>Method and details</summary>
+<details class="deep"><summary>Method, and what was not measured</summary>
 <p>Measured on 2026-10-02. fenecdb's module as <code>make wasm</code>
 builds it; PGlite's files from the npm package
 <code>@electric-sql/pglite</code> 0.5.8, whose client starts downloading
@@ -251,7 +251,7 @@ over pg_textsearch and pgvector:</p>
   .rows();
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What carries over and what does not</summary>
 <p>There is no importer from PGlite. Its data can be read out with a
 query and written with <code>insert</code>, an array at a time, or, from
 a PostgreSQL server holding the same tables,

@@ -554,7 +554,7 @@ a value worked out over the row with <code>inc</code> and <code>expr</code>
 insert <code>if absent</code>.
 A query is immutable, so a base query can be kept and branched from.</p>
 
-<details class="deep"><summary>Details: one golden file</summary>
+<details class="deep"><summary>How one golden file holds every builder</summary>
 <p><code>integrations/builder-golden.json</code> is the contract: each case a
 chain of steps (<code>{op, args}</code>, the JavaScript builder's names) and
 the statement it must make, its text and parameters, or the refusal and its
@@ -599,7 +599,7 @@ every builder method throws as it is called, so a Swift chain takes one
 <a href="http-reference.html">HTTP reference</a>, and batches on
 <a href="http.html">HTTP endpoint</a>.</p>
 
-<details class="deep"><summary>Details: what the examples are held to</summary>
+<details class="deep"><summary>What the examples and SDK tests run against</summary>
 <p>The programs under <code>integrations/languages</code> are the examples
 above with their asserts: <code>make languages-test</code> starts a
 <code>fenec-server</code> over a new file for each language and runs Python,

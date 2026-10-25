@@ -85,7 +85,7 @@ get events select props.plan, sum(props.v) group props.plan
     <code>match</code>.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Each aggregate, group keys and having</summary>
 <p>A select list with an aggregate in it folds the rows the query finds —
 through the same indexes any <code>where</code> reaches — into one row, or,
 with <code>group</code>, one row per distinct set of the keys' values. Each

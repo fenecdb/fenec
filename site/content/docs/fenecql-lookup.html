@@ -71,7 +71,7 @@ children per parent.</p>
     href="#lookup-folds">A level that folds</a>.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Chains, keys over several fields, folded levels, required, flat rows and costs</summary>
 <pre data-lang="fenecql">get products lookup reviews on product_id
 get products limit 20 lookup reviews on product_id order created desc limit 3
 get products where price &gt;= 10000 select name
@@ -334,7 +334,7 @@ query, and the one column it selects is the list.</p>
     rows counts once.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Why an inner get is uncorrelated, and its cost</summary>
 <pre data-lang="fenecql">get orders where status = "open" and customer in (get customers select id where tier &gt;= $1)
 get orders where not customer in (get customers select id where country = "TR") count
 del sessions where user in (get users select name where banned = true)

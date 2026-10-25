@@ -91,7 +91,7 @@ curl -X POST 'http://127.0.0.1:8080/articles?returning=id' -d '{"title":"newer",
 # [{"id":3}]
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Why the HTTP endpoint is not a separate binary</summary>
 <p>For clients that want no driver at all: <code>fetch</code>,
 <code>curl</code>, or any language's standard library. The schema is already in
 the database, so the surface is derived from it.</p>
@@ -133,7 +133,7 @@ Parameters stay parameters.</p>
     with no dependencies.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How facets and counts travel in an answer</summary>
 <p>The counts answer for the whole set the query matched, not for a row, so
 they go beside the rows rather than into one, and a query that asks for none
 keeps the bare array every client reads. The same holds for a line of a
@@ -193,7 +193,7 @@ JavaScript, <code>batch(...)</code> in Python, <code>Batch</code> in Go,
 Dart; a batch that stops throws the client's error with the statement's
 <code>at</code> and the status.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How a batch runs, fails and is split into lines</summary>
 <p><code>POST /batch</code> takes one query body per line as NDJSON. The
 statements run in order under a single write lock, as one block: their writes
 land in the file as one record, or none of them do. The first error puts back
@@ -248,7 +248,7 @@ after a timeout cannot write it twice: a repeat gets the first answer back.</p>
   <li><b>A failed write keeps no key</b>, so a retry runs it again.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How an Idempotency-Key replays, and what it costs</summary>
 <p>A <code>put</code> with no id makes a row each time it runs, so a client
 that sends a write again after a timeout or a dropped connection — not
 knowing whether the first landed — may write it twice. Send an

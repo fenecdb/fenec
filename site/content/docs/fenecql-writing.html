@@ -85,7 +85,7 @@ insert journal {entry: $1 + ":dr", amount: 0 - $2}           -- two texts joined
     the write result of every SDK.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How set reads the row, and its types, precedence and cost</summary>
 <p><b>Types.</b> The result goes through the field's type check as a
 literal would. Two <code>int</code>s make an <code>int</code>, and a result
 past 64 bits is refused, never wrapped; <code>/</code> between

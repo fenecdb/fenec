@@ -37,7 +37,7 @@ open http://127.0.0.1:8080/_studio/
     your own sign-in (<a href="#security">Security</a>).</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How the studio is served, and its size</summary>
 <p>The studio is plain ES modules and CSS from the repository's
 <code>studio/</code> folder, with the HTTP client and query builder of
 <code>@fenecdb/web/client</code> beside them — no framework and no build
@@ -68,7 +68,7 @@ it for.</p>
     warns you five minutes before it does.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What /_whoami tells the page</summary>
 <p>The identity comes from <code>GET /_whoami</code>, which any client may
 ask: <code>open</code> on a server that asks for no token,
 <code>full</code> for the server's token, and <code>scoped</code> for a JSON
@@ -110,7 +110,7 @@ as it holds, read a page at a time as you scroll.</p>
     may read <code>/_metrics</code>.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How rows are paged and drawn</summary>
 <p>A page is 100 rows. In id order the page after one already read is asked
 for by its last id — <code>get orders where id &gt; $1 limit 100</code> —
 which walks the id index from there; a page reached by a jump, or under an
@@ -144,7 +144,7 @@ del orders where id = $1 require 1
     was read.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How an edit is checked and written</summary>
 <p><code>require 1</code> makes a write that found no row a refusal (412)
 rather than a quiet <code>affected 0</code>, so an edit of a row someone
 deleted meanwhile is told so. The form is built from the schema: a box a
@@ -182,7 +182,7 @@ with your token: it can do what the token may, and nothing more.</p>
     never kept there.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How the editor highlights and splits statements</summary>
 <p>The colours are the docs' own rules: <code>site/build.py</code> writes
 the same patterns and keywords into the editor's highlighter, and
 <code>site/test_highlight.py</code> holds the two to the same output. The
@@ -221,7 +221,7 @@ alter collection orders drop field memo
 drop collection scratch
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How a schema change is planned</summary>
 <p>The statements come from the server: <code>GET /_schema?as=fenecql</code>
 answers the description with its collections as FenecQL, written by the
 engine. The plan is asked of the collection as it would be after the
@@ -253,7 +253,7 @@ before they go.</p>
     to them, deletions included.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How the live view is bounded</summary>
 <p>The view is a subscription, <code>GET /&lt;name&gt;/changes</code> with
 your filter as its shape: first every row it selects, then each write. So
 a shape of more than 10 000 rows is refused before it opens: narrow it
@@ -283,7 +283,7 @@ tenants.</p>
     disk, from <code>GET /_shard/tenants?bytes</code>.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>When the Admin tab appears</summary>
 <p>The tab appears when <code>/_whoami</code> says the token is the
 server's, or the server asks for none; the server decides again on every
 request. Through a router the tenants' list takes the router's
@@ -314,7 +314,7 @@ they do here; the query editor lists examples to run.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How a page in the browser answers like a server</summary>
 <p>Every view reads through one surface: <code>run</code>,
 <code>batch</code> and <code>subscribe</code> as <code>FenecHttp</code>
 has them, and <code>request</code> for an answer shown whole — the editor's
@@ -361,7 +361,7 @@ may read it. Otherwise type the tenant when you connect.</p>
 fenec-shard --listen 127.0.0.1:8090 --directory shard.fenec --studio
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Tenants, tokens and origins</summary>
 <p>A token is bound to the tenants it names on a node, so the picker offers
 nothing it would be refused. Through a router the studio is on the router's
 address and every tenant is that same origin; a page served by a node would

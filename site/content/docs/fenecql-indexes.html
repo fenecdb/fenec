@@ -89,7 +89,7 @@ create the collection, or add it later with <code>create index</code>.</p>
     and <code>chars</code> below.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Index options and what they cost, measured</summary>
 <pre data-lang="fenecql">create index on articles (embed) @hnsw(cosine)
 create index on articles (body) @text
 create index on articles (body) @text(prefix=6)   -- for an inflected language
@@ -236,7 +236,7 @@ get articles where published >= "2026-09-01" order published desc limit 20
     is never written to the file.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>When an ordered walk wins over the scan</summary>
 <pre data-lang="fenecql">get articles where title >= "k" and title < "l" count
 get articles where published >= "2026-01-01" near embed $1 limit 10
 </pre>
@@ -336,7 +336,7 @@ create index on pages (org, slug) @unique                   -- or @unique(org, s
     (<code>meta.lang</code>). A field keeps its own index beside it.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How a key over several fields is laid out</summary>
 <pre data-lang="fenecql">create index on posts (owner, created desc) @sorted        -- built beside the database on a server
 drop index on posts (owner, created)                        -- by its fields
 explain get posts where owner = 7 order created desc limit 20
@@ -439,7 +439,7 @@ while.</p>
     <code>@ttl(12h)</code>, <code>@ttl(7d)</code>.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>The reaper, and what @ttl costs, measured</summary>
 <pre data-lang="fenecql">put sessions {user: "ada", seen: now()}
 set sessions {seen: now()} where user = "ada"        -- seen again: lives on
 get sessions where user = "ada"                       -- nothing once 30 minutes pass

@@ -27,7 +27,7 @@ target   articles.fenec -> articles
 index    category @hash
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What the import derives and writes</summary>
 <p>The import derives the schema, the table's integer key becoming each
 document's id, writes the rows in batches and builds the indexes after the
 last, rather than keep them up a row at a time. The collection goes into
@@ -61,7 +61,7 @@ nothing was written (--dry-run); use --count for the row count
   <li><b><code>--count</code></b> also prints how many rows will be read.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Why --count is a separate flag</summary>
 <p><code>--count</code> is a separate flag because counting means a full scan:
 SQLite keeps the row count nowhere and <code>count(*)</code> in PostgreSQL
 reads the table from the start. Silently reading everything twice would be a
@@ -79,7 +79,7 @@ network. Nothing else needs to be installed for either.</p>
     pgvector's columns are recognised.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How each source is read</summary>
 <p><b>SQLite.</b> The file format is read directly — neither the
 <code>sqlite3</code> library nor the binary is needed. <code>INTEGER PRIMARY
 KEY</code> becomes the document id, <code>--vector field:N</code> turns
@@ -121,7 +121,7 @@ match are refused until you say what to do with <code>--cast</code>.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Types with no equivalent, and --cast</summary>
 <p>Types without an equivalent are not silently rounded: say what you want with
 <code>--cast &lt;field&gt;=&lt;type&gt;</code>. On PostgreSQL,
 <code>--cast price=text</code> preserves a decimal exactly. In SQLite a
@@ -146,7 +146,7 @@ sources.</p>
   <li><b><code>--limit</code></b> counts rows that pass the filter.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Why --where and --source-where are two flags</summary>
 <p><code>--where</code> is a <b>FenecQL expression</b> and behaves identically
 on both sources: it is applied after the row becomes a document and before it
 is written. The field names are the target schema's — the same expression you
@@ -197,7 +197,7 @@ following docs: ctrl-c stops, and the same command resumes
     for it.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How --follow reads, resumes and confirms</summary>
 <p>With <code>--follow</code> the import does not end at the copy: it keeps
 applying the table's inserts, updates, deletes and truncates as they commit,
 until it is interrupted. Run the same command again and it picks up where it
@@ -293,7 +293,7 @@ follow: docs: streaming its changes
     (403); the rest of the file takes writes.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Running the follower inside the server</summary>
 <p>A second process over the follower's file corrupts it, so serving the
 mirror took a copy of it and a process of its own. <code>fenec-server
 --follow</code> runs the follower inside the server instead, over the file
@@ -368,7 +368,7 @@ create collection passages (
 nothing was written (--dry-run); use --count for the row count
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How vector columns are imported</summary>
 <p>The graph is built after the copy, over every vector at once and on
 every core, which is the order a bulk load wants (<a
 href="concepts.html#bulk-load-first-index-after">Bulk load first, index
@@ -389,7 +389,7 @@ either source.</p>
 cargo test -p fenec-import --test all -- --ignored pg:: follow::
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What the import adds to the binary</summary>
 <p>Import is a default feature of the <code>fenec</code> binary and accounts
 for 275 KB of it. <code>--no-default-features</code> removes it, and
 <code>fenec backup</code>, <code>archive</code>, <code>restore</code> and

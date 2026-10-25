@@ -77,7 +77,7 @@ writes are asked to retry for the moment the copy takes.</p>
   <li><b>A failed move</b> puts everything back on the source.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>The steps of a move, and how it resumes</summary>
 <ol>
   <li>The directory marks the tenant <code>moving</code>; it is still routed to
     the source.</li>
@@ -179,7 +179,7 @@ curl -X POST localhost:8090/_shard/query -H 'Authorization: Bearer root' \
     moments: there is no one moment across them.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How a query across tenants is merged, and its cost</summary>
 <p>Tenants are the isolation boundary, and this crosses it, so it is a
 <code>/_shard/</code> endpoint behind the router's <code>--token</code>. A
 JSON Web Token is refused there as any token other than the router's is:

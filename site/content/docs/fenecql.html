@@ -170,8 +170,8 @@ finds the rows whose embedding is closest to one you pass, and
 <h2 id="pages">The reference pages</h2>
 
 <p>A page for each family of statements: what it is for, a run you can repeat,
-then every rule, with the measurements and the internals folded under
-<em>Details</em>.</p>
+then every rule, with the measurements and the internals folded under a
+line that says what is inside.</p>
 
 <ul class="cards">
   <li><a href="fenecql-reading.html">Reading data</a>
@@ -301,7 +301,7 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
     shell</a>.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How insert and put treat an id</summary>
 <p>The <code>id</code> field is automatic. Supplying <code>id</code> inside a
 <code>put</code> turns it into an upsert. <code>insert</code> makes documents
 and never writes over one: a document naming an id that is taken refuses the

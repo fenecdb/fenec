@@ -29,7 +29,7 @@ policy to run it.</p>
     half the file is dead.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Why there is no buffer pool</summary>
 <p>Classic databases cut the disk into pages and copy those pages into a buffer
 pool in user space. The eviction policy, dirty-page tracking, checkpoints and
 most of the locking cost all follow from that one structure.</p>
@@ -87,7 +87,7 @@ ordered index (<code>make open-bench</code>):</p>
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How a 10 GB file opens on an 8 GB machine, and what mapping costs</summary>
 <p>Because the format on disk is the format in memory, the file can be the
 memory: <code>fs::open</code> maps it where the target maps files, and a
 document is decoded from the pages the operating system brings in — and can
@@ -149,7 +149,7 @@ is a type, <code>@hnsw</code> an index and <code>near</code> a clause.</p>
 get articles near embed $1 exact limit 10        -- exact scan, for verification
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How the HNSW graph is built</summary>
 <ul>
   <li>HNSW is written in-house. Every vector lives in one contiguous arena.</li>
   <li>Under the cosine metric vectors are normalised inside the index, so the
@@ -183,7 +183,7 @@ on the filtered field makes a selective filter fast.</p>
   <li><b><code>explain</code></b> says which path ran.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How a filter and a vector are planned together</summary>
 <p>The filter's rows are found first, but only as far as the plan needs
 them. An index hands them over directly — a <code>@hash</code> equality, a
 <code>@sorted</code> range. Otherwise they are probed: rows are tested in
@@ -249,7 +249,7 @@ for a slightly slower search and almost no recall loss.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What half precision saves in memory and loses in recall</summary>
 <p>Precision is part of the type, not of the index — the same choice pgvector
 makes with <code>halfvec</code>. That shrinks the record and the arena
 together; as an index option only the arena would shrink, and in the browser
@@ -291,7 +291,7 @@ exact because the final order comes from the real vectors.</p>
     it on them.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How codes are searched, measured over a million vectors</summary>
 <p>Half precision shrinks the record and the arena together. A quantized
 index leaves the record alone and shrinks the arena further, by holding codes
 instead of vectors.</p>
@@ -414,7 +414,7 @@ get passages near splade $1 limit 10
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How sparse vectors are indexed</summary>
 <p>A learned sparse model weighs a text's vocabulary: SPLADE gives each of
 BERT's 30 522 word pieces a weight, and all but a couple of hundred come out
 zero. It learns which words a text is about, including ones it never uses —
@@ -466,7 +466,7 @@ put docs [ ... 100 000 documents ... ]
 create index on docs (embed) @hnsw(cosine)
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Why the index is built after the load</summary>
 <p>Writing the index during the load makes every insert a graph mutation.
 Building it afterwards turns the write path into a pure append and builds the
 graph in one parallel pass.</p>
@@ -482,7 +482,7 @@ graph in one parallel pass.</p>
 outside packages. That keeps the WebAssembly module small and every line of
 it auditable.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Why there are no dependencies, and what it costs</summary>
 <p>The core uses <code>std</code> and nothing else: its own binary codec, its
 own JSON, its own HNSW, its own lexer and parser, its own SCRAM, even its own
 decimal-to-<code>f64</code> — <code>str::parse</code> reaches for a 12 KB table
@@ -515,7 +515,7 @@ file a server can open.</p>
     file in the origin private file system.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>The glue without wasm-bindgen, and how persist works</summary>
 <p><code>fenec-wasm</code> exposes a C ABI and there is no
 <code>wasm-bindgen</code>. The glue is about 605 lines of JavaScript inside
 <code>web/fenec.js</code>, alongside persistence and the sync layer; the
@@ -573,7 +573,7 @@ bookkeeping other databases need for concurrent writers.</p>
   own binary — one process, one file, one sync policy, one shutdown signal.</p>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How the lock is taken</summary>
 <p>Reads take a shared lock (<code>Database::query</code>), writes take the
 exclusive one (<code>execute_with</code>). A <code>/batch</code> is a block:
 it takes the exclusive lock and holds it until it lands or is put back. One
@@ -629,7 +629,7 @@ no network round trip. The server says what changed, and the copy follows.</p>
 await db.from('tasks').where('priority', '>=', 3).rows();   // local, no network
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Why a replica needs no new layer</summary>
 <p>Because the same engine runs in the browser and on the server, the
 local-copy architecture needed no new layer — only two things: the server being
 able to say "these changed", and the client being able to choose where to bind
@@ -666,7 +666,7 @@ should live.</p>
 <p>The code is a stack of small Rust crates; the engine at the bottom has no
 dependencies at all.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>The crates and what each depends on</summary>
 <p>Dependencies point one way. Nothing points back up.</p>
 
 <pre data-lang="text">fenec-core   storage, indexes, plan executor, plugins, JSON, calendar, changes

@@ -60,7 +60,7 @@ get articles near embed $1 exact limit 10
   <li><b>Each row gets a <code>_score</code></b> column.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How ef, exact and a filter are planned</summary>
 <p><code>ef</code> raises the search beam for this query only, trading latency
 for recall. <code>exact</code> replaces the ANN walk with a full scan, which is
 how you verify recall against ground truth. A query that uses
@@ -92,7 +92,7 @@ create index on articles (embed) @hnsw(cosine, quant=bit)
     about a thirtieth, and cosine only.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What int8 and bit codes hold</summary>
 <p><code>quant=</code> sets what the index holds of each vector:
 <code>int8</code> a byte a component, a quarter of <code>f32</code>, and
 <code>bit</code> a bit a component, about a thirtieth: the signs of how far
@@ -127,7 +127,7 @@ get passages match body $1 near splade $2 fuse limit 10
   <li><b>Index it with <code>@inverted</code>.</b></li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>The sparsevec text form and @inverted</summary>
 <p><code>sparse&lt;N&gt;</code> holds a vector of <code>N</code> dimensions by
 its non-zero entries alone: what a learned sparse model such as SPLADE gives a
 text, a weight for a few dozen or hundred of its vocabulary's 30 522 words. It

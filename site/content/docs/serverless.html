@@ -26,7 +26,7 @@ Inside is faster; a server holds more data and more writers.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Durable Objects, and plain HTTP</summary>
 <p>The browser module runs wherever V8 runs a WebAssembly module, a
 Cloudflare Worker among them. A Durable Object gives it what a file gives a
 server: one writer, and storage that outlives the process. So one object
@@ -111,7 +111,7 @@ export default {
   },
 } satisfies ExportedHandler&lt;Env&gt;;</pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Why open and restore run in blockConcurrencyWhile</summary>
 <p>A Worker imports a <code>.wasm</code> file compiled, and cannot compile
 bytes at run time; <code>Fenec.open</code> takes the module so. The open
 and the restore run inside <code>blockConcurrencyWhile</code>, once: opened
@@ -156,7 +156,7 @@ still there.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How persist lays out the image and the writes</summary>
 <p><code>persist</code> keeps what a file would hold: an image the first
 time, then only the writes since the last call — the engine's journal, as
 <code>persist</code> in the browser takes it for IndexedDB — until they
@@ -226,7 +226,7 @@ link.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What a cold start costs, measured</summary>
 <p>An object evicted, or a deploy, starts the next request with no
 database in memory: the module instantiated, the image and the writes
 after it read out of storage and loaded. The graphs the image holds are
@@ -276,7 +276,7 @@ next. An idle object sets none.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How the alarm sweeps expired rows</summary>
 <p><code>maintain</code> deletes the rows a minute (<code>grace</code>)
 past their time, as a server's sweep does, so a reader of
 <code>expired()</code> as frequent sees each before it goes; 10 000 a call
@@ -339,7 +339,7 @@ objects.</p>
   @fenecdb/web</code>; both are published with each release.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Memory in a 128 MB isolate, measured</summary>
 <p>A Worker's isolate has 128 MB, the WebAssembly memory in it, and
 <code>wrangler dev</code> does not hold a Worker to it: the figures above
 reach past it. What the module holds, measured in Node on the same module
