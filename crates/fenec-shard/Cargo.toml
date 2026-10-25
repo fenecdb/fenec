@@ -75,3 +75,13 @@ path = "tests/cuts.rs"
 [[test]]
 name = "follower_cuts"
 path = "tests/follower_cuts.rs"
+
+# Apart: each test's nodes, routers and links serve on until the process
+# ends, and these leave some 1 200 threads. In `all` beside the rest the
+# process stood at 1 939-2 047 of macOS's 2 048 threads a process under
+# load, and a server that could make no thread for a connection dropped it
+# unanswered: a reset to whichever test was asking, 7 runs of 20 beside
+# busy loops. Apart, `all` peaks at 870 and these at 1 200.
+[[test]]
+name = "read_replicas"
+path = "tests/read_replicas.rs"

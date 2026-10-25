@@ -12,6 +12,14 @@
 //! state and catches up once healed; and in regions keeping their own
 //! directory, each region's router places, routes to and re-points the
 //! read replicas on its nodes, whichever region the tenant lives in.
+//!
+//! A binary of its own: each test's nodes, routers and links serve on
+//! until the process ends, their followers, pools and looks with them, and
+//! these tests leave some 1 200 threads. In `all` beside the others the
+//! process stood at macOS's 2 048 threads a process, where a server that
+//! could make no thread for a connection dropped it unanswered: whichever
+//! test asked then read a reset (`request`'s read, or a node's 502 through
+//! the router).
 
 use fenec_http::replication::{fresh_id, Follower, Replication};
 use fenec_http::tenants::refusals::{self, Stage};
