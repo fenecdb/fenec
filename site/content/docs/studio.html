@@ -41,7 +41,7 @@ open http://127.0.0.1:8080/_studio/
 <code>studio/</code> folder, with the HTTP client and query builder of
 <code>@fenecdb/web/client</code> beside them — no framework and no build
 step. The server embeds the files, so the binary is all you deploy. Its
-first load is 66 KB of JavaScript and CSS, gzipped, its modules preloaded
+first load is 67 KB of JavaScript and CSS, gzipped, its modules preloaded
 together from the page; the query editor, the schema, the live rows and the
 admin view are fetched the first time each is opened, 7 to 19 KB more. The server sends the
 files as they are, uncompressed; a proxy in front may compress them.</p>
@@ -377,6 +377,36 @@ content security policy names.</p>
 <figcaption>On a phone, light and dark: the collections slide in from the side.</figcaption>
 </figure>
 
+<h2 id="host">In an app</h2>
+
+<p>An app that shows the studio in a window of its own — a desktop app over
+the server it started for a file — hands the page its session rather than
+having a token pasted. Before the page's modules run, from a preload script,
+it defines <code>window.fenecHost</code>:</p>
+
+<pre data-lang="js">Object.defineProperty(window, 'fenecHost', {
+  value: Object.freeze({
+    session: Object.freeze({ server: location.origin, token, tenant: null }),
+  }),
+});
+</pre>
+
+<ul>
+  <li><b>The page's own server.</b> The session is taken only when it is
+    frozen and names the origin that served the page; otherwise the page
+    says the app handed it none, and its token is sent nowhere.</li>
+  <li><b>Never stored.</b> The token is not written to session storage: a
+    reload takes the session from the app again.</li>
+  <li><b>The app holds the connection.</b> There is no sign-in form and no
+    Sign out. A token the server refuses is said as the app's connection
+    refused, to be made again from the app.</li>
+</ul>
+
+<p>The token is sent as a pasted one is, so the page has no more authority
+than the token. Start the server with
+<a href="/docs/server#flags"><code>--exit-on-stdin-close</code></a> and a pipe on
+its stdin, and it stops cleanly however the app ends.</p>
+
 <h2 id="security">Security</h2>
 
 <p>The studio is a new surface, not a new authority. Treat it as you would
@@ -387,7 +417,7 @@ sign-in and TLS.</p>
 <table>
 <tbody>
 <tr><td>authority</td><td>none of its own: every statement carries the pasted token, so a scoped token sees its rows alone — in the grid, the counts and the facets</td></tr>
-<tr><td>the token</td><td>session storage of one tab; sent only as <code>Authorization: Bearer</code></td></tr>
+<tr><td>the token</td><td>session storage of one tab, or in an app the session it hands over, stored nowhere; sent only as <code>Authorization: Bearer</code></td></tr>
 <tr><td>headers</td><td><code>Content-Security-Policy</code> with <code>default-src 'self'</code>, no inline script, <code>connect-src 'self'</code> and the <code>--studio-connect</code> origin; <code>X-Frame-Options: DENY</code>; <code>nosniff</code>; no referrer</td></tr>
 <tr><td>values</td><td>shown as text, never as markup; sent as parameters, never spliced</td></tr>
 <tr><td>the editor</td><td>runs what you type, as typed, with your token: no more authority than the token</td></tr>

@@ -36,6 +36,8 @@ pub struct Server {
     pub child: Child,
     pub port: u16,
     pub log: Arc<Mutex<String>>,
+    /// The thread reading stderr into `log`, which ends as the pipe does.
+    reader: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Drop for Server {
@@ -66,6 +68,17 @@ pub fn start_env(args: &[&str], env: &[(&str, &str)]) -> Server {
 
 /// [`try_start`] with variables of its own in the server's environment.
 pub fn try_start_env(args: &[&str], env: &[(&str, &str)]) -> Result<Server, String> {
+    try_start_with(args, env, Stdio::inherit())
+}
+
+/// [`start`] with a pipe on the server's stdin, its write end in
+/// `child.stdin`: dropped, the server reads the end of its input.
+pub fn start_piped(args: &[&str]) -> Server {
+    try_start_with(args, &[], Stdio::piped())
+        .unwrap_or_else(|log| panic!("fenec-server ended before it listened:\n{log}"))
+}
+
+fn try_start_with(args: &[&str], env: &[(&str, &str)], stdin: Stdio) -> Result<Server, String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_fenec-server"));
     cmd.envs(env.iter().copied());
     if !args.contains(&"--http") {
@@ -73,6 +86,7 @@ pub fn try_start_env(args: &[&str], env: &[(&str, &str)]) -> Result<Server, Stri
     }
     let mut child = cmd
         .args(args)
+        .stdin(stdin)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -97,7 +111,7 @@ pub fn try_start_env(args: &[&str], env: &[(&str, &str)]) -> Result<Server, Stri
         log.lock().unwrap().push_str(&line);
     }
     let sink = Arc::clone(&log);
-    std::thread::spawn(move || {
+    let reader = std::thread::spawn(move || {
         let mut line = String::new();
         while err.read_line(&mut line).unwrap_or(0) > 0 {
             sink.lock().unwrap().push_str(&line);
@@ -108,6 +122,7 @@ pub fn try_start_env(args: &[&str], env: &[(&str, &str)]) -> Result<Server, Stri
         child,
         port: port.unwrap(),
         log,
+        reader: Some(reader),
     })
 }
 
@@ -140,6 +155,31 @@ impl Server {
 
     pub fn terminate(self) -> (i32, String) {
         self.signal(SIGTERM)
+    }
+
+    /// Waits up to `within` for the process to end on its own: its exit
+    /// code and everything it logged, or `None` if it was still running.
+    pub fn exited(&mut self, within: Duration) -> Option<(i32, String)> {
+        let deadline = Instant::now() + within;
+        let status = loop {
+            if let Some(status) = self
+                .child
+                .try_wait()
+                .expect("could not wait for the process")
+            {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        // Every line is in once the reader has met the pipe's end.
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+        let log = self.log.lock().unwrap().clone();
+        Some((status.code().unwrap_or(-1), log))
     }
 }
 

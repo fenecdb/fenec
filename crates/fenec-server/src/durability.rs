@@ -6,8 +6,12 @@
 //! - On `SIGINT`, `SIGTERM` or `SIGHUP` a final `sync` runs, and after it
 //!   -- when there is a vector index -- a checkpoint, otherwise every
 //!   restart would link the HNSW graph again from the documents.
+//! - Under `--exit-on-stdin-close` the end of stdin starts that same
+//!   shutdown ([`exit_on_stdin_close`]): every way a server stops sets one
+//!   flag, and the syncer that sees it is the only thing that exits.
 
 use fenec_core::prelude::*;
+use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
@@ -88,6 +92,60 @@ pub fn install_signal_handlers() {
 /// Whether a shutdown signal has arrived.
 pub fn shutdown_requested() -> bool {
     SHUTDOWN.load(Ordering::SeqCst)
+}
+
+/// Starts the shutdown a signal starts, from inside the process. It sets
+/// the flag the signal handler sets and nothing else, so the syncer that
+/// sees it runs the one final sync, checkpoint and exit: a second way
+/// down of its own would be a second place to keep the write lock held
+/// to the exit, and a `--dir` node's tenants and `--follow`'s follower
+/// would each have to be taught it.
+pub fn request_shutdown() {
+    SHUTDOWN.store(true, Ordering::SeqCst);
+}
+
+/// `--exit-on-stdin-close`: a thread that reads stdin until it ends -- the
+/// other end of the pipe closed, or a read failed -- and then starts the
+/// shutdown SIGTERM starts.
+///
+/// For a parent that holds a pipe on the server's stdin, an app opening a
+/// file in it. A parent that is killed (`kill -9`, a crash) sends no
+/// signal, and its server went on running with nobody to answer, holding
+/// `<file>.lock`: the file could not be opened again until something
+/// reaped it. However a process ends, the kernel closes its descriptors,
+/// so the pipe's end comes where the signal does not. Watching the
+/// parent's pid instead is a poll, late by its interval and fooled by a
+/// pid used again, and macOS has no parent-death signal (Linux's
+/// `PR_SET_PDEATHSIG`).
+///
+/// What arrives on stdin is read into one fixed buffer and dropped: nothing
+/// here wants it, and a parent writing to a pipe nobody read would block
+/// once the pipe filled. Read from a terminal, a job sent to the background
+/// would be stopped whole by `SIGTTIN`, its lock held, so the flag refuses
+/// one (`main`). `/dev/null`, or a stdin closed before the start, ends at
+/// once, and the server with it.
+pub fn exit_on_stdin_close() -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("fenec-stdin".into())
+        .spawn(|| {
+            let mut stdin = std::io::stdin();
+            let mut buf = [0u8; 4096];
+            let ended = loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) => break None,
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => break Some(e),
+                }
+            };
+            // The flag first: the line is only what the log says of it.
+            request_shutdown();
+            match ended {
+                None => fenec_http::log!("stdin closed: shutting down"),
+                Some(e) => fenec_http::log!("stdin could not be read ({e}): shutting down"),
+            }
+        })
+        .map(|_| ())
 }
 
 /// The flag a shutdown signal sets, for a thread of the server's that has

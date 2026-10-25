@@ -17,7 +17,7 @@ import { Grid, sortable } from './grid.js';
 import { Sidebar } from './sidebar.js';
 import { tree, readInput } from './values.js';
 import { explain, confirmDelete, insertForm, help } from './edit.js';
-import { saved, save, forget, here, claimsOf, probe, clientFor, whoamiAt, ConnectError } from './connect.js';
+import { saved, save, forget, here, hosted, claimsOf, probe, clientFor, whoamiAt, ConnectError } from './connect.js';
 
 const root = document.getElementById('app');
 const state = {
@@ -115,6 +115,26 @@ function signIn(problem = '') {
   fill(root, h('main', { class: 'signin-page' }, form));
   token.focus();
 }
+
+/**
+ * Under an app (`window.fenecHost`): why its connection failed, and no
+ * form. Another token is the app's to hand over: typed in here, it would
+ * be a connection the app never sees, kept in the tab's storage.
+ */
+function refused(problem) {
+  document.title = 'Not connected · fenec studio';
+  const card = h(
+    'div',
+    { class: 'signin host-refused' },
+    h('div', { class: 'signin-brand' }, mark('mark big'), h('span', {}, 'fenec studio')),
+    h('h1', {}, 'The app’s connection was refused'),
+    h('p', { class: 'form-error', role: 'alert' }, problem),
+    h('p', { class: 'hint' }, `The app that opened this window holds the connection: ${AGAIN}`),
+  );
+  fill(root, h('main', { class: 'signin-page' }, card));
+}
+
+const AGAIN = 'connect again from the app.';
 
 async function connectTo(server, token, tenant) {
   const found = await probe(server, token);
@@ -218,7 +238,8 @@ function layout() {
     },
     title: 'Switch the theme',
   }, dark() ? 'Light' : 'Dark');
-  const out = h('button', { type: 'button', class: 'btn ghost', onclick: () => signOut() }, 'Sign out');
+  // Under an app the connection is the app's: no sign out, no sign in.
+  const out = hosted() ? null : h('button', { type: 'button', class: 'btn ghost', onclick: () => signOut() }, 'Sign out');
   // A database in the page has no server, tenant or token to name.
   const local = state.db.local;
   const tabs = h(
@@ -339,11 +360,11 @@ function tick() {
     parts.horizon.parentElement.classList.toggle('warn', s !== null && s < 300);
     if (s !== null && s < 300 && s > 0 && !warned) {
       warned = true;
-      say(`Your token expires in ${Math.ceil(s / 60)} min. Sign in with a new one to keep working.`, 'warn');
+      say(`Your token expires in ${Math.ceil(s / 60)} min. ${hosted() ? `To keep working, ${AGAIN}` : 'Sign in with a new one to keep working.'}`, 'warn');
     }
     if (s !== null && s <= 0 && warned !== 'dead') {
       warned = 'dead';
-      say('Your token has expired: the server refuses it now. Sign in with a new one.', 'error');
+      say(`Your token has expired: the server refuses it now. ${hosted() ? `To go on, ${AGAIN}` : 'Sign in with a new one.'}`, 'error');
     }
   };
   paint();
@@ -888,7 +909,12 @@ export async function local(db, { examples = [], first = null } = {}) {
 // A page with a database of its own (`data-mode="local"`) calls `local`.
 if (root.dataset.mode !== 'local') {
   const last = saved();
-  if (last) {
+  if (hosted()) {
+    // The app's session, or why there is none: never the form.
+    const why = (e) => refused(e instanceof ConnectError ? e.message : explain(e));
+    if (last) connectTo(last.server, last.token, last.tenant).catch(why);
+    else refused(`The app handed the studio no session for ${here()}.`);
+  } else if (last) {
     connectTo(last.server, last.token, last.tenant).catch((e) => signIn(e instanceof ConnectError ? e.message : explain(e)));
   } else {
     signIn();

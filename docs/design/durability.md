@@ -1,6 +1,6 @@
 # Durability
 
-The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *Durability*: a storage error stopping writes, buffered writes written behind the lock, and the sync log. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *Durability*: a storage error stopping writes, buffered writes written behind the lock, the sync log, and the one shutdown (added after the move). Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Storage errors
 
@@ -94,3 +94,37 @@ the machine (the process forgotten, the file cut back to the log's
 start) through a full log, a sync past an entry, a torn header, a file
 renamed in, a second open and two files of one stem, and fenec-core's
 and fenec-http's tests pass on Linux, where every file keeps one.
+
+## The one shutdown
+
+**Every way a server stops is the one shutdown** (`fenec-server`'s
+`durability`). `SIGINT`, `SIGTERM` and `SIGHUP` set an atomic in their
+handler, which is all a handler may safely do, and the thread that syncs
+-- `run_syncer` over a file, `serve_dir`'s loop over a node's tenants --
+sees it at its next tick: the held writes answered (`waits::end_all`),
+what was registered to run first (`before_shutdown`: `--follow`'s
+follower stopped with every change it applied on disk, the traces sent),
+then the final sync and the checkpoint, the write lock held to
+`process::exit`, so no write is answered between the sync and the exit.
+`--exit-on-stdin-close` sets the same flag (`request_shutdown`) from a
+thread that reads stdin to its end. An app
+that starts a server for a file it opened holds a pipe on the server's
+stdin, and when the app is killed (`kill -9`, a crash) the system closes
+the pipe, where no signal would have come: the desktop studio's spike
+(#381) found the orphaned server, its parent now pid 1, holding
+`<file>.lock`, so the file was refused to the app until its next launch
+reaped the server from a registry of pids. Watching the parent's pid was
+the alternative: a poll, late by its interval and fooled by a pid used
+again, and macOS has no `PR_SET_PDEATHSIG`. What arrives on stdin is read
+into a 4 KB buffer and dropped, so a parent's writes never block on a
+full pipe and nothing grows. `/dev/null`, or a stdin closed before the
+start, ends at once and so does the server, exit 0, which a parent that
+forgot the pipe learns at its first start. A terminal is refused at the
+start (exit 2): a server reading one from the background is stopped whole
+by `SIGTTIN`, its lock held -- the stuck server the flag is for -- and in
+a terminal Ctrl-C makes the same shutdown. A way down of its own, an
+exit from the stdin thread, would have been a second place to hold the
+lock to the exit, and one the `--dir` loop and the follower were never
+taught. `tests/stdin.rs` holds a file's and a node's shutdown to it, a
+server without the flag to never reading stdin, `/dev/null` and a
+terminal.

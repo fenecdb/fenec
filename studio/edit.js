@@ -5,6 +5,7 @@
 import { h, fill } from './dom.js';
 import { insertRow, shown, kindOf, StatementError } from './statements.js';
 import { readInput, multiline } from './values.js';
+import { hosted } from './connect.js';
 
 /**
  * A refusal in words a person can act on. The server's message is kept
@@ -16,7 +17,8 @@ export function explain(err) {
   const msg = err?.message ?? String(err);
   switch (err?.status) {
     case 401:
-      return `The server no longer takes this token: ${msg}. Sign in again.`;
+      // Under an app there is no sign-in: the app holds the connection.
+      return `The server no longer takes this token: ${msg}. ${hosted() ? 'Connect again from the app.' : 'Sign in again.'}`;
     case 403:
       return `Your token's policy refused this: ${msg}.`;
     case 404:

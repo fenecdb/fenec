@@ -9,7 +9,7 @@ use fenec_core::prelude::*;
 use fenec_http::replication::{self, Follower, Replication};
 use fenec_http::tenants::{Refused, Tenants};
 use fenec_server::durability::{self, SyncPolicy};
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -91,6 +91,13 @@ usage: fenec-server [options]
                             the file and the next open does not rebuild it
                             (4.4 s -> 9 ms at 100k x 128). It lengthens
                             shutdown and peaks memory at ~3x the file
+      --exit-on-stdin-close  shut down as on SIGTERM -- sync, checkpoint,
+                            the file's lock let go, exit 0 -- once stdin
+                            ends: for a parent holding a pipe on it, whose
+                            end closes however the parent ends, kill -9
+                            too. What arrives is read and dropped. Stdin of
+                            /dev/null ends at once, and the server exits at
+                            once; a terminal is refused
       --max-connections <n> ceiling on concurrent connections (0 = unlimited)
                             default: 100. Every connection is a thread
       --idle-timeout <s>    close a keep-alive connection silent for this
@@ -327,6 +334,7 @@ fn start_tracing(options: fenec_http::trace::Options, service: &str) {
 fn main() {
     let mut sync = SyncPolicy::Interval(Duration::from_millis(250));
     let mut checkpoint = true;
+    let mut stdin_close = false;
     let mut file: Option<String> = None;
     let mut dir: Option<String> = None;
     let mut mmap = true;
@@ -396,6 +404,7 @@ fn main() {
                 Err(e) => fail(&e),
             },
             "--no-checkpoint" => checkpoint = false,
+            "--exit-on-stdin-close" => stdin_close = true,
             "--max-connections" => {
                 let v = next(&mut i, "--max-connections");
                 http_cfg.max_connections = v.parse().unwrap_or_else(|_| {
@@ -767,6 +776,15 @@ fn main() {
     if lease && dir.is_none() {
         fail("--lease is a tenant node's, whose router grants it: give --dir");
     }
+    // A terminal ends only at Ctrl-D, and a server reading one from the
+    // background is stopped whole by SIGTTIN, `<file>.lock` held: the stuck
+    // server the flag is there to prevent.
+    if stdin_close && std::io::stdin().is_terminal() {
+        fail(
+            "--exit-on-stdin-close watches a pipe its parent holds, and stdin is a terminal: \
+             in a terminal, Ctrl-C stops the server as cleanly",
+        );
+    }
     if !quota.is_none() && dir.is_none() {
         fail("the --tenant-* quotas hold a node's tenants: give --dir");
     }
@@ -855,6 +873,7 @@ fn main() {
             repl,
             warm.flatten(),
             quota,
+            stdin_close,
         );
     }
 
@@ -962,6 +981,10 @@ fn main() {
     // supervisor may send SIGTERM, and the flag it sets waits for the
     // syncer below.
     durability::install_signal_handlers();
+    if stdin_close {
+        durability::exit_on_stdin_close()
+            .unwrap_or_else(|e| fail(&format!("could not start the stdin thread: {e}")));
+    }
 
     if let Some(m) = mirror {
         let table = m.table.clone();
@@ -1050,6 +1073,7 @@ fn serve_dir(
     repl: Option<fenec_http::tenants::Replicated>,
     warm: Option<fenec_http::warm::Warm>,
     quota: fenec_http::quota::Quota,
+    stdin_close: bool,
 ) -> ! {
     let tenants = match Tenants::new(dir) {
         Ok(t) => t,
@@ -1108,8 +1132,13 @@ fn serve_dir(
         Err(e) => fail(&format!("could not open the HTTP endpoint: {e}")),
     };
     // Before the thread that announces the listener: once the line is out,
-    // SIGTERM must sync.
+    // SIGTERM must sync, and so must the end of stdin, which sets the same
+    // flag this loop looks at.
     durability::install_signal_handlers();
+    if stdin_close {
+        durability::exit_on_stdin_close()
+            .unwrap_or_else(|e| fail(&format!("could not start the stdin thread: {e}")));
+    }
     std::thread::Builder::new()
         .name("fenec-http".into())
         .spawn(move || {

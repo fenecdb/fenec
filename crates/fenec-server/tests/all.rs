@@ -9,6 +9,7 @@ mod logs;
 mod mcp;
 mod otlp;
 mod shutdown;
+mod stdin;
 mod studio;
 mod support;
 mod tokens;
