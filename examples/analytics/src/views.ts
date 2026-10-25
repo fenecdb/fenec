@@ -212,7 +212,7 @@ ${
     : ''
 }
 </main></div>
-<footer>Times are UTC. Page made in ${opts.ms.toFixed(0)} ms. Kestrel is an example of <a href="https://github.com/fenecdb/fenec/tree/main/examples/analytics">fenecdb</a>; every site, visitor and number here is invented.</footer>`;
+<footer>Times are UTC. Page made in ${opts.ms.toFixed(0)} ms. Kestrel is an example of <a href="https://github.com/fenecdb/fenecdb/tree/main/examples/analytics">fenecdb</a>; every site, visitor and number here is invented.</footer>`;
   return page({ title: `${site.label}, ${range.label.toLowerCase()}: Kestrel`, body });
 }
 
@@ -271,7 +271,7 @@ ${head}
 <div class="scroll"><table class="quotes"><caption class="sr">Every symbol's last price, change over the window, high, low, VWAP and volume</caption><thead><tr><th scope="col">Symbol</th><th scope="col" class="num">Last</th><th scope="col" class="num">Change</th><th scope="col" class="num hide-s">High</th><th scope="col" class="num hide-s">Low</th><th scope="col" class="num">VWAP</th><th scope="col" class="num hide-s">Volume</th></tr></thead>
 <tbody id="quotes">${quoteRows(opts.rows, opts.quotes, sym, window, interval)}</tbody></table></div></section>
 </main>
-<footer>Ticks from a seeded random walk of 50 invented symbols; prices are no one's. Times are UTC. <a href="/">Kestrel</a> is an example of <a href="https://github.com/fenecdb/fenec/tree/main/examples/analytics">fenecdb</a>.</footer>`;
+<footer>Ticks from a seeded random walk of 50 invented symbols; prices are no one's. Times are UTC. <a href="/">Kestrel</a> is an example of <a href="https://github.com/fenecdb/fenecdb/tree/main/examples/analytics">fenecdb</a>.</footer>`;
   return page({
     title: `${sym} and 49 more: market data on fenecdb`,
     description: 'Ticks for 50 invented symbols as they land: one-minute bars, VWAP and the latest prices, each a FenecQL statement over the raw ticks.',

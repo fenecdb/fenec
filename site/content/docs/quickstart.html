@@ -82,7 +82,7 @@ module's URL, and a page whose queries run on a server imports
 href="javascript.html#packages">Which package</a>). No npm: the same files, the
 module and the <code>collate/</code> data beside them, are
 <code>fenec-web-v{{version}}.tar.gz</code> on the <a
-href="https://github.com/fenecdb/fenec/releases/tag/v{{version}}">release</a>.</p>
+href="https://github.com/fenecdb/fenecdb/releases/tag/v{{version}}">release</a>.</p>
 
 <p>In Node, where <code>fetch</code> cannot resolve a relative path, hand
 <code>Fenec.open</code> the bytes:</p>
@@ -125,7 +125,7 @@ for a token.</p>
 
 <div class="lang" data-name="Release binary">
 <pre data-lang="bash" data-label="download">TARGET=aarch64-apple-darwin   # or x86_64-apple-darwin, aarch64-unknown-linux-musl, x86_64-unknown-linux-musl
-curl -LO https://github.com/fenecdb/fenec/releases/download/v{{version}}/fenec-v{{version}}-$TARGET.tar.gz
+curl -LO https://github.com/fenecdb/fenecdb/releases/download/v{{version}}/fenec-v{{version}}-$TARGET.tar.gz
 tar -xzf fenec-v{{version}}-$TARGET.tar.gz
 cd fenec-v{{version}}-$TARGET</pre>
 <pre data-lang="bash" data-label="run">FENEC_HTTP_TOKEN=secret ./fenec-server --file data.fenec</pre>
@@ -209,7 +209,7 @@ console.log(hits.map((h) =&gt; h.title));</pre>
 
 <div class="lang" data-name="Go">
 <pre data-lang="bash" data-label="install">go mod init notes
-go get github.com/fenecdb/fenec/integrations/go   # the standard library alone</pre>
+go get github.com/fenecdb/fenecdb/integrations/go   # the standard library alone</pre>
 <pre data-lang="go" data-label="main.go">package main
 
 import (
@@ -217,7 +217,7 @@ import (
 	"fmt"
 	"log"
 
-	fenecdb "github.com/fenecdb/fenec/integrations/go"
+	fenecdb "github.com/fenecdb/fenecdb/integrations/go"
 )
 
 type Note struct {
@@ -293,7 +293,7 @@ curl -sN -H 'Authorization: Bearer secret' 'http://127.0.0.1:8080/notes/changes?
 <p>A release's files are listed with their checksums in
 <code>SHA256SUMS</code>:</p>
 
-<pre data-lang="bash">curl -LO https://github.com/fenecdb/fenec/releases/download/v{{version}}/SHA256SUMS
+<pre data-lang="bash">curl -LO https://github.com/fenecdb/fenecdb/releases/download/v{{version}}/SHA256SUMS
 shasum -a 256 -c --ignore-missing SHA256SUMS    # Linux: sha256sum -c --ignore-missing SHA256SUMS</pre>
 
 <p>There is no TLS in the server: on a network, put a terminator such as Caddy
@@ -317,7 +317,7 @@ statement at a time. It is in the release tarball beside the server.</p>
     <p>Download the release and go into its folder. Skip this if you already
     have it from the server's steps.</p>
 <pre data-lang="bash">TARGET=aarch64-apple-darwin   # or x86_64-apple-darwin, aarch64-unknown-linux-musl, x86_64-unknown-linux-musl
-curl -LO https://github.com/fenecdb/fenec/releases/download/v{{version}}/fenec-v{{version}}-$TARGET.tar.gz
+curl -LO https://github.com/fenecdb/fenecdb/releases/download/v{{version}}/fenec-v{{version}}-$TARGET.tar.gz
 tar -xzf fenec-v{{version}}-$TARGET.tar.gz
 cd fenec-v{{version}}-$TARGET</pre>
   </li>
@@ -414,7 +414,7 @@ href="fenecql.html#highlights">Highlights and snippets</a>).</p>
 <ul>
   <li><b>Swift, Kotlin and Flutter.</b> The database is a file on the device,
     with live queries driving the UI and an optional replica of a server:
-    SwiftPM <code>github.com/fenecdb/fenec</code>, the AAR
+    SwiftPM <code>github.com/fenecdb/fenecdb</code>, the AAR
     <code>com.fenecdb:fenecdb-android</code>, <code>flutter pub add
     fenecdb_flutter</code>. <a href="mobile.html">Mobile and native apps</a>
     has a todo list in all three.</li>
@@ -458,5 +458,5 @@ href="fenecql.html#highlights">Highlights and snippets</a>).</p>
     href="build.html">Build from source</a>.<span id="make-targets-worth-knowing"></span></li>
   <li><b>Examples.</b> One small app, Notes, in every language, each a folder
     to clone and run: <a
-    href="https://github.com/fenecdb/fenec/tree/main/examples">examples</a>.</li>
+    href="https://github.com/fenecdb/fenecdb/tree/main/examples">examples</a>.</li>
 </ul>

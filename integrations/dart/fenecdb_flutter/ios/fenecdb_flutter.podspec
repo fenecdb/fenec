@@ -10,7 +10,7 @@ Pod::Spec.new do |s|
   s.name             = 'fenecdb_flutter'
   s.version          = '0.1.11'
   s.summary          = 'fenecdb in a Flutter app: the native library for iOS.'
-  s.homepage         = 'https://github.com/fenecdb/fenec'
+  s.homepage         = 'https://github.com/fenecdb/fenecdb'
   s.license          = { :type => 'Apache-2.0' }
   s.author           = { 'fenecdb' => 'https://github.com/fenecdb' }
   s.source           = { :path => '.' }

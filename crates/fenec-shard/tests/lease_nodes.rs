@@ -27,6 +27,8 @@ pub const TERM: Duration = Duration::from_secs(3);
 pub const SHORT: Duration = Duration::from_millis(600);
 
 pub struct Node {
+    /// What the test named it: its admin token is `adm-<tag>`.
+    pub tag: String,
     pub port: u16,
     pub dir: PathBuf,
     /// What the router and the replicas reach the node through.
@@ -65,6 +67,7 @@ pub fn node(tag: &str, lease: bool) -> Node {
         let _ = server.serve_on(listener);
     });
     Node {
+        tag: tag.to_string(),
         port: addr.port(),
         dir,
         proxy: Proxy::to(&addr.to_string()),
@@ -330,11 +333,65 @@ pub fn query(port: u16, path: &str, sql: &str) -> (u16, String) {
 pub fn until(port: u16, path: &str, sql: &str, want: &str) {
     let deadline = Instant::now() + WITHIN;
     loop {
-        let (_, body) = query(port, path, sql);
+        let (status, body) = query(port, path, sql);
         if body.contains(want) {
             return;
         }
-        assert!(Instant::now() < deadline, "{path} {sql}: {body}");
+        assert!(
+            Instant::now() < deadline,
+            "{path} {sql} on :{port} never answered with {want}: the last answer {status} {body}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// What `nd` says of its file of `tenant` (`GET
+/// /_admin/tenants/<t>/lineage`): the status, and the body naming its
+/// lineage and whether it is `ready`.
+pub fn lineage_on(nd: &Node, tenant: &str) -> (u16, String) {
+    let target = format!("/_admin/tenants/{tenant}/lineage");
+    call(
+        nd.port,
+        "GET",
+        &target,
+        "",
+        Some(&format!("adm-{}", nd.tag)),
+    )
+}
+
+/// Waits until `tenant`'s copy on `copy` is the tenant as its primary on
+/// `primary` holds it: of the primary's lineage, and ready -- it has heard
+/// from the primary since it was told to follow it. Only such a copy is
+/// promoted: one that has not taken its primary's image is of a lineage of
+/// its own, a new file's, and its node refuses to promote it (409,
+/// `tenants::Expected`), the tenant left where it was. Where it never comes,
+/// both nodes' last answers say why: a 404 is a copy not made there, a
+/// lineage of its own one that has not taken the image, `"ready":false`
+/// one that has not heard from its primary since it was told to follow it.
+pub fn until_copied(tenant: &str, primary: &Node, copy: &Node) {
+    let deadline = Instant::now() + WITHIN;
+    loop {
+        let (status, theirs) = lineage_on(primary, tenant);
+        let (copy_status, ours) = lineage_on(copy, tenant);
+        let lineage = theirs
+            .split("\"lineage\":\"")
+            .nth(1)
+            .and_then(|l| l.split('"').next());
+        if status == 200
+            && copy_status == 200
+            && lineage.is_some_and(|l| ours.contains(&format!("\"lineage\":\"{l}\"")))
+            && ours.contains("\"ready\":true")
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{tenant}'s copy on {c} never took its primary's image and heard from it, so no \
+             failover would promote it: {c} answered {copy_status} {ours}, the primary's node \
+             {p} {status} {theirs}",
+            c = copy.tag,
+            p = primary.tag
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
 }

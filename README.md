@@ -1,6 +1,6 @@
 # fenecdb
 
-[![ci](https://github.com/fenecdb/fenec/actions/workflows/ci.yml/badge.svg)](https://github.com/fenecdb/fenec/actions/workflows/ci.yml)
+[![ci](https://github.com/fenecdb/fenecdb/actions/workflows/ci.yml/badge.svg)](https://github.com/fenecdb/fenecdb/actions/workflows/ci.yml)
 
 An embedded document database for an app's data, from the page to the
 server: state its screens follow live, a replica on the device that syncs
@@ -153,7 +153,7 @@ A first query in a few commands, from a release, a package or an image:
 instead ([Build from source](https://fenecdb.com/docs/build)):
 
 ```bash
-git clone https://github.com/fenecdb/fenec && cd fenec
+git clone https://github.com/fenecdb/fenecdb && cd fenecdb
 make test     # the Rust suite, then the JS suite
 make serve    # builds the wasm and serves the browser console on :8787
 ```
@@ -195,7 +195,7 @@ of their own, each its standard library alone:
 | --- | --- | --- |
 | Python | `pip install fenecdb` (with the LangChain and LlamaIndex stores) | [`integrations/python`](integrations/python) |
 | JavaScript | `npm install @fenecdb/web` (`connect`) | [`web/`](web) |
-| Go | `go get github.com/fenecdb/fenec/integrations/go` | [`integrations/go`](integrations/go) |
+| Go | `go get github.com/fenecdb/fenecdb/integrations/go` | [`integrations/go`](integrations/go) |
 | .NET | `dotnet add package FenecDb` | [`integrations/dotnet`](integrations/dotnet) |
 
 ```bash
@@ -255,7 +255,7 @@ queued while offline, over the platform's own HTTP client and its TLS -- and
 
 | Language | Package | From |
 | --- | --- | --- |
-| Swift | SwiftPM: `github.com/fenecdb/fenec`, product `FenecDB` | [`integrations/swift`](integrations/swift) |
+| Swift | SwiftPM: `github.com/fenecdb/fenecdb`, product `FenecDB` | [`integrations/swift`](integrations/swift) |
 | Kotlin | `com.fenecdb:fenecdb-android` (the AAR), `com.fenecdb:fenecdb` (the JVM) | [`integrations/kotlin`](integrations/kotlin) |
 | Dart | `flutter pub add fenecdb_flutter`, or `fenecdb` in Dart alone | [`integrations/dart`](integrations/dart) |
 

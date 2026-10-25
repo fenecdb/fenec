@@ -21,7 +21,7 @@
     },
     "links": [
       { "name": "Docs", "url": "https://fenecdb.com/docs/grafana" },
-      { "name": "Source", "url": "https://github.com/fenecdb/fenec/tree/main/integrations/grafana" }
+      { "name": "Source", "url": "https://github.com/fenecdb/fenecdb/tree/main/integrations/grafana" }
     ],
     "screenshots": [],
     "version": "%VERSION%",

@@ -306,7 +306,7 @@ jobs:
           cat SHA256SUMS
 
       # A Go module in a subdirectory is fetched by a tag naming its
-      # directory: `go get github.com/fenecdb/fenec/integrations/go@vX.Y.Z`
+      # directory: `go get github.com/fenecdb/fenecdb/integrations/go@vX.Y.Z`
       # looks for integrations/go/vX.Y.Z, and vX.Y.Z alone is none of its
       # versions. Pushed beside the release's own, at the same commit, once
       # the builds above have passed; a push with the workflow's token starts

@@ -1,7 +1,7 @@
 # Notes -- Go (server)
 
 A notes CLI over a `fenec-server`, with the Go SDK
-(`github.com/fenecdb/fenec/integrations/go`): the standard library alone,
+(`github.com/fenecdb/fenecdb/integrations/go`): the standard library alone,
 every query sent over HTTP.
 
 ## What it shows
@@ -20,7 +20,7 @@ every query sent over HTTP.
 ## Prerequisites
 
 Go 1.22 or newer, and `fenec-server`: a [release
-binary](https://github.com/fenecdb/fenec/releases), or
+binary](https://github.com/fenecdb/fenecdb/releases), or
 `cargo build --release -p fenec-server` at the repository's root
 (`target/release/fenec-server`).
 
@@ -45,6 +45,14 @@ go run . smoke                           # the whole tour, checked: what CI runs
 
 `FENEC_URL` and `FENEC_TOKEN` point it at another server; `secret` is a
 development default, never one to deploy.
+
+The SDK's module path follows the repository's name: v0.1.11 and earlier
+were published as `github.com/fenecdb/fenec/integrations/go`, before the
+repository became `fenecdb`, so `go.mod`'s `v0.1.11` of the new path does
+not resolve. The next release (`make version` writes its number there) is
+the first that does; until then `go mod tidy` cannot fetch the SDK, and the
+example runs on this checkout's, as under "Against this repository's
+build" below.
 
 ## The core
 
@@ -78,7 +86,7 @@ written into a copy of `go.mod`:
 
 ```sh
 cd examples/go
-go mod edit -replace github.com/fenecdb/fenec/integrations/go=../../integrations/go
+go mod edit -replace github.com/fenecdb/fenecdb/integrations/go=../../integrations/go
 go run . smoke
 ```
 

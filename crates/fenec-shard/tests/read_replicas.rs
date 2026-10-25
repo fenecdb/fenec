@@ -780,6 +780,31 @@ fn until(what: &str, mut check: impl FnMut() -> bool) {
     }
 }
 
+/// Waits until `tenant`'s copy on `name`, the node at `port`, has taken its
+/// primary's image and heard from it: it answers a marked read of the
+/// tenant's collection, which a copy that has not refuses (503, not caught
+/// up) or holds none of. A failover promotes it; a copy that has not taken
+/// the image is of a lineage of its own, a new file's, and its node refuses
+/// to promote it (409, `tenants::Expected`). Where it never comes, the last
+/// answer says which: a 503 not caught up, a 404 no such tenant or
+/// collection there.
+fn until_copied(port: u16, name: &str, tenant: &str) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let (status, body) = marked(port, tenant, "get notes count", None);
+        if status == 200 {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{tenant}'s copy on {name} never took its primary's image and heard from it, so no \
+             failover would promote it: a marked read of its collection there last answered \
+             {status} {body}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// The text after `"key":"` in a JSON text, to its closing quote.
 fn text_of(json: &str, key: &str) -> Option<String> {
     let rest = json.split(&format!("\"{key}\":\"")).nth(1)?;
@@ -924,19 +949,11 @@ impl OneDirectory {
     }
 
     /// Waits until the tenant's own replica on eu2 has taken its primary's
-    /// image, where no write is there to wait for: it answers a marked read
-    /// of its collection, which a copy that has not refuses (503) or holds
-    /// none of. A failover promotes it; a copy that has not taken the image
-    /// is of a lineage of its own, a new file's, and its node refuses to
-    /// promote it (409, `tenants::Expected`) -- the tenant left on eu1, the
-    /// failover answered 502, where eu2's image was held three seconds at
-    /// eu1's link.
+    /// image, where no write is there to wait for ([`until_copied`]): the
+    /// tenant left on eu1 otherwise, the failover answered 502, where eu2's
+    /// image was held three seconds at eu1's link.
     fn copied(&self, tenant: &str) {
-        let eu2 = self._nodes[1].port;
-        until(
-            "the tenant's replica on eu2 takes its primary's image",
-            || marked(eu2, tenant, "get notes count", None).0 == 200,
-        );
+        until_copied(self._nodes[1].port, "eu2", tenant);
     }
 
     /// Waits until the read replica of `tenant` follows the node behind
@@ -1524,15 +1541,13 @@ fn regions_keeping_their_own_directory_place_and_repoint_their_read_replicas() {
     // at its next look, and points its read replica at the new primary.
     let (_, shown) = shard(global, "GET", "/_shard/tenants/ab", "");
     let from = text_of(&shown, "node").unwrap();
-    // Its own replica in eu has taken its image, as [`OneDirectory::copied`]
-    // waits for: one that has not, its node refuses to promote.
+    // Its own replica in eu has taken its image: one that has not, its node
+    // refuses to promote.
     let copy = text_of(&shown, "replica")
         .filter(|r| !r.is_empty())
         .unwrap_or_else(|| panic!("ab has no replica in eu: {shown}"));
     let copy_port = nodes[names.iter().position(|n| *n == copy).unwrap()].port;
-    until("ab's own replica takes its primary's image", || {
-        marked(copy_port, "ab", "get notes count", None).0 == 200
-    });
+    until_copied(copy_port, &copy, "ab");
     let (status, body) = shard(
         global,
         "POST",
