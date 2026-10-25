@@ -504,6 +504,28 @@ c('count takes no require', docs, ['where', 'a', 1], ['require', 1], ['count']);
 c('a whole-collection aggregate takes no require', ['from', 'orders'], ['select', 'count(*)'], ['require', 1], Q);
 c('a write takes require as its option', docs, ['where', 'id', 1], ['require', 1], ['delete']);
 
+// `{ reason }` beside a write's `{ require: n }`, and `require(n, { reason })`
+// on a read: `require n else '<reason>'`, which the 412 says as its
+// `reason`. Written into the text -- never a parameter, as the count is
+// not -- a quote doubled and a backslash escaped; 1 to 200 bytes of UTF-8.
+c('update require with a reason', ['from', 'accounts'], ['where', 'name', 'a'], ['where', 'balance', { gte: 5 }], ['toUpdate', { balance: { $inc: -5 } }, { require: 1, reason: 'insufficient funds' }]);
+c('delete require with a reason through the endpoint', docs, ['where', 'id', 7], ['delete', { require: 1, reason: 'no such doc' }]);
+c('insert if absent require with a reason', ['from', 'likes'], ['toInsert', { post: 1, user: 'u' }, { ifAbsent: true, require: 1, reason: 'liked already' }]);
+c('an insert with a reason answers what it made', ['from', 'locks'], ['insert', { name: 'job' }, { ifAbsent: true, returning: ['id'], require: 1, reason: 'held' }]);
+c('upsert require with a reason', hits, ['toUpsert', { key: 'a', n: 1 }, { n: { $inc: 1 } }, { require: 1, reason: 'one counter' }]);
+c('a claim of one or none says why', ['from', 'jobs'], ['where', 'queue', 'mail'], ['order', 'run_at'], ['limit', 1], ['toUpdate', { owner: 'w1' }, { returning: true, require: 1, reason: 'no job ready' }]);
+c('a reason doubles its quotes and escapes its backslashes', docs, ['where', 'id', 1], ['toDelete', { require: 1, reason: "it's a \\ b" }]);
+c('a reason keeps letters past ASCII', docs, ['where', 'id', 1], ['toDelete', { require: 1, reason: 'böyle bir kayıt yok' }]);
+c('a reason of 200 bytes', docs, ['where', 'id', 1], ['toDelete', { require: 1, reason: 'ş'.repeat(100) }]);
+c('a reason past 200 bytes is refused', docs, ['where', 'id', 1], ['toDelete', { require: 1, reason: `${'ş'.repeat(100)}x` }]);
+c('an empty reason is refused', docs, ['where', 'id', 1], ['toDelete', { require: 1, reason: '' }]);
+c('a reason goes with require', docs, ['where', 'id', 1], ['toUpdate', { a: 1 }, { reason: 'why' }]);
+c('get require with a reason', ['from', 'accounts'], ['where', 'id', 3], ['limit', 1], ['require', 1, { reason: 'no such account' }], Q);
+c('rows sends require with its reason', ['from', 'coupons'], ['where', 'code', 'X1'], ['require', 1, { reason: 'no such coupon' }], ['rows']);
+c('a get reason goes before a lookup', ['from', 'orders'], ['where', 'id', 3], ['require', 1, { reason: 'no such order' }], ['lookup', 'lines', { on: 'order_id', limit: 5 }], Q);
+c('a later require takes its own reason or none', docs, ['require', 1, { reason: 'one' }], ['require', 2], Q);
+c('a get reason past 200 bytes is refused', docs, ['require', 1, { reason: 'x'.repeat(201) }], Q);
+
 // `order` and `limit` pick the rows an update or a delete writes, and
 // `{ returning }` answers them: a job queue's claim, ack and pop.
 const jobs = ['from', 'jobs'];
@@ -590,6 +612,9 @@ c('docs: the articles before a year deleted', arts, ['where', 'year', '<', 2000]
 c('docs: a product that must be there at its price', prods, ['where', 'sku', 'tee'], ['where', 'price', 1200], ['where', 'stock', '>', 0], ['require', 1], ['rows']);
 c('docs: a coupon that must still be usable', ['from', 'coupons'], ['where', 'code', 'X1'], ['where', { $raw: ['uses < max_uses'] }], ['limit', 1], ['require', 1], ['rows']);
 c('docs: no hold that must be there', ['from', 'holds'], ['where', 'order_ref', 'o-17'], ['where', 'state', 'held'], ['require', 0], ['rows']);
+c('docs: a debit that must find the money, or says why', ['from', 'accounts'], ['where', 'name', 'ada'], ['where', 'balance', '>=', 30], ['update', { balance: { $expr: ['balance - ?', 30] } }, { require: 1, reason: 'insufficient funds' }]);
+c('docs: a hold deleted that must be there, or says why', ['from', 'holds'], ['where', 'order_ref', 'o-17'], ['where', 'state', 'held'], ['delete', { require: 1, reason: "it's not held" }]);
+c('docs: a coupon that must still be usable, or says why', ['from', 'coupons'], ['where', 'code', 'X1'], ['where', { $raw: ['uses < max_uses'] }], ['limit', 1], ['require', 1, { reason: 'coupon used up' }], ['rows']);
 
 // ------------------------------------------------------------------ writing
 

@@ -143,8 +143,27 @@ public sealed class ClientTests(Servers servers)
         var (gone, goneParams) = accounts.Where("name", "=", "nobody").ToDelete(require: 1);
         e = await Assert.ThrowsAsync<FenecException>(() => db.BatchAsync([new(debit, debitParams), new(gone, goneParams)]));
         Assert.Equal((412, "unmet", 0, 1), (e.Status, e.Code, e.Completed, e.At));
+        Assert.Null(e.Reason);
         var rows = await db.QueryAsync($"get {name} select balance");
         Assert.Equal([5L], rows.Select(r => r.GetProperty("balance").GetInt64()));
+
+        // A reason tells which guard refused, wherever it stands in the batch.
+        var (funds, fundsParams) = accounts.Where("name", "=", "a").Where("balance", ">=", 50)
+            .ToUpdate(new { balance = 0 }, require: 1, reason: "insufficient funds");
+        var (credit, creditParams) = accounts.Where("name", "=", "nobody")
+            .ToUpdate(new { balance = 50 }, require: 1, reason: "no account to credit");
+        e = await Assert.ThrowsAsync<FenecException>(() => db.BatchAsync([new(funds, fundsParams), new(credit, creditParams)]));
+        Assert.Equal((412, (int?)0, "insufficient funds"), (e.Status, e.At, e.Reason));
+        e = await Assert.ThrowsAsync<FenecException>(() => db.BatchAsync([new(credit, creditParams)]));
+        Assert.Equal(((int?)0, "no account to credit"), (e.At, e.Reason));
+        // Written into the text, its quote and backslash come back as given.
+        e = await Assert.ThrowsAsync<FenecException>(() =>
+            accounts.Where("name", "=", "nobody").DeleteAsync(require: 1, reason: "it's a \\ b"));
+        Assert.Equal("it's a \\ b", e.Reason);
+        // A read's guard says its reason too.
+        e = await Assert.ThrowsAsync<FenecException>(() =>
+            accounts.Where("name", "=", "nobody").Require(1, reason: "no such account").RowsAsync());
+        Assert.Equal((412, "no such account"), (e.Status, e.Reason));
     }
 
     // A job queue's claim: Order and Limit pick the rows UpdateAsync writes, and returning hands them back in
@@ -537,6 +556,21 @@ public sealed class ClientTests(Servers servers)
         Assert.Equal(("writes", (TimeSpan?)TimeSpan.FromMilliseconds(2)), (soon.Quota, soon.RetryAfter));
         var moved = FenecException.From(503, "{\"error\":\"the tenant is being moved\",\"retry_after\":1}");
         Assert.Equal(TimeSpan.FromSeconds(1), moved.RetryAfter);
+    }
+
+    // A require n else '<reason>' that refused says its reason beside the message, and a batch's stop's beside its
+    // At; null where the statement gave none.
+    [Fact]
+    public void ARequireThatRefusedSaysItsReason()
+    {
+        var unmet = FenecException.From(412,
+            "{\"error\":\"no such account (`set accounts` wrote 0 rows, and requires 1)\",\"reason\":\"no such account\"}");
+        Assert.Equal(("unmet", "no such account", (int?)null), (unmet.Code, unmet.Reason, unmet.At));
+        var stopped = FenecException.From(412,
+            "{\"error\":\"unmet: no account to credit (`set accounts` wrote 0 rows, and requires 1)\",\"completed\":0,\"at\":1,\"reason\":\"no account to credit\"}");
+        Assert.Equal(((int?)1, 0, "no account to credit"), (stopped.At, stopped.Completed, stopped.Reason));
+        var plain = FenecException.From(412, "{\"error\":\"`set accounts` wrote 0 rows, and requires 1\"}");
+        Assert.Null(plain.Reason);
     }
 
     // A write a node answered after its lease lapsed is told apart from the server's own error by its body's

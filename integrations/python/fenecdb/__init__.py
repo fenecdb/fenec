@@ -121,6 +121,12 @@ class FenecError(Exception):
     and how many statements stayed applied (`completed`: 0, since a batch
     lands whole, but for one holding a `compact`); both None otherwise.
 
+    A `require n else '<reason>'` that refused says its reason (`reason`,
+    the builders' `reason=`): the statement's own words, by which a caller
+    tells "insufficient funds" from "no such account" -- where `at` moves
+    with every statement added in front of it. None where the statement
+    gave none.
+
     A tenant's quota names itself (`quota`): "bytes" and "rows" answer 507,
     and room is made by deleting; "streams", "held", "requests", "writes"
     and "write_bytes" answer 429, with the seconds to wait before sending
@@ -149,11 +155,13 @@ class FenecError(Exception):
         outcome: str | None = None,
         seq: int | None = None,
         history: str | None = None,
+        reason: str | None = None,
     ):
         super().__init__(message)
         self.status = status
         self.at = at
         self.completed = completed
+        self.reason = reason
         self.quota = quota
         self.retry_after = retry_after
         self.outcome = outcome
@@ -644,11 +652,14 @@ def _answer(status: int, raw: bytes) -> Any:
     """A response's JSON, or the error it says, as `Client` raises it."""
     if 200 <= status < 300:
         return json.loads(raw) if raw else None
-    at = completed = quota = retry_after = outcome = seq = history = None
+    at = completed = quota = retry_after = outcome = seq = history = reason = None
     try:
         body = json.loads(raw)
         message = body.get("error", raw.decode(errors="replace"))
         at, completed = body.get("at"), body.get("completed")
+        # What a `require n else '<reason>'` that refused said, a batch's
+        # stop's beside its `at`.
+        reason = body.get("reason")
         # A quota's refusal says which, and the wait its `Retry-After`
         # says -- a quota's 429, a move's 503 -- in the body too: what is
         # read here has no headers. To the millisecond where it says it: a
@@ -673,6 +684,7 @@ def _answer(status: int, raw: bytes) -> Any:
         outcome=outcome,
         seq=seq,
         history=history,
+        reason=reason,
     )
 
 

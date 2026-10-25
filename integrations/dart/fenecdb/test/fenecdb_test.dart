@@ -197,6 +197,40 @@ void main() {
     await db.close();
   });
 
+  // The statement's own words, the library's and a server's alike; null
+  // where it gave none.
+  test('an unmet require says its reason', () async {
+    Future<(FenecCode, String?)?> refusal(Future<Object?> f) async {
+      try {
+        await f;
+        return null;
+      } on FenecException catch (e) {
+        return (e.code, e.reason);
+      }
+    }
+
+    final db = await Fenec.memory();
+    await db.execute('create collection accounts (name text, balance int)');
+    await db.execute('put accounts {id: 1, name: "a", balance: 5}');
+    final accounts = db.from('accounts');
+    expect(
+        await refusal(accounts
+            .where('name', 'a')
+            .where('balance', '>=', 9)
+            .update({'balance': Computed.inc(-9)}, require: 1, reason: 'insufficient funds')),
+        (FenecCode.unmet, 'insufficient funds'));
+    expect(await refusal(accounts.where('id', 2).limit(1).require(1, reason: "it's not there").rows()),
+        (FenecCode.unmet, "it's not there"));
+    expect(await refusal(accounts.where('id', 2).delete(require: 1)), (FenecCode.unmet, null));
+    await db.close();
+    final remote = FenecRemote.refused(412,
+        {'error': 'no such account (`set accounts` wrote 0 rows, and requires 1)', 'reason': 'no such account'}, null);
+    expect((remote.code, remote.reason), (FenecCode.unmet, 'no such account'));
+    final batch = FenecRemote.refused(412, {'error': 'unmet: x', 'completed': 0, 'at': 1, 'reason': 'x'}, null);
+    expect((batch.at, batch.reason), (1, 'x'));
+    expect(FenecRemote.refused(412, {'error': 'unmet'}, null).reason, isNull);
+  });
+
   test('a file is there again, and open once', () async {
     final path = scratch();
     var db = await Fenec.open(path);

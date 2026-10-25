@@ -187,11 +187,20 @@ it wrote exactly <code>N</code> rows the batch stops with
 <pre data-lang="json">{"error":"unmet: `set accounts` wrote 0 rows, and requires 1","completed":0,"at":1}
 </pre>
 
+<p>Say why with <code>require N else '<i>reason</i>'</code>: the error leads
+with the reason, and a <code>"reason"</code> key carries it, for a caller to
+tell one refusal from another by, where <code>at</code> moves with every
+statement added in front (<a href="/docs/fenecql-writing#require-reason">A reason
+for the refusal</a>).</p>
+
+<pre data-lang="json">{"error":"unmet: no account to credit (`set accounts` wrote 0 rows, and requires 1)","completed":0,"at":1,"reason":"no account to credit"}
+</pre>
+
 <p>Every client sends one: <code>db.batch([...], { idempotencyKey })</code> in
 JavaScript, <code>batch(...)</code> in Python, <code>Batch</code> in Go,
 <code>BatchAsync</code> in .NET, and the remote clients of Swift, Kotlin and
 Dart; a batch that stops throws the client's error with the statement's
-<code>at</code> and the status.</p>
+<code>at</code>, the status and the <code>reason</code> where it gave one.</p>
 
 <details class="deep"><summary>How a batch runs, fails and is split into lines</summary>
 <p><code>POST /batch</code> takes one query body per line as NDJSON. The

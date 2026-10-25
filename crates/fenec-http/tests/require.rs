@@ -170,6 +170,76 @@ fn a_write_that_misses_its_count_is_412_and_a_batch_names_where_it_stopped() {
     assert_eq!(c.number("get journal count"), 2);
 }
 
+/// `require <n> else '<reason>'`: the 412 says the reason beside its
+/// words, a lone statement's and a `/batch`'s beside `at`, whether the
+/// batch writes or only reads; one that gave none says none.
+#[test]
+fn a_require_s_reason_comes_back_in_the_412_beside_at() {
+    let port = start();
+    let mut c = Conn::open(port);
+    let (status, body) = c.query(
+        "set accounts {balance: 0} where name = \"nobody\" require 1 else 'no such account'",
+    );
+    assert_eq!(status, 412, "{body}");
+    assert_eq!(
+        body,
+        r#"{"error":"no such account (`set accounts` wrote 0 rows, and requires 1)","reason":"no such account"}"#
+    );
+    // A quote and a backslash in it, as JSON writes them.
+    let (status, body) =
+        c.query(r#"get accounts where name = "nobody" require 1 else 'it''s \\ gone'"#);
+    assert_eq!(status, 412, "{body}");
+    assert_eq!(
+        body,
+        r#"{"error":"it's \\ gone (`get accounts` answered 0 rows, and requires 1)","reason":"it's \\ gone"}"#
+    );
+    // The transfer, each guard saying why: it stops at the credit, puts
+    // the debit back, and names the credit and its reason.
+    let p = r#"["a0","ghost",10,1]"#;
+    let batch = [
+        line(
+            "set accounts {balance: balance - $3} where name = $1 and balance >= $3 require 1 \
+             else 'insufficient funds'",
+            p,
+        ),
+        line(
+            "set accounts {balance: balance + $3} where name = $2 require 1 \
+             else 'no account to credit'",
+            p,
+        ),
+    ]
+    .join("\n");
+    let (status, body) = c.post("/batch", &batch);
+    assert_eq!(status, 412, "{body}");
+    assert_eq!(
+        body,
+        r#"{"error":"unmet: no account to credit (`set accounts` wrote 0 rows, and requires 1)","completed":0,"at":1,"reason":"no account to credit"}"#
+    );
+    assert_eq!(
+        c.number("get accounts select balance where name = \"a0\""),
+        START
+    );
+    // A batch of reads alone, under the read lock or a pin: the same.
+    let reads = [
+        line("get accounts limit 1", ""),
+        line(
+            "get accounts where name = \"nobody\" limit 1 require 1 else 'no such account'",
+            "",
+        ),
+    ]
+    .join("\n");
+    let (status, body) = c.post("/batch", &reads);
+    assert_eq!(status, 412, "{body}");
+    assert_eq!(
+        body,
+        r#"{"error":"unmet: no such account (`get accounts` answered 0 rows, and requires 1)","completed":0,"at":1,"reason":"no such account"}"#
+    );
+    // One that gave none says none.
+    let (status, body) = c.query("del accounts where name = \"nobody\" require 1");
+    assert_eq!(status, 412, "{body}");
+    assert!(!body.contains("reason"), "{body}");
+}
+
 /// `get ... require <n>` guards a read in a `/batch`: a balance that is no
 /// longer what the client saw stops the batch at the read, 412 and `at`,
 /// and the writes after it never land. On its own it is a 412 as well.

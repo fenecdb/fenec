@@ -59,6 +59,12 @@ type Error struct {
 	// write whose Require was not met, the put whose id was taken. -1 for
 	// anything but a batch's stop, since 0 names its first statement.
 	At int
+	// Reason is what a require n else '<reason>' that refused said (the
+	// builder's Reason): the statement's own words, by which a caller tells
+	// "insufficient funds" from "no such account" -- where At moves with
+	// every statement added in front of it. "" where the statement gave
+	// none.
+	Reason string
 	// Quota is the tenant's quota that refused the request, one of the
 	// Quota constants; "" for any other refusal.
 	Quota string
@@ -114,6 +120,7 @@ func errorOf(status int, raw []byte) *Error {
 		Error        string `json:"error"`
 		Completed    int    `json:"completed"`
 		At           *int   `json:"at"`
+		Reason       string `json:"reason"`
 		Quota        string `json:"quota"`
 		RetryAfter   int64  `json:"retry_after"`
 		RetryAfterMs int64  `json:"retry_after_ms"`
@@ -122,7 +129,7 @@ func errorOf(status int, raw []byte) *Error {
 		History      string `json:"history"`
 	}
 	if json.Unmarshal(raw, &body) == nil && body.Error != "" {
-		e.Message, e.Completed, e.Quota = body.Error, body.Completed, body.Quota
+		e.Message, e.Completed, e.Quota, e.Reason = body.Error, body.Completed, body.Quota, body.Reason
 		// The wait in the body, what reads it here having no headers: to
 		// the millisecond where the server says it -- a bucket of 600 rows
 		// a second refills a row in 1.7 ms -- else Retry-After's seconds.

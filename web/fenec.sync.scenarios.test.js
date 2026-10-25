@@ -103,6 +103,7 @@ class Run {
     this.waits = [];
     this.tokenAsked = false;
     this.error = null;
+    this.reason = null;
   }
 
   fetch = (url, init = {}) => {
@@ -188,7 +189,7 @@ class Run {
           this.tokenAsked = true;
           return new Promise(() => {});
         },
-        onRefused: (e) => this.refused.push({ status: e.status, quota: e.quota ?? null }),
+        onRefused: (e) => this.refused.push({ status: e.status, quota: e.quota ?? null, reason: e.reason ?? null }),
       });
     } catch (e) {
       this.db = null;
@@ -212,9 +213,10 @@ class Run {
       });
     }
     const t = on ?? this.db;
-    // `"require": n` and `"returning"`: the builders' `{ require: n }` and
-    // `{ returning }`.
+    // `"require": n`, `"reason"` and `"returning"`: the builders'
+    // `{ require: n }`, `{ reason }` and `{ returning }`.
     const opts = w.require === undefined ? {} : { require: w.require };
+    if (w.reason !== undefined) opts.reason = w.reason;
     if (w.returning !== undefined) opts.returning = w.returning;
     if (w.insert) {
       w.docs.forEach((d, i) => sorted(d, `docs[${i}]`));
@@ -244,8 +246,8 @@ class Run {
     // `"order": f` and `"limit": n`: the builders' `.order(f)` and `.limit(n)`.
     if (w.order) q = q.order(w.order);
     if (w.limit !== undefined) q = q.limit(w.limit);
-    // A read in a batch: the builders' `.require(n)`.
-    if (w.get) return (w.require === undefined ? q : q.require(w.require)).rows();
+    // A read in a batch: the builders' `.require(n, { reason })`.
+    if (w.get) return (w.require === undefined ? q : q.require(w.require, w.reason === undefined ? undefined : { reason: w.reason })).rows();
     if (w.update) return q.update(patch(w.set), opts);
     return q.delete(opts);
   }
@@ -298,7 +300,7 @@ class Run {
       case 'write':
         // A refusal rejects the promise too, and is told to `onRefused`.
         this.write(st.write).catch((e) => {
-          if (e.status === undefined) this.error = String(e.message ?? e);
+          if (e.status === undefined) [this.error, this.reason] = [String(e.message ?? e), e.reason ?? null];
         });
         break;
       case 'net':
@@ -349,6 +351,7 @@ class Run {
     if ('ready' in e) matches(e.ready, this.db.status().every((s) => s.seeded), binds, 'ready');
     if (e.error) assert.ok(this.error?.includes(e.error), `error: expected one saying \`${e.error}\`, got ${this.error}`);
     else assert.equal(this.error, null, `an error no expectation names: ${this.error}`);
+    if ('reason' in e) matches(e.reason, this.reason, binds, 'reason');
   }
 }
 

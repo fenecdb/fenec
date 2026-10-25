@@ -970,8 +970,12 @@ public sealed class Query
     /// <summary>
     /// <c>require n</c> on a read: the rows it answers, after <see cref="Limit"/>, must number n, or it is refused
     /// (412, unmet) and the batch it is in put back, as a write's <c>require</c> is -- a checkout's guard on a read.
+    /// <paramref name="reason"/> says why in the refusal, <c>require n else '&lt;reason&gt;'</c>: the
+    /// <see cref="FenecException.Reason"/>, by which a caller tells "no such account" from "insufficient funds"
+    /// where a batch's <see cref="FenecException.At"/> moves with every statement added in front --
+    /// <c>Require(1, reason: "no such account")</c>.
     /// </summary>
-    public Query Require(long n) => new(_s with { Require = RequireClause(n) });
+    public Query Require(long n, string? reason = null) => new(_s with { Require = RequireClause(n, reason) });
 
     /// <summary>The statement and its parameters, as they would be sent.</summary>
     public (string Text, IReadOnlyList<object?> Parameters) ToFenecQL()
@@ -1155,12 +1159,25 @@ public sealed class Query
     // " require n" for a write's require: the rows it must write, a whole number from 0 written into the text
     // -- FenecQL takes no parameter there: the count is what the statement guards, a constant of the code,
     // where a page's limit and offset change with each request and go as parameters.
-    static string RequireClause(long? n) => n switch
+    static string RequireClause(long? n, string? reason) => n switch
     {
+        null when reason is not null => throw Builder.Refuse("a reason says why a require refused, and goes with one"),
         null => "",
         < 0 => throw Builder.Refuse($"require takes a count of rows, a whole number from 0 (got {n})"),
-        _ => $" require {n}",
+        _ => $" require {n}{ReasonClause(reason)}",
     };
+
+    // " else '<reason>'" for a require's reason: written into the text, a quote doubled and a backslash escaped,
+    // as FenecQL takes it -- never a parameter, as the count is not: it is the statement's own words, by which a
+    // caller tells one refusal from another. 1 to 200 bytes of UTF-8, as the parser holds it: bytes, not chars,
+    // so "ş" counts 2.
+    static string ReasonClause(string? reason)
+    {
+        if (reason is null) return "";
+        if (reason.Length == 0 || Encoding.UTF8.GetByteCount(reason) > 200)
+            throw Builder.Refuse("a require's reason is a text of 1 to 200 bytes");
+        return $" else '{reason.Replace("\\", "\\\\").Replace("'", "''")}'";
+    }
 
     // An update's or a delete's " order ... limit $n returning ...": the rows it picks, and whether it answers
     // them, under the fields named -- "*" for every one.
@@ -1192,10 +1209,11 @@ public sealed class Query
     /// them, not sent. With <paramref name="ifAbsent"/>, <c>put ... if absent</c>: a document whose id or
     /// <c>@unique</c> value a row holds is passed over, and not counted. With <paramref name="require"/>, on any
     /// write, <c>... require n</c>: unless it wrote exactly n rows it is refused (412, <c>unmet</c>) and its
-    /// batch put back. <paramref name="returning"/> answers the rows written, ids and all, the fields named or
-    /// <c>"*"</c> for every one.</summary>
+    /// batch put back; <paramref name="reason"/> beside it, <c>require n else '&lt;reason&gt;'</c>, is the
+    /// refusal's <see cref="FenecException.Reason"/>. <paramref name="returning"/> answers the rows written, ids and
+    /// all, the fields named or <c>"*"</c> for every one.</summary>
     public (string Text, IReadOnlyList<object?> Parameters) ToInsert(object docs, bool ifAbsent = false, long? require = null,
-        IReadOnlyList<string>? returning = null)
+        string? reason = null, IReadOnlyList<string>? returning = null)
     {
         AssertPlain("insert");
         var list = DocsOf(docs);
@@ -1203,7 +1221,7 @@ public sealed class Query
         var bind = new Binder();
         var body = string.Join(", ", list.Select(d => Builder.RenderDoc(d, bind, "insert")));
         var absent = ifAbsent ? " if absent" : "";
-        var tail = ReturningClause(returning) + RequireClause(require);
+        var tail = ReturningClause(returning) + RequireClause(require, reason);
         return ($"put {_s.Collection} {(list.Count == 1 ? body : $"[{body}]")}{absent}{tail}", bind.Params);
     }
 
@@ -1213,13 +1231,13 @@ public sealed class Query
     /// written, the fields named or <c>"*"</c> for every one: a job queue's claim,
     /// <c>Where(Cond.Raw("run_at &lt;= now()")).Order("run_at").Limit(10).UpdateAsync(patch, returning: ["*"])</c>.</summary>
     public (string Text, IReadOnlyList<object?> Parameters) ToUpdate(object patch, bool all = false, long? require = null,
-        IReadOnlyList<string>? returning = null)
+        string? reason = null, IReadOnlyList<string>? returning = null)
     {
         AssertPlain("update");
         var bind = new Binder();
         var body = Builder.RenderDoc(patch, bind, "update");
         var where = RequireFilter("update", all, bind);
-        return ($"set {_s.Collection} {body}{where}{Pick(returning, bind)}{RequireClause(require)}", bind.Params);
+        return ($"set {_s.Collection} {body}{where}{Pick(returning, bind)}{RequireClause(require, reason)}", bind.Params);
     }
 
     /// <summary>The upsert, <c>put ... if absent else set {patch}</c>, not sent: a document whose id or first
@@ -1228,7 +1246,7 @@ public sealed class Query
     /// documents' parameters come first, then the patch's; <paramref name="returning"/> as
     /// <see cref="ToInsert"/>'s.</summary>
     public (string Text, IReadOnlyList<object?> Parameters) ToUpsert(object docs, object patch, long? require = null,
-        IReadOnlyList<string>? returning = null)
+        string? reason = null, IReadOnlyList<string>? returning = null)
     {
         AssertPlain("upsert");
         var list = DocsOf(docs);
@@ -1236,7 +1254,7 @@ public sealed class Query
         var bind = new Binder();
         var body = string.Join(", ", list.Select(d => Builder.RenderDoc(d, bind, "insert")));
         var set = Builder.RenderDoc(patch, bind, "update");
-        var tail = ReturningClause(returning) + RequireClause(require);
+        var tail = ReturningClause(returning) + RequireClause(require, reason);
         return ($"put {_s.Collection} {(list.Count == 1 ? body : $"[{body}]")} if absent else set {set}{tail}", bind.Params);
     }
 
@@ -1244,12 +1262,12 @@ public sealed class Query
     /// <paramref name="all"/> or a <c>Limit</c> bounds it. <c>Order</c>, <c>Limit</c> and
     /// <paramref name="returning"/> as <see cref="ToUpdate"/>'s, the rows answered as they were: a pop.</summary>
     public (string Text, IReadOnlyList<object?> Parameters) ToDelete(bool all = false, long? require = null,
-        IReadOnlyList<string>? returning = null)
+        string? reason = null, IReadOnlyList<string>? returning = null)
     {
         AssertPlain("delete");
         var bind = new Binder();
         var where = RequireFilter("delete", all, bind);
-        return ($"del {_s.Collection}{where}{Pick(returning, bind)}{RequireClause(require)}", bind.Params);
+        return ($"del {_s.Collection}{where}{Pick(returning, bind)}{RequireClause(require, reason)}", bind.Params);
     }
 
     FenecClient Client => _s.Client ?? throw Builder.Refuse(
@@ -1314,35 +1332,38 @@ public sealed class Query
     /// result's <c>Affected</c> is how many were written, which with <paramref name="ifAbsent"/> leaves out those
     /// whose id or <c>@unique</c> value was held: a lock taken answers 1, one held 0. None is no request. With
     /// <paramref name="require"/> (on an update and a delete too) a write that did not write exactly that many rows
-    /// is refused, 412 (<c>unmet</c>), and its batch put back. With <paramref name="returning"/> the result's
-    /// <c>Rows</c> are the rows written, ids and all, in the documents' order.</summary>
+    /// is refused, 412 (<c>unmet</c>), and its batch put back; <paramref name="reason"/> beside it is the
+    /// <see cref="FenecException.Reason"/>, which tells one refusal from another where a batch's
+    /// <see cref="FenecException.At"/> moves with every statement added in front. With
+    /// <paramref name="returning"/> the result's <c>Rows</c> are the rows written, ids and all, in the documents'
+    /// order.</summary>
     public Task<ExecResult> InsertAsync(object docs, bool ifAbsent = false, long? require = null,
-        IReadOnlyList<string>? returning = null, CancellationToken cancellationToken = default) =>
+        string? reason = null, IReadOnlyList<string>? returning = null, CancellationToken cancellationToken = default) =>
         DocsOf(docs).Count == 0
             ? Task.FromResult(new ExecResult(0, null, 0, false, returning is null ? null : []))
-            : ExecAsync(ToInsert(docs, ifAbsent, require, returning), cancellationToken);
+            : ExecAsync(ToInsert(docs, ifAbsent, require, reason, returning), cancellationToken);
 
     /// <summary>Inserts each document, or, where a row holds its id or <c>@unique</c> value, sets that row by the
     /// patch -- <c>UpsertAsync(new { key, n = 1 }, new Dictionary&lt;string, object?&gt; { ["n"] =
     /// Computed.Expr("n + new.n") })</c>; the result's <c>Affected</c> is the rows set and made together. None is
     /// no request. With <paramref name="returning"/> the result's <c>Rows</c> are those rows as written.</summary>
     public Task<ExecResult> UpsertAsync(object docs, object patch, long? require = null,
-        IReadOnlyList<string>? returning = null, CancellationToken cancellationToken = default) =>
+        string? reason = null, IReadOnlyList<string>? returning = null, CancellationToken cancellationToken = default) =>
         DocsOf(docs).Count == 0
             ? Task.FromResult(new ExecResult(0, null, 0, false, returning is null ? null : []))
-            : ExecAsync(ToUpsert(docs, patch, require, returning), cancellationToken);
+            : ExecAsync(ToUpsert(docs, patch, require, reason, returning), cancellationToken);
 
     /// <summary>Sets the patch's fields on the rows the filter names; with no filter it is refused unless
     /// <paramref name="all"/> or a <c>Limit</c> bounds it. With <paramref name="returning"/> the result's
     /// <c>Rows</c> are the rows as written.</summary>
     public Task<ExecResult> UpdateAsync(object patch, bool all = false, long? require = null,
-        IReadOnlyList<string>? returning = null, CancellationToken cancellationToken = default) =>
-        ExecAsync(ToUpdate(patch, all, require, returning), cancellationToken);
+        string? reason = null, IReadOnlyList<string>? returning = null, CancellationToken cancellationToken = default) =>
+        ExecAsync(ToUpdate(patch, all, require, reason, returning), cancellationToken);
 
     /// <summary>Deletes the rows the filter names; with no filter it is refused unless <paramref name="all"/> or a
     /// <c>Limit</c> bounds it. With <paramref name="returning"/> the result's <c>Rows</c> are the rows as they
     /// were.</summary>
     public Task<ExecResult> DeleteAsync(bool all = false, long? require = null,
-        IReadOnlyList<string>? returning = null, CancellationToken cancellationToken = default) =>
-        ExecAsync(ToDelete(all, require, returning), cancellationToken);
+        string? reason = null, IReadOnlyList<string>? returning = null, CancellationToken cancellationToken = default) =>
+        ExecAsync(ToDelete(all, require, reason, returning), cancellationToken);
 }

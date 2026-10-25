@@ -214,6 +214,34 @@ void main() {
     await db.close();
   });
 
+  // A require's reason goes with its write, and comes back with the refusal
+  // that puts it back; one the replica finds unmet says it at once, nothing
+  // sent.
+  test("a require's reason comes back with its refusal", () async {
+    final s = await server('reason');
+    final db = await Fenec.openSynced(url: s.url, shapes: [open], path: await scratch('reason'));
+    await db.replica!.ready();
+    final refused = <Refusal>[];
+    final sub = db.replica!.refusals.listen(refused.add);
+    await expectLater(
+        db.from('tasks').where('key', 'zzz').delete(require: 1, reason: 'no such task'),
+        throwsA(isA<FenecException>()
+            .having((e) => e.code, 'code', FenecCode.unmet)
+            .having((e) => e.reason, 'reason', 'no such task')));
+    // Offline, the server's row goes while the replica still holds it: the
+    // write's count is met here and not there, whichever of the stream and
+    // the write the server meets first.
+    await offline(db);
+    await s.run('del tasks where key = "a"');
+    await db.from('tasks').where('key', 'a').update({'title': 'X'}, require: 1, reason: 'the task was taken');
+    db.replica!.setOnline(true);
+    await eventually('the refusal', () => refused.isNotEmpty);
+    expect((refused.first.status, refused.first.reason), (412, 'the task was taken'));
+    await eventually('the write put back', () async => (await titles(db)).join(',') == 'two');
+    await sub.cancel();
+    await db.close();
+  });
+
   test("a write a tenant's quota refuses is put back, and the delete behind it goes", () async {
     // A tenant node holding each tenant to the three rows it has.
     final s = await Server.start('quota', tenantRows: 3);
@@ -341,13 +369,15 @@ void main() {
     await expectLater(
       db.batch([
         tasks.toInsert({'key': 'e', 'title': 'five'}),
-        tasks.where('key', 'nobody').toDelete(require: 1),
+        tasks.where('key', 'nobody').toDelete(require: 1, reason: 'nobody there'),
       ]),
       throwsA(isA<FenecException>()
           .having((e) => e.code, 'code', FenecCode.unmet)
           .having((e) => e.status, 'status', 412)
           .having((e) => e.at, 'at', 1)
-          .having((e) => e.completed, 'completed', 0)),
+          .having((e) => e.completed, 'completed', 0)
+          // The statement's own words, which stay put where `at` moves.
+          .having((e) => e.reason, 'reason', 'nobody there')),
     );
     expect(await tasks.count(), 4);
 

@@ -486,7 +486,11 @@ hold. Live queries are the file's alone.</p>
 <code>toUpdate</code> and <code>toDelete</code> under one write lock, all
 of them or none. One that stops it is an error naming its place
 (<code>at</code>, from 0) and the HTTP <code>status</code> -- 412, code
-<code>unmet</code>, for a write whose <code>require</code> was not met. A
+<code>unmet</code>, for a write whose <code>require</code> was not met -- and
+its <code>reason</code> where the <code>require</code> gave one
+(<code>reason:</code> beside <code>require:</code>, Kotlin's with
+<code>=</code>; <a href="/docs/fenecql-writing#require-reason">A reason for the
+refusal</a>). A
 retry after a timeout cannot tell whether the write ran, so a write that
 must not run twice goes under an idempotency key: the second answer is the
 first one kept (<code>replayed</code>), and the key sent with another
@@ -494,8 +498,8 @@ request is refused (422).</p>
 
 <pre data-lang="swift">let accounts = try db.from("accounts")
 let done = try await db.batch([
-    try accounts.where("id", from).where("balance", ">=", 10).toUpdate(["balance": .inc(-10)] as Value, require: 1),
-    try accounts.where("id", to).toUpdate(["balance": .inc(10)] as Value, require: 1),
+    try accounts.where("id", from).where("balance", ">=", 10).toUpdate(["balance": .inc(-10)] as Value, require: 1, reason: "insufficient funds"),
+    try accounts.where("id", to).toUpdate(["balance": .inc(10)] as Value, require: 1, reason: "no account to credit"),
 ], idempotencyKey: transferID)
 // done.results, done.seq, done.replayed
 try await db.withIdempotencyKey(orderID).from("orders").insert(order)</pre>

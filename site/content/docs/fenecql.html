@@ -252,8 +252,8 @@ set &lt;name&gt; { field: value, path: value } [where &lt;expr&gt;]  -- a value 
 del &lt;name&gt; [where &lt;expr&gt;]
 &lt;set | del ...&gt; [order &lt;key&gt; [desc], ...] [limit N] [returning * | a, b]   -- the page a get answers, written and answered
 &lt;put | insert ...&gt; [returning * | a, b]       -- the rows written, ids and all, in the documents' order
-&lt;put | insert | set | del ...&gt; require N    -- refused, and its batch put back, unless it wrote N rows
-get &lt;name&gt; ... require N [lookup ...]       -- refused, and its batch put back, unless it answered N rows
+&lt;put | insert | set | del ...&gt; require N [else '&lt;reason&gt;']   -- refused, and its batch put back, unless it wrote N rows
+get &lt;name&gt; ... require N [else '&lt;reason&gt;'] [lookup ...]      -- refused, and its batch put back, unless it answered N rows; the reason is said
 
 collections | describe &lt;name&gt; | compact [&lt;name&gt;]
 
@@ -287,7 +287,10 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
     does not write exactly <code>N</code> rows, or a <code>get</code> that
     does not answer exactly <code>N</code>, is refused, and the batch it is
     in is put back whole — see <a href="fenecql-writing.html#require">Writes that must find
-    their rows</a>.</li>
+    their rows</a>. <code>else '&lt;reason&gt;'</code> after the count says
+    why, a text written in the statement (never a parameter, at most 200
+    bytes), which a caller reads back as <code>reason</code> — see <a href="fenecql-writing.html#require-reason">A
+    reason for the refusal</a>.</li>
   <li><b><code>alter collection</code> rewrites no document.</b> A field
     added reads <code>null</code> in the documents already there; a field's
     type does not change — see <a href="fenecql-schema.html#changing-a-collection">Changing a

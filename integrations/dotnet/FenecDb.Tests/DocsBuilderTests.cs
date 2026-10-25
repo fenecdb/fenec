@@ -445,6 +445,45 @@ public sealed class DocsBuilderTests
         Sends(sent, "get articles select title, year where year >= $1 and tags has $2 and not (title ~ $3) near embed $4 ef 128 limit $5", "[2024, \"rust\", \"draft\", [0.9, 0.1, 0], 10]");
     }
 
+    [Fact(DisplayName = "docs: a debit that must find the money, or says why")]
+    public async Task ADebitThatMustFindTheMoneyOrSaysWhy()
+    {
+        using var db = Db(out var sent);
+        await db.From("accounts")
+            .Where("name", "ada")
+            .Where("balance", ">=", 30)
+            .UpdateAsync(
+                new { balance = Computed.Expr("balance - ?", 30) },
+                require: 1,
+                reason: "insufficient funds"
+            );
+        Sends(sent, "set accounts {balance: balance - $1} where name = $2 and balance >= $3 require 1 else 'insufficient funds'", "[30, \"ada\", 30]");
+    }
+
+    [Fact(DisplayName = "docs: a hold deleted that must be there, or says why")]
+    public async Task AHoldDeletedThatMustBeThereOrSaysWhy()
+    {
+        using var db = Db(out var sent);
+        await db.From("holds")
+            .Where("order_ref", "o-17")
+            .Where("state", "held")
+            .DeleteAsync(require: 1, reason: "it's not held");
+        Sends(sent, "del holds where order_ref = $1 and state = $2 require 1 else 'it''s not held'", "[\"o-17\", \"held\"]");
+    }
+
+    [Fact(DisplayName = "docs: a coupon that must still be usable, or says why")]
+    public async Task ACouponThatMustStillBeUsableOrSaysWhy()
+    {
+        using var db = Db(out var sent);
+        await db.From("coupons")
+            .Where("code", "X1")
+            .Where(Cond.Raw("uses < max_uses"))
+            .Limit(1)
+            .Require(1, reason: "coupon used up")
+            .RowsAsync();
+        Sends(sent, "get coupons where code = $1 and uses < max_uses limit $2 require 1 else 'coupon used up'", "[\"X1\", 1]");
+    }
+
     [Fact(DisplayName = "docs: a product that must be there at its price")]
     public async Task AProductThatMustBeThereAtItsPrice()
     {

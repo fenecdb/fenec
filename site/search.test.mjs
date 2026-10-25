@@ -140,8 +140,11 @@ test('a question the words miss finds its page by its meaning', () => {
     // 4th over the 408 sections embedded on 2026-10-14: "saklamak" is
     // keeping, and the archive's object storage and sealing and the
     // half-precision vectors speak of keeping data too. 3rd while 128 of
-    // them had no vector.
-    ['telefonda veri saklamak', 'docs/mobile', 4],
+    // them had no vector. 5th since a `require`'s reason went into eleven
+    // pages (2026-10-26): docs/mobile#connect, the words' last hit, 41st,
+    // fell off their list as the new text moved BM25's weights -- no
+    // vector changed -- and docs/mobile#file, 5th, is the page's first.
+    ['telefonda veri saklamak', 'docs/mobile', 5],
     ['dosyanın büyümesini durdurmak', 'docs/server#compaction', 3],
   ]) {
     const [words, meaning] = standing(q, url);

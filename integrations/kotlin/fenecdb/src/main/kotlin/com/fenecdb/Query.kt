@@ -840,9 +840,15 @@ class Query private constructor(private val s: State) {
     /**
      * `require n` on a read: the rows it answers, after [limit], must number
      * n, or it is refused (412, unmet) and the batch it is in put back, as a
-     * write's `require` is -- a checkout's guard on a read.
+     * write's `require` is -- a checkout's guard on a read. [reason] says
+     * why, `require n else '<reason>'`: the exception's
+     * [FenecException.reason], by which a caller tells "no such coupon" from
+     * another refusal where [FenecException.at] moves with every statement
+     * put in front -- `require(1, reason = "no such coupon")`. Written into
+     * the text, as the count is, never a parameter: 1 to 200 bytes of UTF-8.
      */
-    fun require(n: Long): Query = Query(s.copy(require = requireClause(n)))
+    @JvmOverloads
+    fun require(n: Long, reason: String? = null): Query = Query(s.copy(require = requireClause(n, reason)))
 
     // ---------------------------------------------------------------- the text
 
@@ -1030,10 +1036,26 @@ class Query private constructor(private val s: State) {
     // number written in, never a parameter: the count is what the statement
     // guards, a constant of the code, where a page's limit and offset change
     // with each request and go as parameters.
-    private fun requireClause(n: Long?): String {
-        if (n == null) return ""
+    private fun requireClause(n: Long?, reason: String? = null): String {
+        if (n == null) {
+            if (reason != null) throw refuse("a reason says why a require refused, and goes with one")
+            return ""
+        }
         if (n < 0) throw refuse("require takes a count of rows, a whole number from 0 (got $n)")
-        return " require $n"
+        return " require $n" + reasonClause(reason)
+    }
+
+    // ` else '<reason>'` for a require's reason: written into the text, a
+    // quote doubled and a backslash escaped, as FenecQL takes it -- never a
+    // parameter, as the count is not: it is the statement's own words,
+    // which a caller tells one refusal from another by. 1 to 200 bytes of
+    // UTF-8, as the parser holds it: bytes, not chars, so "ş" counts two.
+    private fun reasonClause(reason: String?): String {
+        if (reason == null) return ""
+        if (reason.isEmpty() || reason.toByteArray(Charsets.UTF_8).size > 200) {
+            throw refuse("a require's reason is a text of 1 to 200 bytes")
+        }
+        return " else '" + reason.replace("\\", "\\\\").replace("'", "''") + "'"
     }
 
     // An update's or a delete's ` order ... limit $n returning ...`: the rows
@@ -1069,36 +1091,55 @@ class Query private constructor(private val s: State) {
      * them, not run. [ifAbsent]: `put ... if absent`, which passes over a
      * document whose id or `@unique` value a row holds and counts only what
      * it wrote -- a lock taken, or not, in one statement. [require]: refused,
-     * and nothing written, unless it wrote exactly that many rows.
-     * [returning]: the rows written answered, ids and all ([insertReturning]).
+     * and nothing written, unless it wrote exactly that many rows; [reason]
+     * says why (`require n else '<reason>'`), the exception's
+     * [FenecException.reason], by which a caller tells "liked already" from
+     * another refusal where [FenecException.at] moves with every statement
+     * put in front -- written into the text, never a parameter, as the count
+     * is not. [returning]: the rows written answered, ids and all
+     * ([insertReturning]).
      */
     @JvmOverloads
-    fun toInsert(docs: Any?, ifAbsent: Boolean = false, require: Long? = null, returning: List<String>? = null): Statement {
+    fun toInsert(
+        docs: Any?,
+        ifAbsent: Boolean = false,
+        require: Long? = null,
+        returning: List<String>? = null,
+        reason: String? = null,
+    ): Statement {
         assertPlain("insert")
         val list = docsOf(docs)
         if (list.isEmpty()) throw refuse("cannot write an empty document list")
         val bind = Binder()
         val body = list.joinToString(", ") { Builder.renderDoc(it, bind, insert = true) }
         val absent = if (ifAbsent) " if absent" else ""
-        val tail = returningClause(returning) + requireClause(require)
+        val tail = returningClause(returning) + requireClause(require, reason)
         return Statement("put ${s.collection} ${if (list.size == 1) body else "[$body]"}$absent$tail", bind.params)
     }
 
     /**
      * The `set` of the rows the filter names, not run; with no filter it is
      * refused unless [all] or a limit bounds it; with [require], refused
-     * unless it set exactly that many rows. [order] and [limit] before it
-     * pick the rows it writes -- the page a `get` with them answers -- and
-     * [returning] answers them as written, the fields named or `*` for every
-     * one: a job queue's claim ([updateReturning]).
+     * unless it set exactly that many rows, and [reason] as [toInsert]'s:
+     * `require = 1, reason = "insufficient funds"`. [order] and [limit]
+     * before it pick the rows it writes -- the page a `get` with them
+     * answers -- and [returning] answers them as written, the fields named
+     * or `*` for every one: a job queue's claim ([updateReturning]).
      */
     @JvmOverloads
-    fun toUpdate(patch: Any?, all: Boolean = false, require: Long? = null, returning: List<String>? = null): Statement {
+    fun toUpdate(
+        patch: Any?,
+        all: Boolean = false,
+        require: Long? = null,
+        returning: List<String>? = null,
+        reason: String? = null,
+    ): Statement {
         assertPlain("update")
         val bind = Binder()
         val body = Builder.renderDoc(patch, bind)
         val filter = requireFilter("update", all, bind)
-        return Statement("set ${s.collection} $body$filter${pick(returning, bind)}${requireClause(require)}", bind.params)
+        return Statement(
+            "set ${s.collection} $body$filter${pick(returning, bind)}${requireClause(require, reason)}", bind.params)
     }
 
     /**
@@ -1107,32 +1148,44 @@ class Query private constructor(private val s: State) {
      * -- an update's, [Computed.inc] and [Computed.expr] with it, and in an
      * expression `new.f` the document's own `f` -- and every other one is
      * inserted. The documents' parameters come first, then the patch's;
-     * [returning] as [toInsert]'s.
+     * [require], [returning] and [reason] as [toInsert]'s.
      */
     @JvmOverloads
-    fun toUpsert(docs: Any?, patch: Any?, require: Long? = null, returning: List<String>? = null): Statement {
+    fun toUpsert(
+        docs: Any?,
+        patch: Any?,
+        require: Long? = null,
+        returning: List<String>? = null,
+        reason: String? = null,
+    ): Statement {
         assertPlain("upsert")
         val list = docsOf(docs)
         if (list.isEmpty()) throw refuse("cannot write an empty document list")
         val bind = Binder()
         val body = list.joinToString(", ") { Builder.renderDoc(it, bind, insert = true) }
         val set = Builder.renderDoc(patch, bind)
-        val tail = returningClause(returning) + requireClause(require)
+        val tail = returningClause(returning) + requireClause(require, reason)
         return Statement("put ${s.collection} ${if (list.size == 1) body else "[$body]"} if absent else set $set$tail", bind.params)
     }
 
     /**
      * The `del` of the rows the filter names, not run; with no filter it is
      * refused unless [all] or a limit bounds it; with [require], refused
-     * unless it deleted exactly that many rows. [order], [limit] and
-     * [returning] as [toUpdate]'s, the rows answered as they were: a pop.
+     * unless it deleted exactly that many rows, and [reason] as [toInsert]'s.
+     * [order], [limit] and [returning] as [toUpdate]'s, the rows answered as
+     * they were: a pop.
      */
     @JvmOverloads
-    fun toDelete(all: Boolean = false, require: Long? = null, returning: List<String>? = null): Statement {
+    fun toDelete(
+        all: Boolean = false,
+        require: Long? = null,
+        returning: List<String>? = null,
+        reason: String? = null,
+    ): Statement {
         assertPlain("delete")
         val bind = Binder()
         val filter = requireFilter("delete", all, bind)
-        return Statement("del ${s.collection}$filter${pick(returning, bind)}${requireClause(require)}", bind.params)
+        return Statement("del ${s.collection}$filter${pick(returning, bind)}${requireClause(require, reason)}", bind.params)
     }
 
     // ---------------------------------------------------------------- running
@@ -1169,11 +1222,12 @@ class Query private constructor(private val s: State) {
      * Puts a document -- a map of fields -- or a list of them: how many it
      * wrote, which with [ifAbsent] leaves out those already held. None is no
      * statement. [require]: refused ([FenecException.Code.UNMET]) unless it
-     * wrote exactly that many.
+     * wrote exactly that many; [reason] beside it, what the exception's
+     * [FenecException.reason] says.
      */
-    suspend fun insert(docs: Any?, ifAbsent: Boolean = false, require: Long? = null): Long {
+    suspend fun insert(docs: Any?, ifAbsent: Boolean = false, require: Long? = null, reason: String? = null): Long {
         if (docsOf(docs).isEmpty()) return 0
-        return run(toInsert(docs, ifAbsent, require)).affected
+        return run(toInsert(docs, ifAbsent, require, reason = reason)).affected
     }
 
     /**
@@ -1182,23 +1236,28 @@ class Query private constructor(private val s: State) {
      * `upsert(mapOf("key" to k, "n" to 1), mapOf("n" to Computed.expr("n + new.n")))`:
      * the rows it set and made together. None is no statement.
      */
-    suspend fun upsert(docs: Any?, patch: Any?, require: Long? = null): Long {
+    suspend fun upsert(docs: Any?, patch: Any?, require: Long? = null, reason: String? = null): Long {
         if (docsOf(docs).isEmpty()) return 0
-        return run(toUpsert(docs, patch, require)).affected
+        return run(toUpsert(docs, patch, require, reason = reason)).affected
     }
 
     /**
      * Sets the patch's fields on the rows the filter names; with no filter it
-     * is refused unless [all]; with [require], refused (UNMET) unless it set exactly that many.
+     * is refused unless [all]; with [require], refused (UNMET) unless it set
+     * exactly that many, the exception's [FenecException.reason] the [reason]
+     * beside it: `update(mapOf("balance" to Computed.inc(-5)), require = 1,
+     * reason = "insufficient funds")`.
      */
-    suspend fun update(patch: Any?, all: Boolean = false, require: Long? = null): Long =
-        run(toUpdate(patch, all, require)).affected
+    suspend fun update(patch: Any?, all: Boolean = false, require: Long? = null, reason: String? = null): Long =
+        run(toUpdate(patch, all, require, reason = reason)).affected
 
     /**
      * Deletes the rows the filter names; with no filter it is refused unless
-     * [all]; with [require], refused (UNMET) unless it deleted exactly that many.
+     * [all]; with [require], refused (UNMET) unless it deleted exactly that
+     * many, the exception's [FenecException.reason] the [reason] beside it.
      */
-    suspend fun delete(all: Boolean = false, require: Long? = null): Long = run(toDelete(all, require)).affected
+    suspend fun delete(all: Boolean = false, require: Long? = null, reason: String? = null): Long =
+        run(toDelete(all, require, reason = reason)).affected
 
     /**
      * [update] that answers the rows it set, as written, under the fields
@@ -1212,11 +1271,16 @@ class Query private constructor(private val s: State) {
         returning: List<String> = listOf("*"),
         all: Boolean = false,
         require: Long? = null,
-    ): Rows = run(toUpdate(patch, all, require, returning)).page
+        reason: String? = null,
+    ): Rows = run(toUpdate(patch, all, require, returning, reason)).page
 
     /** [delete] that answers the rows it deleted, as they were: a pop. */
-    suspend fun deleteReturning(returning: List<String> = listOf("*"), all: Boolean = false, require: Long? = null): Rows =
-        run(toDelete(all, require, returning)).page
+    suspend fun deleteReturning(
+        returning: List<String> = listOf("*"),
+        all: Boolean = false,
+        require: Long? = null,
+        reason: String? = null,
+    ): Rows = run(toDelete(all, require, returning, reason)).page
 
     /**
      * [insert] that answers the rows it wrote, ids and all, in the documents'
@@ -1228,15 +1292,22 @@ class Query private constructor(private val s: State) {
         returning: List<String> = listOf("*"),
         ifAbsent: Boolean = false,
         require: Long? = null,
+        reason: String? = null,
     ): Rows {
         if (docsOf(docs).isEmpty()) return Rows(emptyList())
-        return run(toInsert(docs, ifAbsent, require, returning)).page
+        return run(toInsert(docs, ifAbsent, require, returning, reason)).page
     }
 
     /** [upsert] that answers the rows it set and made, as written, in the documents' order. */
-    suspend fun upsertReturning(docs: Any?, patch: Any?, returning: List<String> = listOf("*"), require: Long? = null): Rows {
+    suspend fun upsertReturning(
+        docs: Any?,
+        patch: Any?,
+        returning: List<String> = listOf("*"),
+        require: Long? = null,
+        reason: String? = null,
+    ): Rows {
         if (docsOf(docs).isEmpty()) return Rows(emptyList())
-        return run(toUpsert(docs, patch, require, returning)).page
+        return run(toUpsert(docs, patch, require, returning, reason)).page
     }
 
     /** [rows] on the calling thread, for Java. */
@@ -1250,23 +1321,23 @@ class Query private constructor(private val s: State) {
 
     /** [insert] on the calling thread, for Java. */
     @JvmOverloads
-    fun insertBlocking(docs: Any?, ifAbsent: Boolean = false, require: Long? = null): Long =
-        kotlinx.coroutines.runBlocking { insert(docs, ifAbsent, require) }
+    fun insertBlocking(docs: Any?, ifAbsent: Boolean = false, require: Long? = null, reason: String? = null): Long =
+        kotlinx.coroutines.runBlocking { insert(docs, ifAbsent, require, reason) }
 
     /** [upsert] on the calling thread, for Java. */
     @JvmOverloads
-    fun upsertBlocking(docs: Any?, patch: Any?, require: Long? = null): Long =
-        kotlinx.coroutines.runBlocking { upsert(docs, patch, require) }
+    fun upsertBlocking(docs: Any?, patch: Any?, require: Long? = null, reason: String? = null): Long =
+        kotlinx.coroutines.runBlocking { upsert(docs, patch, require, reason) }
 
     /** [update] on the calling thread, for Java. */
     @JvmOverloads
-    fun updateBlocking(patch: Any?, all: Boolean = false, require: Long? = null): Long =
-        kotlinx.coroutines.runBlocking { update(patch, all, require) }
+    fun updateBlocking(patch: Any?, all: Boolean = false, require: Long? = null, reason: String? = null): Long =
+        kotlinx.coroutines.runBlocking { update(patch, all, require, reason) }
 
     /** [delete] on the calling thread, for Java. */
     @JvmOverloads
-    fun deleteBlocking(all: Boolean = false, require: Long? = null): Long =
-        kotlinx.coroutines.runBlocking { delete(all, require) }
+    fun deleteBlocking(all: Boolean = false, require: Long? = null, reason: String? = null): Long =
+        kotlinx.coroutines.runBlocking { delete(all, require, reason) }
 
     /** [updateReturning] on the calling thread, for Java. */
     @JvmOverloads
@@ -1275,7 +1346,8 @@ class Query private constructor(private val s: State) {
         returning: List<String> = listOf("*"),
         all: Boolean = false,
         require: Long? = null,
-    ): Rows = kotlinx.coroutines.runBlocking { updateReturning(patch, returning, all, require) }
+        reason: String? = null,
+    ): Rows = kotlinx.coroutines.runBlocking { updateReturning(patch, returning, all, require, reason) }
 
     /** [insertReturning] on the calling thread, for Java. */
     @JvmOverloads
@@ -1284,15 +1356,25 @@ class Query private constructor(private val s: State) {
         returning: List<String> = listOf("*"),
         ifAbsent: Boolean = false,
         require: Long? = null,
-    ): Rows = kotlinx.coroutines.runBlocking { insertReturning(docs, returning, ifAbsent, require) }
+        reason: String? = null,
+    ): Rows = kotlinx.coroutines.runBlocking { insertReturning(docs, returning, ifAbsent, require, reason) }
 
     /** [upsertReturning] on the calling thread, for Java. */
     @JvmOverloads
-    fun upsertReturningBlocking(docs: Any?, patch: Any?, returning: List<String> = listOf("*"), require: Long? = null): Rows =
-        kotlinx.coroutines.runBlocking { upsertReturning(docs, patch, returning, require) }
+    fun upsertReturningBlocking(
+        docs: Any?,
+        patch: Any?,
+        returning: List<String> = listOf("*"),
+        require: Long? = null,
+        reason: String? = null,
+    ): Rows = kotlinx.coroutines.runBlocking { upsertReturning(docs, patch, returning, require, reason) }
 
     /** [deleteReturning] on the calling thread, for Java. */
     @JvmOverloads
-    fun deleteReturningBlocking(returning: List<String> = listOf("*"), all: Boolean = false, require: Long? = null): Rows =
-        kotlinx.coroutines.runBlocking { deleteReturning(returning, all, require) }
+    fun deleteReturningBlocking(
+        returning: List<String> = listOf("*"),
+        all: Boolean = false,
+        require: Long? = null,
+        reason: String? = null,
+    ): Rows = kotlinx.coroutines.runBlocking { deleteReturning(returning, all, require, reason) }
 }

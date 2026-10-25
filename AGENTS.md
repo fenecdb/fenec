@@ -569,7 +569,10 @@ condition.](docs/design/writes.md#require)** Any other count is
 parameter. A `get` takes it too, counting after `offset` and `limit`
 (`read_required`); a sync replica refuses one reaching an unanswered
 insert's row (`REQUIRE_UNANSWERED`) or a `get`'s beside a synced write
-(`GUARDED`).
+(`GUARDED`). `else '<reason>'` after it is a text of the statement, 1 to
+200 bytes and never a parameter, leading the refusal's message, where
+`Error::reason` reads it back -- never a field beside it -- for the 412's,
+the module's and a synced refusal's `reason`.
 
 **[`if absent else set` is an upsert; `put <c> $n` takes a parameter's
 documents.](docs/design/writes.md#upserts)** Scoped, the row it sets

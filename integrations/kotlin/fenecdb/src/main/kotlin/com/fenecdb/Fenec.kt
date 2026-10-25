@@ -40,6 +40,14 @@ class FenecException internal constructor(
      * (`retry_after_ms`), a move's or a failover's 503 in whole seconds (`Retry-After`).
      */
     val retryAfter: Double? = null,
+    /**
+     * What a `require n else '<reason>'` that refused said ([Code.UNMET]):
+     * the statement's own words, by which a caller tells "insufficient funds"
+     * from "no such account" -- where [at] moves with every statement put in
+     * front of it. From the library and a server alike; null where the
+     * statement gave none.
+     */
+    val reason: String? = null,
 ) : RuntimeException(message) {
     constructor(code: Code, message: String) : this(code, message, null)
 

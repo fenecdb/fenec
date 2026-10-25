@@ -92,9 +92,14 @@ fn render(w: &Value, params: &mut Vec<Value>) -> String {
             _ => String::new(),
         }
     };
-    // `"require": n`: the builders' `{ require: n }`, last in the text.
-    let required = match member(w, "require") {
-        Some(Value::Int(n)) => format!(" require {n}"),
+    // `"require": n`: the builders' `{ require: n }`, last in the text, and
+    // `"reason"` their `{ reason }`, a quote doubled and a backslash escaped.
+    let required = match (member(w, "require"), member(w, "reason")) {
+        (Some(Value::Int(n)), Some(Value::Text(why))) => format!(
+            " require {n} else '{}'",
+            why.replace('\\', "\\\\").replace('\'', "''")
+        ),
+        (Some(Value::Int(n)), _) => format!(" require {n}"),
         _ => String::new(),
     };
     // `"order": f`, `"limit": n` and `"returning"`: the builders' `.order(f)`,
@@ -270,6 +275,8 @@ struct Run {
     token_asked: bool,
     waits: Vec<Value>,
     error: Option<String>,
+    /// The reason the error said, a `require <n> else '<reason>'`'s.
+    reason: Option<String>,
 }
 
 impl Run {
@@ -375,6 +382,10 @@ impl Run {
             "refused" => self.refused.push(obj(vec![
                 ("status", Value::Int(int(member(a, "status")))),
                 ("quota", member(a, "quota").cloned().unwrap_or(Value::Null)),
+                (
+                    "reason",
+                    member(a, "reason").cloned().unwrap_or(Value::Null),
+                ),
             ])),
             "token" => self.token_asked = true,
             "changed" | "status" => {}
@@ -418,6 +429,7 @@ impl Run {
         self.waits.clear();
         self.token_asked = false;
         self.error = None;
+        self.reason = None;
         let shape_collection = |run: &Run| -> String {
             let Value::List(shapes) = &run.shapes else {
                 unreachable!()
@@ -503,6 +515,7 @@ impl Run {
                 });
                 if let Err(e) = r {
                     self.error = Some(e.to_string());
+                    self.reason = e.reason().map(String::from);
                 }
             }
             "net" => self.up = matches!(member(step, "up"), Some(Value::Bool(true))),
@@ -633,6 +646,10 @@ impl Run {
             (_, Some(got)) => return Err(format!("an error no expectation names: {got}")),
             _ => {}
         }
+        if let Some(e) = member(expect, "reason") {
+            let got = self.reason.clone().map_or(Value::Null, Value::Text);
+            matches(e, &got, binds, "reason")?;
+        }
         Ok(())
     }
 }
@@ -677,6 +694,7 @@ fn run(file: &Value, sc: &Value) -> Check {
         token_asked: false,
         waits: vec![],
         error: None,
+        reason: None,
     };
     let mut binds = HashMap::new();
     let Some(Value::List(steps)) = member(sc, "steps") else {

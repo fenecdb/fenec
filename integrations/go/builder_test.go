@@ -296,6 +296,9 @@ func insertOpts(o object) []any {
 		if k == "require" {
 			out = append(out, fenecdb.Require(o.vals[i].(int)))
 		}
+		if k == "reason" {
+			out = append(out, fenecdb.Reason(o.vals[i].(string)))
+		}
 		// As an update's: JavaScript's true is every field.
 		if k == "returning" {
 			for _, opt := range options(object{keys: []string{k}, vals: []any{o.vals[i]}}) {
@@ -349,6 +352,8 @@ func options(o object) []fenecdb.Opt {
 			}
 		case "require":
 			out = append(out, fenecdb.Require(v.(int)))
+		case "reason":
+			out = append(out, fenecdb.Reason(v.(string)))
 		case "returning":
 			// JavaScript's true is every field, "*" here.
 			if b, ok := v.(bool); ok {
@@ -575,7 +580,7 @@ func runChain(t *testing.T, db *fenecdb.Client, rec *recorder, steps []object) o
 		case "offset":
 			q = q.Offset(a[0].(int))
 		case "require":
-			q = q.Require(a[0].(int))
+			q = q.Require(a[0].(int), options(optsOf(a, 1))...)
 		default:
 			if !last {
 				t.Fatalf("%s ends a chain", op)

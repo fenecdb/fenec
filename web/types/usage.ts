@@ -260,6 +260,16 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
   expect<number>((await db.from('articles').where('year', 2024).limit(1).require(1).rows()).length);
   // @ts-expect-error -- a read's require is a count too
   db.from('articles').require('1');
+  // A require that says why, and the error that tells it.
+  db.from('articles').where('id', 1).toDelete({ require: 1, reason: 'no such article' });
+  db.from('articles').where('id', 1).limit(1).require(1, { reason: 'no such article' });
+  // @ts-expect-error -- a read's reason goes in its options
+  db.from('articles').require(1, 'no such article');
+  try {
+    await db.from('articles').where('id', 1).update({ year: inc(-1) }, { require: 1, reason: 'no such article' });
+  } catch (e) {
+    if (e instanceof FenecError && e.status === 412) expect<string | undefined>(e.reason);
+  }
   // A claim: the oldest rows picked and answered as written; a pop.
   const claimed = await db
     .from('articles')

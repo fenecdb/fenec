@@ -47,7 +47,9 @@ count
 and <code>count</code> answers one row with one column. A <code>get</code> can
 also be held to a count, <code>require N</code>, which refuses it and its batch
 when it answers another (<a href="fenecql-writing.html#read-require">A read
-that must find its rows</a>). Only filters joined
+that must find its rows</a>), and <code>require N else 'no such coupon'</code>
+says why (<a href="fenecql-writing.html#require-reason">A reason for the
+refusal</a>). Only filters joined
 by <code>and</code> reach an index (<a href="fenecql-indexes.html">Indexes</a>),
 and <code>explain</code>, below, says which one a query used. The operators,
 logic and ordering are in <a href="fenecql.html#reference">the reference

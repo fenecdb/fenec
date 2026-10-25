@@ -48,14 +48,15 @@ const rows = await open.rows();      // once
 const stop = db.live(open, draw);    // and again after every write it reads
 ```
 
-A write reads the row it writes, and can be made to find it. Sent as one
-`/batch`, a debit that finds too little money is refused (412, `unmet`,
-`"at": 0`) before the credit runs, and a credit to an account that is not
-there (`"at": 1`) puts the debit back:
+A write reads the row it writes, and can be made to find it, saying why
+when it does not. Sent as one `/batch`, a debit that finds too little money
+is refused (412, `unmet`, `"at": 0`, `"reason": "insufficient funds"`) before
+the credit runs, and a credit to an account that is not there (`"at": 1`,
+`"reason": "no account to credit"`) puts the debit back:
 
 ```
-set accounts {balance: balance - $3} where name = $1 and balance >= $3 require 1
-set accounts {balance: balance + $3} where name = $2 require 1
+set accounts {balance: balance - $3} where name = $1 and balance >= $3 require 1 else 'insufficient funds'
+set accounts {balance: balance + $3} where name = $2 require 1 else 'no account to credit'
 ```
 
 Search is in the same query: the words ranked by BM25, a typo and a word
@@ -199,7 +200,7 @@ const db = await Fenec.open('./fenec.wasm');
 
 330 KB of gzipped WebAssembly and a 60 KB gzipped client — no wasm-bindgen, no
 build step. An app whose queries run on a server can import
-`@fenecdb/web/client`, 9 KB brotli in its bundle, which cannot pull in the
+`@fenecdb/web/client`, 10 KB brotli in its bundle, which cannot pull in the
 engine, sync or storage ([which package](https://fenecdb.com/docs/javascript#packages)). With live
 queries (`db.live`, React's `useLiveQuery`) it can be an app's whole state,
 no server: [state in the page](https://fenecdb.com/docs/javascript#state). [JavaScript client](https://fenecdb.com/docs/javascript).

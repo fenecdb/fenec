@@ -574,6 +574,42 @@ mod tests {
         }
     }
 
+    /// A `require` that says why: the answer's `reason`, beside `at` for a
+    /// text of several, as a server's 412 says it; none where it said none.
+    /// The module's and the native library's answer alike.
+    #[test]
+    fn an_unmet_require_answers_its_reason() {
+        let mut db = Database::new();
+        run(
+            &mut db,
+            "create collection t (a int); put t {a: 1}",
+            "",
+            &[],
+        );
+        let r = run(
+            &mut db,
+            "set t {a: 2} where a = 5 require 1 else 'no five'",
+            "",
+            &[],
+        );
+        assert_eq!(
+            r,
+            r#"{"kind":"error","message":"unmet: no five (`set t` wrote 0 rows, and requires 1)","reason":"no five"}"#
+        );
+        let sql = "set t {a: 3}; get t where a = 9 require 1 else 'it''s gone'";
+        let r = run(&mut db, sql, "", &[]);
+        assert!(r.ends_with(r#","reason":"it's gone","at":1}"#), "{r}");
+        // The block put back, and read under the shared lock the same.
+        assert!(run(&mut db, "get t select a", "", &[]).contains(r#"[{"a":1}]"#));
+        let p = prepare("get t where a = 9 require 1 else 'none'", "", &[]).unwrap();
+        assert!(answer(&query(&db, &p)).ends_with(r#","reason":"none"}"#));
+        let r = run(&mut db, "del t where a = 9 require 1", "", &[]);
+        assert!(
+            r.starts_with(r#"{"kind":"error""#) && !r.contains("reason"),
+            "{r}"
+        );
+    }
+
     /// A read answered under the shared lock is the answer `execute` gives.
     #[test]
     fn a_read_is_answered_as_by_execute() {

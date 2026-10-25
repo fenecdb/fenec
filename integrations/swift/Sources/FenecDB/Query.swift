@@ -1053,8 +1053,13 @@ public struct Query: Sendable {
     /// `require n` on a read: the rows it answers, after `limit`, must
     /// number n, or it is refused (412, unmet) and the batch it is in put
     /// back, as a write's `require` is -- a checkout's guard on a read.
-    public func require(_ n: Int) throws -> Query {
-        let clause = try Query.requireClause(n)
+    /// `reason` says why, `require n else '<reason>'`: the error's
+    /// `reason`, by which a caller tells "no such coupon" from another
+    /// refusal where `at` moves with every statement put in front --
+    /// `.require(1, reason: "no such coupon")`. Written into the text, as
+    /// the count is, never a parameter: 1 to 200 bytes of UTF-8.
+    public func require(_ n: Int, reason: String? = nil) throws -> Query {
+        let clause = try Query.requireClause(n, reason)
         return with { $0.requirement = clause }
     }
 
@@ -1258,10 +1263,34 @@ public struct Query: Sendable {
     // number written in, never a parameter: the count is what the statement
     // guards, a constant of the code, where a page's `limit` and `offset`
     // change with each request and go as parameters.
-    private static func requireClause(_ n: Int?) throws -> String {
-        guard let n else { return "" }
+    private static func requireClause(_ n: Int?, _ reason: String? = nil) throws -> String {
+        guard let n else {
+            if reason != nil { throw FenecError.builder("a reason says why a require refused, and goes with one") }
+            return ""
+        }
         if n < 0 { throw FenecError.builder("require takes a count of rows, a whole number from 0 (got \(n))") }
-        return " require \(n)"
+        return " require \(n)" + (try reasonClause(reason))
+    }
+
+    // ` else '<reason>'` for a require's reason: written into the text, a
+    // quote doubled and a backslash escaped, as FenecQL takes it -- never a
+    // parameter, as the count is not: it is the statement's own words,
+    // which a caller tells one refusal from another by. 1 to 200 bytes of
+    // UTF-8, as the parser holds it: bytes, not characters, so "ş" counts
+    // two. Escaped scalar by scalar, not by Character: a quote followed by
+    // a combining mark is one Character to Swift, which a search for "'"
+    // passes over, and the lexer would end the text at it.
+    private static func reasonClause(_ reason: String?) throws -> String {
+        guard let reason else { return "" }
+        if reason.isEmpty || reason.utf8.count > 200 {
+            throw FenecError.builder("a require's reason is a text of 1 to 200 bytes")
+        }
+        var escaped = String.UnicodeScalarView()
+        for u in reason.unicodeScalars {
+            if u == "'" || u == "\\" { escaped.append(u) }
+            escaped.append(u)
+        }
+        return " else '\(String(escaped))'"
     }
 
     // An update's or a delete's ` order ... limit $n returning ...`: the rows
@@ -1295,31 +1324,36 @@ public struct Query: Sendable {
     /// `ifAbsent`: `put ... if absent`, which passes over a document whose
     /// id or `@unique` value a row holds and counts only what it wrote -- a
     /// lock taken, or not, in one statement. `require`: refused, and nothing
-    /// written, unless it wrote exactly that many rows. `returning`: the
-    /// rows written answered, ids and all (`insertReturning`).
-    public func toInsert(_ docs: any FenecValue, ifAbsent: Bool = false, require: Int? = nil, returning: [String]? = nil) throws -> (text: String, params: [Value]) {
+    /// written, unless it wrote exactly that many rows; `reason` beside it
+    /// says why (`require n else '<reason>'`), the error's `reason`, by
+    /// which a caller tells "liked already" from another refusal where `at`
+    /// moves with every statement put in front -- written into the text,
+    /// never a parameter, as the count is not. `returning`: the rows
+    /// written answered, ids and all (`insertReturning`).
+    public func toInsert(_ docs: any FenecValue, ifAbsent: Bool = false, require: Int? = nil, reason: String? = nil, returning: [String]? = nil) throws -> (text: String, params: [Value]) {
         try assertPlain("insert")
         let list = Query.docs(try docs.fenecValue())
         guard !list.isEmpty else { throw FenecError.builder("cannot write an empty document list") }
         let bind = Binder()
         let body = try list.map { try Builder.renderDoc($0, bind, insert: true) }.joined(separator: ", ")
         let absent = ifAbsent ? " if absent" : ""
-        let tail = try Query.returningClause(returning) + Query.requireClause(require)
+        let tail = try Query.returningClause(returning) + Query.requireClause(require, reason)
         return ("put \(collection) \(list.count == 1 ? body : "[\(body)]")\(absent)\(tail)", bind.params)
     }
 
     /// The `set` of the rows the filter names, not run; with no filter it is
     /// refused unless `all` or a `limit` bounds it; with `require`, refused
-    /// unless it set exactly that many rows. `order` and `limit` before it
-    /// pick the rows it writes -- the page a `get` with them answers -- and
-    /// `returning` answers them as written, the fields named or `["*"]`
-    /// for every one: a job queue's claim (`updateReturning`).
-    public func toUpdate(_ patch: any FenecValue, all: Bool = false, require: Int? = nil, returning: [String]? = nil) throws -> (text: String, params: [Value]) {
+    /// unless it set exactly that many rows, and `reason` as `toInsert`'s:
+    /// `require: 1, reason: "insufficient funds"`. `order` and `limit`
+    /// before it pick the rows it writes -- the page a `get` with them
+    /// answers -- and `returning` answers them as written, the fields named
+    /// or `["*"]` for every one: a job queue's claim (`updateReturning`).
+    public func toUpdate(_ patch: any FenecValue, all: Bool = false, require: Int? = nil, reason: String? = nil, returning: [String]? = nil) throws -> (text: String, params: [Value]) {
         try assertPlain("update")
         let bind = Binder()
         let body = try Builder.renderDoc(try patch.fenecValue(), bind)
         let filter = try requireFilter("update", all, bind)
-        return ("set \(collection) \(body)\(filter)\(try pick(returning, bind))\(try Query.requireClause(require))", bind.params)
+        return ("set \(collection) \(body)\(filter)\(try pick(returning, bind))\(try Query.requireClause(require, reason))", bind.params)
     }
 
     /// The upsert, `put ... if absent else set {patch}`, not run: a document
@@ -1327,27 +1361,28 @@ public struct Query: Sendable {
     /// patch -- an update's, `.inc` and `.expr` with it, and in an
     /// expression `new.f` the document's own `f` -- and every other one is
     /// inserted. The documents' parameters come first, then the patch's;
-    /// `returning` as `toInsert`'s.
-    public func toUpsert(_ docs: any FenecValue, _ patch: any FenecValue, require: Int? = nil, returning: [String]? = nil) throws -> (text: String, params: [Value]) {
+    /// `require`, `reason` and `returning` as `toInsert`'s.
+    public func toUpsert(_ docs: any FenecValue, _ patch: any FenecValue, require: Int? = nil, reason: String? = nil, returning: [String]? = nil) throws -> (text: String, params: [Value]) {
         try assertPlain("upsert")
         let list = Query.docs(try docs.fenecValue())
         guard !list.isEmpty else { throw FenecError.builder("cannot write an empty document list") }
         let bind = Binder()
         let body = try list.map { try Builder.renderDoc($0, bind, insert: true) }.joined(separator: ", ")
         let set = try Builder.renderDoc(try patch.fenecValue(), bind)
-        let tail = try Query.returningClause(returning) + Query.requireClause(require)
+        let tail = try Query.returningClause(returning) + Query.requireClause(require, reason)
         return ("put \(collection) \(list.count == 1 ? body : "[\(body)]") if absent else set \(set)\(tail)", bind.params)
     }
 
     /// The `del` of the rows the filter names, not run; with no filter it is
     /// refused unless `all` or a `limit` bounds it; with `require`, refused
-    /// unless it deleted exactly that many rows. `order`, `limit` and
-    /// `returning` as `toUpdate`'s, the rows answered as they were: a pop.
-    public func toDelete(all: Bool = false, require: Int? = nil, returning: [String]? = nil) throws -> (text: String, params: [Value]) {
+    /// unless it deleted exactly that many rows, and `reason` as
+    /// `toInsert`'s. `order`, `limit` and `returning` as `toUpdate`'s, the
+    /// rows answered as they were: a pop.
+    public func toDelete(all: Bool = false, require: Int? = nil, reason: String? = nil, returning: [String]? = nil) throws -> (text: String, params: [Value]) {
         try assertPlain("delete")
         let bind = Binder()
         let filter = try requireFilter("delete", all, bind)
-        return ("del \(collection)\(filter)\(try pick(returning, bind))\(try Query.requireClause(require))", bind.params)
+        return ("del \(collection)\(filter)\(try pick(returning, bind))\(try Query.requireClause(require, reason))", bind.params)
     }
 
     // -------------------------------------------------------------- running
@@ -1392,12 +1427,13 @@ public struct Query: Sendable {
 
     /// Puts a document, or a list of them: how many it wrote, which with
     /// `ifAbsent` leaves out those already held. None is no statement.
-    /// `require`: refused (`.unmet`) unless it wrote exactly that many.
+    /// `require`: refused (`.unmet`) unless it wrote exactly that many;
+    /// `reason` beside it, what the error's `reason` says.
     @discardableResult
-    public func insert(_ docs: any FenecValue, ifAbsent: Bool = false, require: Int? = nil) async throws -> Int {
+    public func insert(_ docs: any FenecValue, ifAbsent: Bool = false, require: Int? = nil, reason: String? = nil) async throws -> Int {
         let v = try docs.fenecValue()
         if case .array(let list) = v, list.isEmpty { return 0 }
-        return try await run(toInsert(v, ifAbsent: ifAbsent, require: require)).affected
+        return try await run(toInsert(v, ifAbsent: ifAbsent, require: require, reason: reason)).affected
     }
 
     /// Inserts each document, or, where a row holds its id or `@unique`
@@ -1405,26 +1441,28 @@ public struct Query: Sendable {
     /// `upsert(["key": k, "n": 1], ["n": .expr("n + new.n")])`: the
     /// rows it set and made together. None is no statement.
     @discardableResult
-    public func upsert(_ docs: any FenecValue, _ patch: any FenecValue, require: Int? = nil) async throws -> Int {
+    public func upsert(_ docs: any FenecValue, _ patch: any FenecValue, require: Int? = nil, reason: String? = nil) async throws -> Int {
         let v = try docs.fenecValue()
         if case .array(let list) = v, list.isEmpty { return 0 }
-        return try await run(toUpsert(v, patch, require: require)).affected
+        return try await run(toUpsert(v, patch, require: require, reason: reason)).affected
     }
 
     /// Sets the patch's fields on the rows the filter names; with no filter
     /// it is refused unless `all`; with `require`, refused (`.unmet`) unless
-    /// it set exactly that many rows.
+    /// it set exactly that many rows, the error's `reason` the `reason`
+    /// beside it: `update(["balance": .inc(-5)], require: 1, reason:
+    /// "insufficient funds")`.
     @discardableResult
-    public func update(_ patch: any FenecValue, all: Bool = false, require: Int? = nil) async throws -> Int {
-        try await run(toUpdate(patch, all: all, require: require)).affected
+    public func update(_ patch: any FenecValue, all: Bool = false, require: Int? = nil, reason: String? = nil) async throws -> Int {
+        try await run(toUpdate(patch, all: all, require: require, reason: reason)).affected
     }
 
     /// Deletes the rows the filter names; with no filter it is refused
     /// unless `all`; with `require`, refused (`.unmet`) unless it deleted
-    /// exactly that many rows.
+    /// exactly that many rows, the error's `reason` the `reason` beside it.
     @discardableResult
-    public func delete(all: Bool = false, require: Int? = nil) async throws -> Int {
-        try await run(toDelete(all: all, require: require)).affected
+    public func delete(all: Bool = false, require: Int? = nil, reason: String? = nil) async throws -> Int {
+        try await run(toDelete(all: all, require: require, reason: reason)).affected
     }
 
     /// `update` that answers the rows it set, as written, under the fields
@@ -1433,32 +1471,32 @@ public struct Query: Sendable {
     /// .limit(10).updateReturning(["owner": me, "run_at": .expr("now() + ?",
     /// 30000), "attempts": .inc(1)])`.
     @discardableResult
-    public func updateReturning(_ patch: any FenecValue, returning: [String] = ["*"], all: Bool = false, require: Int? = nil) async throws -> [Row] {
-        try await run(toUpdate(patch, all: all, require: require, returning: returning)).rows
+    public func updateReturning(_ patch: any FenecValue, returning: [String] = ["*"], all: Bool = false, require: Int? = nil, reason: String? = nil) async throws -> [Row] {
+        try await run(toUpdate(patch, all: all, require: require, reason: reason, returning: returning)).rows
     }
 
     /// `delete` that answers the rows it deleted, as they were: a pop.
     @discardableResult
-    public func deleteReturning(returning: [String] = ["*"], all: Bool = false, require: Int? = nil) async throws -> [Row] {
-        try await run(toDelete(all: all, require: require, returning: returning)).rows
+    public func deleteReturning(returning: [String] = ["*"], all: Bool = false, require: Int? = nil, reason: String? = nil) async throws -> [Row] {
+        try await run(toDelete(all: all, require: require, reason: reason, returning: returning)).rows
     }
 
     /// `insert` that answers the rows it wrote, ids and all, in the
     /// documents' order, under the fields named -- `["*"]` every one:
     /// `from("orders").insertReturning(["item": "tea"], returning: ["id"])`.
     @discardableResult
-    public func insertReturning(_ docs: any FenecValue, returning: [String] = ["*"], ifAbsent: Bool = false, require: Int? = nil) async throws -> [Row] {
+    public func insertReturning(_ docs: any FenecValue, returning: [String] = ["*"], ifAbsent: Bool = false, require: Int? = nil, reason: String? = nil) async throws -> [Row] {
         let v = try docs.fenecValue()
         if case .array(let list) = v, list.isEmpty { return [] }
-        return try await run(toInsert(v, ifAbsent: ifAbsent, require: require, returning: returning)).rows
+        return try await run(toInsert(v, ifAbsent: ifAbsent, require: require, reason: reason, returning: returning)).rows
     }
 
     /// `upsert` that answers the rows it set and made, as written, in the
     /// documents' order.
     @discardableResult
-    public func upsertReturning(_ docs: any FenecValue, _ patch: any FenecValue, returning: [String] = ["*"], require: Int? = nil) async throws -> [Row] {
+    public func upsertReturning(_ docs: any FenecValue, _ patch: any FenecValue, returning: [String] = ["*"], require: Int? = nil, reason: String? = nil) async throws -> [Row] {
         let v = try docs.fenecValue()
         if case .array(let list) = v, list.isEmpty { return [] }
-        return try await run(toUpsert(v, patch, require: require, returning: returning)).rows
+        return try await run(toUpsert(v, patch, require: require, reason: reason, returning: returning)).rows
     }
 }

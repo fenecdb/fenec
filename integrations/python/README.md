@@ -56,7 +56,11 @@ condition on the field, as a shop's filter list does.
 
 Several statements are one `batch`, a block under one write lock: all
 land or none, and a `FenecError` that stops it says which (`e.at`, from 0;
-412 for a write whose `require` was not met). On a tenant node a quota
+412 for a write whose `require` was not met). `reason=` beside `require=`
+(`require 1 else 'insufficient funds'`, written into the text) comes back
+as `e.reason`, which tells one guard's refusal from another's where `e.at`
+moves with every statement added in front; a read's `.require(1,
+reason="no such account")` says its own. On a tenant node a quota
 names itself (`e.quota`): `"bytes"` and `"rows"` answer 507, and room is
 made by deleting; `"streams"`, `"requests"`, `"writes"` and `"write_bytes"`
 answer 429 with `e.retry_after`, the seconds the server asks to wait, as a

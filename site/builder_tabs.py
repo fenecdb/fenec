@@ -400,7 +400,7 @@ class JS(Lang):
             args = [self.s(x) for x in a[:2]]
             return Call(op, args + ([self.opts(a[2])] if len(a) > 2 else []))
         if op in ("limit", "offset", "require"):
-            return Call(op, [_num(a[0])])
+            return Call(op, [_num(a[0])] + ([self.opts(a[1])] if len(a) > 1 else []))
         if op in ("near", "rerank"):
             return Call(op, [self.s(a[0]), self.v(a[1])] + ([self.opts(a[2])] if len(a) > 2 else []))
         if op == "match":
@@ -511,7 +511,7 @@ class Python(Lang):
         if op == "order":
             return Call(op, [self.s(x) for x in a[:2]] + self.kw(_opt(a, 2)))
         if op in ("limit", "offset", "require"):
-            return Call(op, [_num(a[0])])
+            return Call(op, [_num(a[0])] + self.kw(_opt(a, 1)))
         if op in ("near", "rerank"):
             return Call(op, [self.s(a[0]), self.v(a[1])] + self.kw(_opt(a, 2)))
         if op == "match":
@@ -639,6 +639,8 @@ class Go(Lang):
                 out += ["fenecdb.All()"] if x else []
             elif k == "require":
                 out.append(f"fenecdb.Require({x})")
+            elif k == "reason":
+                out.append(f"fenecdb.Reason({self.s(x)})")
             elif k == "returning":
                 # JavaScript's true is every field, "*" here.
                 names = ["*"] if x is True else [] if x is False else x
@@ -686,7 +688,7 @@ class Go(Lang):
         if op == "order":
             return Call("Order", [self.s(a[0]), self.s(a[1] if len(a) > 1 else "asc")] + self.opts(_opt(a, 2)))
         if op in ("limit", "offset", "require"):
-            return Call(op.title(), [_num(a[0])])
+            return Call(op.title(), [_num(a[0])] + self.opts(_opt(a, 1)))
         if op in ("near", "rerank"):
             return Call(op.title(), [self.s(a[0]), self.v(a[1], vector=True)] + self.opts(_opt(a, 2)))
         if op == "match":
@@ -860,7 +862,7 @@ class CSharp(Lang):
         if op == "order":
             return Call("Order", [self.s(x) for x in a[:2]] + self.named(_opt(a, 2)))
         if op in ("limit", "offset", "require"):
-            return Call(op.title(), [_num(a[0])])
+            return Call(op.title(), [_num(a[0])] + self.named(_opt(a, 1)))
         if op in ("near", "rerank"):
             return Call(op.title(), [self.s(a[0]), self.v(a[1], vector=True)] + self.named(_opt(a, 2)))
         if op == "match":
@@ -967,8 +969,8 @@ class Swift(Lang):
         "near": ("ef", "exact"), "match": ("fuzzy", "prefix"), "rerank": ("candidates",),
         "fuse": ("k", "candidates"), "highlight": ("pre", "post"), "snippet": ("ellipsis", "pre", "post"),
         "facet": ("top", "ranges", "disjunctive"), "order": ("collate",),
-        "insert": ("ifAbsent", "require"), "update": ("all", "require"), "upsert": ("require",),
-        "delete": ("all", "require"),
+        "insert": ("ifAbsent", "require", "reason"), "update": ("all", "require", "reason"),
+        "upsert": ("require", "reason"), "delete": ("all", "require", "reason"), "require": ("reason",),
     }
 
     def labels(self, op, o):
@@ -1020,7 +1022,7 @@ class Swift(Lang):
         if op == "order":
             return Call(op, [self.s(x) for x in a[:2]] + self.labels(op, _opt(a, 2)))
         if op in ("limit", "offset", "require"):
-            return Call(op, [_num(a[0])])
+            return Call(op, [_num(a[0])] + (self.labels(op, _opt(a, 1)) if op == "require" else []))
         if op in ("near", "rerank"):
             return Call(op, [self.s(a[0]), self.v(a[1])] + self.labels(op, _opt(a, 2)))
         if op == "match":
@@ -1149,7 +1151,7 @@ class Kotlin(Lang):
         if op == "order":
             return Call(op, [self.s(x) for x in a[:2]] + self.named(_opt(a, 2)))
         if op in ("limit", "offset", "require"):
-            return Call(op, [_num(a[0])])
+            return Call(op, [_num(a[0])] + self.named(_opt(a, 1)))
         if op in ("near", "rerank"):
             return Call(op, [self.s(a[0]), self.v(a[1], True)] + self.named(_opt(a, 2)))
         if op == "match":
@@ -1279,7 +1281,7 @@ class Dart(Lang):
                 args += [self.s("asc")] * (len(args) == 1) + [self.s(a[2]["collate"])]
             return Call(op, args)
         if op in ("limit", "offset", "require"):
-            return Call(op, [_num(a[0])])
+            return Call(op, [_num(a[0])] + self.named(_opt(a, 1)))
         if op in ("near", "rerank"):
             return Call(op, [self.s(a[0]), self.v(a[1])] + self.named(_opt(a, 2)))
         if op == "match":

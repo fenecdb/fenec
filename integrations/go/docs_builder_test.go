@@ -369,6 +369,40 @@ func TestDocsBuilderTabs(t *testing.T) {
 		sent(t, err, "get articles select title, year where year >= $1 and tags has $2 and not (title ~ $3) near embed $4 ef 128 limit $5", "[2024, \"rust\", \"draft\", [0.9, 0.1, 0], 10]")
 	})
 
+	t.Run("docs: a debit that must find the money, or says why", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("accounts").
+			Where("name", "=", "ada").
+			Where("balance", ">=", 30).
+			Update(
+				ctx,
+				fenecdb.D("balance", fenecdb.Expr("balance - ?", 30)),
+				fenecdb.Require(1),
+				fenecdb.Reason("insufficient funds"),
+			)
+		sent(t, err, "set accounts {balance: balance - $1} where name = $2 and balance >= $3 require 1 else 'insufficient funds'", "[30, \"ada\", 30]")
+	})
+
+	t.Run("docs: a hold deleted that must be there, or says why", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("holds").
+			Where("order_ref", "=", "o-17").
+			Where("state", "=", "held").
+			Delete(ctx, fenecdb.Require(1), fenecdb.Reason("it's not held"))
+		sent(t, err, "del holds where order_ref = $1 and state = $2 require 1 else 'it''s not held'", "[\"o-17\", \"held\"]")
+	})
+
+	t.Run("docs: a coupon that must still be usable, or says why", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("coupons").
+			Where("code", "=", "X1").
+			WhereCond(fenecdb.Raw("uses < max_uses")).
+			Limit(1).
+			Require(1, fenecdb.Reason("coupon used up")).
+			Rows(ctx)
+		sent(t, err, "get coupons where code = $1 and uses < max_uses limit $2 require 1 else 'coupon used up'", "[\"X1\", 1]")
+	})
+
 	t.Run("docs: a product that must be there at its price", func(t *testing.T) {
 		rec.body = nil
 		_, err := db.From("products").

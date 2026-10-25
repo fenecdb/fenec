@@ -1026,9 +1026,16 @@ export class Query {
    *
    *   from('products').where({ sku, price }).require(1)    // still that price
    *   from('coupons').where('code', c).limit(1).require(1)  // one exists
+   *
+   * `{ reason }` says why in the refusal, `require n else '<reason>'`: the
+   * error's `reason`, which a caller tells one refusal from another by --
+   * `.require(1, { reason: 'no such coupon' })`.
    */
-  require(n) {
-    return this.#with({ require: requireClause({ require: n }) });
+  require(n, opts) {
+    if (opts !== undefined && (opts === null || typeof opts !== 'object')) {
+      throw new FenecError('require takes its reason as an option: require(n, { reason })');
+    }
+    return this.#with({ require: requireClause({ require: n, reason: opts?.reason }) });
   }
 
   /**
@@ -1261,7 +1268,8 @@ export class Query {
    * over a document whose id or `@unique` value a row holds, and counts
    * only what it wrote -- a lock taken, or not, in one statement.
    * `{ require: n }` on any write: `... require n`, refused (412) and its
-   * batch put back unless it wrote exactly `n` rows. `{ returning }`
+   * batch put back unless it wrote exactly `n` rows; `{ reason }` beside it
+   * says why (`require n else '<reason>'`), the error's `reason`. `{ returning }`
    * answers the rows it wrote, ids and all, in the documents' order: `true`
    * every field, or the fields named.
    */
@@ -1518,11 +1526,31 @@ function binder(params) {
 // parameters.
 function requireClause(opts) {
   const n = opts?.require;
-  if (n === undefined || n === null) return '';
+  const reason = opts?.reason;
+  if (n === undefined || n === null) {
+    if (reason !== undefined && reason !== null) {
+      throw new FenecError('a reason says why a require refused, and goes with one');
+    }
+    return '';
+  }
   if (typeof n !== 'number' || !Number.isSafeInteger(n) || n < 0) {
     throw new FenecError(`require takes a count of rows, a whole number from 0 (got ${String(n)})`);
   }
-  return ` require ${n}`;
+  return ` require ${n}${reasonClause(reason)}`;
+}
+
+// ` else '<reason>'` for a require's `reason`: written into the text, a
+// quote doubled and a backslash escaped, as FenecQL takes it -- never a
+// parameter, as the count is not: it is the statement's own words, which a
+// caller tells one refusal from another by. 1 to 200 bytes of UTF-8, as the
+// parser holds it.
+const encoder = new TextEncoder();
+function reasonClause(reason) {
+  if (reason === undefined || reason === null) return '';
+  if (typeof reason !== 'string' || reason === '' || encoder.encode(reason).length > 200) {
+    throw new FenecError("a require's reason is a text of 1 to 200 bytes");
+  }
+  return ` else '${reason.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`;
 }
 
 // ` returning ...` for a write's `{ returning }`: `true` or `['*']` every

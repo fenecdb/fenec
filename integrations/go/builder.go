@@ -757,9 +757,10 @@ func render(c *node, b *binder, parent string) (string, error) {
 // Opt is an option of a builder step: Ef and Exact for Near, K and
 // Candidates for Fuse and Rerank, Collate for Order and Sort, All for
 // Update and Delete, Pre, Post (or Tags) and Ellipsis for Highlight and
-// Snippet, Top for Facet, and On, ParentKey, Select, Where, Required,
-// Sort, Limit and Offset for Lookup. A step reads the ones it has and
-// passes over the rest, as the JS builder's option objects do.
+// Snippet, Top for Facet, Reason for Require, and On, ParentKey, Select,
+// Where, Required, Sort, Limit and Offset for Lookup. A step reads the
+// ones it has and passes over the rest, as the JS builder's option objects
+// do.
 type Opt func(*opts)
 
 type opts struct {
@@ -776,6 +777,7 @@ type opts struct {
 	sort                             []sortOpt
 	top                              *int
 	require                          *int
+	reason                           *string
 	returning                        []string
 	returningSet                     bool
 	ranges                           []float64
@@ -1467,10 +1469,14 @@ func (b *Builder) Offset(n int) *Builder {
 // Require is `require n` on a read: the rows it answers, after Limit, must
 // number n, or it is refused (412, CodeUnmet) and the batch it is in put
 // back, as a write's Require option is -- a checkout's guard on a read,
-// From("products").Where(...).Require(1).
-func (b *Builder) Require(n int) *Builder {
+// From("products").Where(...).Require(1). Reason among its options says
+// why in the refusal, require n else '<reason>': the *Error's Reason --
+// From("accounts").Where("id", "=", id).Require(1, Reason("no such account")).
+func (b *Builder) Require(n int, options ...Opt) *Builder {
 	return b.step(func(d *Builder) (err error) {
-		d.require, err = requireClause(opts{require: &n})
+		o := gather(options)
+		o.require = &n
+		d.require, err = requireClause(o)
 		return err
 	})
 }
@@ -2148,6 +2154,14 @@ func IfAbsent() Opt { return func(o *opts) { o.ifAbsent = true } }
 // rows it is refused (412, CodeUnmet) and its batch put back.
 func Require(n int) Opt { return func(o *opts) { o.require = intp(n) } }
 
+// Reason, beside Require on a write or among a read's Require options, is
+// require n else '<reason>': the refusal says it, the *Error's Reason --
+// the statement's own words, by which a caller tells "insufficient funds"
+// from "no such account" where a Batch's At moves with every statement
+// added in front. Written into the text, never a parameter, as the count
+// is not; 1 to 200 bytes of UTF-8.
+func Reason(text string) Opt { return func(o *opts) { o.reason = strp(text) } }
+
 // Returning, among Update's and Delete's options -- and an insert's
 // documents, and Upsert's -- is ... returning: the rows written answered
 // rather than counted, in Result.Rows -- an insert's and an update's as
@@ -2168,16 +2182,39 @@ func Returning(fields ...string) Opt {
 // offset change with each request and go as parameters.
 func requireClause(o opts) (string, error) {
 	if o.require == nil {
+		if o.reason != nil {
+			return "", refuse("a reason says why a require refused, and goes with one")
+		}
 		return "", nil
 	}
 	if *o.require < 0 {
 		return "", refuse("require takes a count of rows, a whole number from 0 (got %d)", *o.require)
 	}
-	return " require " + strconv.Itoa(*o.require), nil
+	reason, err := reasonClause(o.reason)
+	if err != nil {
+		return "", err
+	}
+	return " require " + strconv.Itoa(*o.require) + reason, nil
+}
+
+// reasonClause is " else '<reason>'" for Reason: written into the text, a
+// quote doubled and a backslash escaped, as FenecQL takes it -- never a
+// parameter, as the count is not: it is the statement's own words, by which
+// a caller tells one refusal from another. 1 to 200 bytes of UTF-8, as the
+// parser holds it: len counts bytes, so "ş" counts 2.
+func reasonClause(reason *string) (string, error) {
+	if reason == nil {
+		return "", nil
+	}
+	if *reason == "" || len(*reason) > 200 {
+		return "", refuse("a require's reason is a text of 1 to 200 bytes")
+	}
+	escaped := strings.ReplaceAll(strings.ReplaceAll(*reason, `\`, `\\`), "'", "''")
+	return " else '" + escaped + "'", nil
 }
 
 // ToInsert is the put of the documents, not sent. An Opt among them --
-// IfAbsent, Returning, Require -- is an option, not a document.
+// IfAbsent, Returning, Require, Reason -- is an option, not a document.
 func (b *Builder) ToInsert(docs ...any) (string, []any, error) {
 	if err := b.assertPlain("insert"); err != nil {
 		return "", nil, err
