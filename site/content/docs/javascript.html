@@ -8,6 +8,30 @@ description: Run fenecdb in the page with one ES module: open a database, query 
 open a database, query it, and keep it between visits — or query a server
 through the client alone. Their types come with them.</p>
 
+<p>The shortest way in: install the package, open the module and query it. This
+is the script of the <a href="quickstart.html#in-the-browser">Quickstart's
+page</a>, which runs from any static file server:</p>
+
+<pre data-lang="bash">npm install @fenecdb/web</pre>
+
+<pre data-lang="js" data-label="script of index.html">import { Fenec } from './node_modules/@fenecdb/web/fenec.js';
+
+const db = await Fenec.open('./node_modules/@fenecdb/web/fenec.wasm');
+
+db.run('create collection notes (title text @text, year int @sorted)');
+db.run('put notes {title: $1, year: $2}', ['Dunes', 2021]);
+db.run('put notes {title: $1, year: $2}', ['Night at the oasis', 2024]);
+
+const { rows } = db.run('get notes where year >= $1 order year desc', [2020]);
+// [{"id":2,"title":"Night at the oasis","year":2024},{"id":1,"title":"Dunes","year":2021}]
+const hits = db.rows('get notes select title match title $1', ['oasis']);
+// [{"title":"Night at the oasis","_score":0.62239116}]</pre>
+
+<p>That database is in the tab's memory, with no server; <a
+href="#opening-a-database">Opening a database</a> below keeps it between
+visits, and the next section says when to load the module and when to query a
+server through the client alone.</p>
+
 <h2 id="packages">Which package</h2>
 
 <p>Pick by where the queries run: on a server, through the client entry and
@@ -24,30 +48,6 @@ the page does.</p>
 </tbody>
 </table>
 </div>
-
-<p>Each way has a full example in the repository, the same Notes app:
-queries on a server from Node through the client entry
-(<a href="https://github.com/fenecdb/fenec/tree/main/examples/node-server">node-server</a>),
-a database in the page kept in IndexedDB
-(<a href="https://github.com/fenecdb/fenec/tree/main/examples/web-local">web-local</a>),
-and a React app over either that or a synced replica
-(<a href="https://github.com/fenecdb/fenec/tree/main/examples/react">react</a>).
-A larger one is a shop in Next.js
-(<a href="https://github.com/fenecdb/fenec/tree/main/examples/shop">shop</a>):
-10 000 products whose pages the server renders through the client entry,
-search with highlights and facets, carts under each shopper's token, and a
-checkout that cannot oversell, with its Lighthouse scores, timings and
-load test measured. Another is a payments ledger on Node
-(<a href="https://github.com/fenecdb/fenec/tree/main/examples/ledger">ledger</a>):
-transfers, refunds and holds as guarded <code>/batch</code> blocks, an
-append-only journal, reconciliation and a change-stream sink, held to its
-invariants by 16 clients, a crash under <code>kill -9</code> and its
-security tests. A third is courier dispatch in Next.js
-(<a href="https://github.com/fenecdb/fenec/tree/main/examples/dispatch">dispatch</a>):
-a company a tenant behind <code>fenec-shard</code> with its plan's quota,
-orders claimed by the nearest courier under a lease or held at the server
-until one comes, couriers on a live map, and couriers' and customers'
-tokens held to their own rows, with the gaps it found listed.</p>
 
 <p>Beside a module the page loads <code>fenec.js</code> and the two modules it
 imports, 51 KB brotli as they are served with no build step; a bundler keeps
@@ -99,6 +99,30 @@ at its token's <code>exp</code> -- is a <code>FenecError</code> of status
 401 to <code>onError</code>, and the live query stops there, for the app to
 open it again with a fresh token.</p>
 </details>
+
+<p>Each way in the table has a full example in the repository, the same Notes app:
+queries on a server from Node through the client entry
+(<a href="https://github.com/fenecdb/fenec/tree/main/examples/node-server">node-server</a>),
+a database in the page kept in IndexedDB
+(<a href="https://github.com/fenecdb/fenec/tree/main/examples/web-local">web-local</a>),
+and a React app over either that or a synced replica
+(<a href="https://github.com/fenecdb/fenec/tree/main/examples/react">react</a>).
+A larger one is a shop in Next.js
+(<a href="https://github.com/fenecdb/fenec/tree/main/examples/shop">shop</a>):
+10 000 products whose pages the server renders through the client entry,
+search with highlights and facets, carts under each shopper's token, and a
+checkout that cannot oversell, with its Lighthouse scores, timings and
+load test measured. Another is a payments ledger on Node
+(<a href="https://github.com/fenecdb/fenec/tree/main/examples/ledger">ledger</a>):
+transfers, refunds and holds as guarded <code>/batch</code> blocks, an
+append-only journal, reconciliation and a change-stream sink, held to its
+invariants by 16 clients, a crash under <code>kill -9</code> and its
+security tests. A third is courier dispatch in Next.js
+(<a href="https://github.com/fenecdb/fenec/tree/main/examples/dispatch">dispatch</a>):
+a company a tenant behind <code>fenec-shard</code> with its plan's quota,
+orders claimed by the nearest courier under a lease or held at the server
+until one comes, couriers on a live map, and couriers' and customers'
+tokens held to their own rows, with the gaps it found listed.</p>
 
 <h3 id="subscribe">A shape's rows, as they change</h3>
 

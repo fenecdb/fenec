@@ -68,44 +68,82 @@ search are planned together rather than stacked on each other.</p>
 
 <h2 id="guides">Where to go next</h2>
 
-<p>New here? Start with the Quickstart. The rest are guides to come back
-to, and <a href="#pages">every page</a> is listed below them.</p>
+<p>Pick the route that matches what you are doing. The sidebar files pages by
+what they are instead, so a few sit under another heading there: FenecQL and
+From SQL are Reference, the place to start writing queries, and Build from
+source is Contribute. <a href="#pages">Every page</a> is listed below the
+routes.</p>
+
+<h3>New here</h3>
 
 <ul class="cards">
+  <li><a href="../playground.html">Playground</a>
+    <p>The real engine in this tab, with collections to browse and a FenecQL editor. Nothing to install.</p></li>
   <li><a href="quickstart.html">Quickstart</a>
     <p>Install a release, a package or the image, write a row and query it: in a browser tab, on a server or in the shell.</p></li>
-  <li><a href="concepts.html">How it works</a>
-    <p>Segments, the mapped file, one writer, and why there is no page cache.</p></li>
-  <li><a href="fenecql.html">FenecQL</a>
-    <p>The language: statements, types, operators, indexes, parameters.</p></li>
+  <li><a href="languages.html">Your language</a>
+    <p>Python, JavaScript, Go, Rust, .NET, Java, PHP, Ruby, Swift, Kotlin and Dart: one program in each, tested against a real server.</p></li>
   <li><a href="sql.html">From SQL</a>
     <p>The SQL it reads as written, what it refuses and what to write instead, and where the meaning is not SQL's.</p></li>
+</ul>
+
+<h3>Build an app</h3>
+
+<ul class="cards">
+  <li><a href="fenecql.html">FenecQL</a>
+    <p>The language: statements, types, operators, indexes, parameters.</p></li>
   <li><a href="javascript.html">JavaScript and TypeScript</a>
     <p>The browser client, the query builder and generated TypeScript types.</p></li>
   <li><a href="mobile.html">Mobile and native apps</a>
     <p>Swift, Kotlin and Flutter: a file on the device, live queries driving the UI.</p></li>
   <li><a href="http.html">HTTP endpoint</a>
-    <p>A REST surface derived from the schema, plus a subscription stream.</p></li>
+    <p>A REST surface derived from the schema, raw FenecQL, batches and a subscription stream.</p></li>
   <li><a href="sync.html">Sync</a>
     <p>A local replica that reads without the network and writes optimistically.</p></li>
+  <li><a href="redis.html">Instead of Redis</a>
+    <p>Counters, rate limits, locks, sessions, leaderboards and more, each a recipe a test runs.</p></li>
+  <li><a href="integrations.html">Integrations</a>
+    <p>LangChain, LlamaIndex, the Vercel AI SDK and React.</p></li>
+  <li><a href="mcp.html">Agents and MCP</a>
+    <p>fenecdb as an agent's search and memory tool over the Model Context Protocol.</p></li>
+  <li><a href="import.html">Import</a>
+    <p>A collection from SQLite or a live PostgreSQL table in one command.</p></li>
+  <li><a href="serverless.html">Serverless and Cloudflare</a>
+    <p>A database in a Durable Object, or a function talking to a server.</p></li>
+</ul>
+
+<h3>Run it in production</h3>
+
+<ul class="cards">
   <li><a href="server.html">Server</a>
     <p>Running <code>fenec-server</code>: flags, tokens, durability, limits, containers.</p></li>
+  <li><a href="studio.html">Studio</a>
+    <p>The admin pages the server can serve: collections, rows, a query editor and the server's numbers.</p></li>
   <li><a href="replication.html">Replication</a>
     <p>Read replicas, promotion, archives and backups restored to a moment, every tenant of a node archived at once.</p></li>
   <li><a href="sharding.html">Tenants and sharding</a>
     <p>A file per tenant behind a router that fails nodes over; regions, one URL for all of them, reads near the client, and a kit to deploy them.</p></li>
-  <li><a href="integrations.html">Integrations</a>
-    <p>LangChain, LlamaIndex, the Vercel AI SDK and React.</p></li>
-  <li><a href="serverless.html">Serverless and Cloudflare</a>
-    <p>A database in a Durable Object, or a function talking to a server.</p></li>
-  <li><a href="embedding.html">Embedded Rust</a>
-    <p><code>fenec-core</code> as a library inside your own program.</p></li>
+  <li><a href="monitoring.html">Monitoring</a>
+    <p>Metrics, dashboards, a slow-statement log, an audit log and traces.</p></li>
+  <li><a href="datadog.html">Datadog and others</a>
+    <p>Under Datadog, New Relic, Elastic and Grafana Cloud: the metrics check, the logs, a dashboard and traces.</p></li>
+</ul>
+
+<h3>The details</h3>
+
+<ul class="cards">
+  <li><a href="limits.html">Limits</a>
+    <p>What it does not do, and every hard-coded ceiling.</p></li>
+  <li><a href="file-format.html">File format</a>
+    <p>The layout of a file: its record kinds, their bodies, and why each exception exists.</p></li>
+  <li><a href="concepts.html">How it works</a>
+    <p>Segments, the mapped file, one writer, and why there is no page cache; the four ways it ships and how the crates fit together.</p></li>
   <li><a href="benchmarks.html">Benchmarks</a>
     <p>YCSB against SQLite, PostgreSQL, MongoDB and Redis, writers beside readers, requests and search, each with its method.</p></li>
   <li><a href="compare.html">Compare</a>
     <p>Beside PostgreSQL, SQLite and PGlite: when to choose each.</p></li>
-  <li><a href="limits.html">Limits</a>
-    <p>What it does not do, and every hard-coded ceiling.</p></li>
+  <li><a href="build.html">Build from source</a>
+    <p>Clone the repository, build with cargo and make, run the tests.</p></li>
 </ul>
 
 <h2 id="pages">Every page</h2>
@@ -117,23 +155,6 @@ to, and <a href="#pages">every page</a> is listed below them.</p>
 <p>Coding agents read the same pages as text: <a href="../llms.txt">llms.txt</a>
 is a brief with the rules FenecQL does not share with SQL, and
 <a href="../llms-full.txt">llms-full.txt</a> is every page in one file.</p>
-
-<h2>Where it runs</h2>
-
-<p>The same engine ships four ways. Pick the one that matches where your data
-should live.</p>
-
-<div class="tbl">
-<table>
-<thead><tr><th>Target</th><th>What you get</th><th>Size</th></tr></thead>
-<tbody>
-<tr><td>Browser</td><td>WebAssembly module plus a dependency-free ES client</td><td class="n">330 KB gzip<br><small>the wasm module</small></td></tr>
-<tr><td>Command line</td><td>The <code>fenec</code> shell, <code>fenec import</code>, <code>fenec types</code>, <code>fenec backup</code> and <code>restore</code></td><td class="n">1880–3013 KB</td></tr>
-<tr><td>Server</td><td><code>fenec-server</code>: HTTP, replication and tenants in one process</td><td class="n">2.99 MB image</td></tr>
-<tr><td>Embedded</td><td><code>fenec-core</code> as a Rust library</td><td class="n">zero dependencies</td></tr>
-</tbody>
-</table>
-</div>
 
 <h2>What it gave up</h2>
 
@@ -180,32 +201,7 @@ than a roadmap.</p>
 <a href="limits.html">Limits</a>.</p>
 </details>
 
-<h2>How the crates fit together</h2>
-
-<p>The code is a stack of small Rust crates; the engine at the bottom has no
-dependencies at all.</p>
-
-<details class="deep"><summary>Details</summary>
-<p>Dependencies point one way. Nothing points back up.</p>
-
-<pre data-lang="text">fenec-core   storage, indexes, plan executor, plugins, JSON, calendar, changes
-     |       std only, zero dependencies
-fenec-ql     FenecQL lexer and parser              fenec-wasm   browser ABI
-     |                                                          (no wasm-bindgen)
-     |
-fenec-http   REST/JSON surface, SSE subscriptions, replication, tenants
-     |
-fenec-wire   the PostgreSQL client the importer reads with
-     |
-fenec-import SQLite file reader, PostgreSQL COPY source, --follow
-     |
-fenec-server the server: HTTP, replication, tenants, the --follow mirror
-     |
-fenec-cli    the `fenec` shell
-</pre>
-
-<p><code>fenec-bench</code> is a measurement harness and the only crate allowed
-external dependencies — that is where <code>rusqlite</code> and
-<code>postgres</code> live, so the comparisons in
-<a href="benchmarks.html">Benchmarks</a> can run against the real engines.</p>
-</details>
+<p id="where-it-runs">How it ships — the browser module, the shell, the
+server and the Rust library, with what each weighs — and <span
+id="how-the-crates-fit-together">how the crates fit together</span> are on <a
+href="concepts.html#where-it-runs">How it works</a>.</p>

@@ -923,6 +923,22 @@ impl OneDirectory {
         });
     }
 
+    /// Waits until the tenant's own replica on eu2 has taken its primary's
+    /// image, where no write is there to wait for: it answers a marked read
+    /// of its collection, which a copy that has not refuses (503) or holds
+    /// none of. A failover promotes it; a copy that has not taken the image
+    /// is of a lineage of its own, a new file's, and its node refuses to
+    /// promote it (409, `tenants::Expected`) -- the tenant left on eu1, the
+    /// failover answered 502, where eu2's image was held three seconds at
+    /// eu1's link.
+    fn copied(&self, tenant: &str) {
+        let eu2 = self._nodes[1].port;
+        until(
+            "the tenant's replica on eu2 takes its primary's image",
+            || marked(eu2, tenant, "get notes count", None).0 == 200,
+        );
+    }
+
     /// Waits until the read replica of `tenant` follows the node behind
     /// `link`: a failover or a move has the router's next look over them
     /// come at once, and that look points it there.
@@ -1306,6 +1322,7 @@ fn a_read_replica_follows_its_tenant_through_a_failover_and_a_move() {
     w.tenant("acme");
     let a = write(w.us, "acme", r#"put notes {body: "a"}"#);
     assert_eq!(marked(w.us, "acme", "get notes count", Some(&a)).0, 200);
+    w.replicated("acme", r#""a""#);
 
     // eu1 gone, its tenant fails over onto its replica on eu2: the read
     // replica follows eu2 at once, and is not what was promoted.
@@ -1507,6 +1524,15 @@ fn regions_keeping_their_own_directory_place_and_repoint_their_read_replicas() {
     // at its next look, and points its read replica at the new primary.
     let (_, shown) = shard(global, "GET", "/_shard/tenants/ab", "");
     let from = text_of(&shown, "node").unwrap();
+    // Its own replica in eu has taken its image, as [`OneDirectory::copied`]
+    // waits for: one that has not, its node refuses to promote.
+    let copy = text_of(&shown, "replica")
+        .filter(|r| !r.is_empty())
+        .unwrap_or_else(|| panic!("ab has no replica in eu: {shown}"));
+    let copy_port = nodes[names.iter().position(|n| *n == copy).unwrap()].port;
+    until("ab's own replica takes its primary's image", || {
+        marked(copy_port, "ab", "get notes count", None).0 == 200
+    });
     let (status, body) = shard(
         global,
         "POST",
@@ -2070,6 +2096,9 @@ fn a_quota_a_read_replica_s_node_does_not_take_holds_nothing_up() {
         "",
     );
     assert_eq!(status, 201, "{body}");
+    for t in ["acme", "beta"] {
+        w.copied(t);
+    }
     w.links[2].hang();
     let (status, body) = shard(
         w.primary,
@@ -2126,6 +2155,7 @@ fn a_read_replica_is_sent_no_quota_older_than_one_it_was_sent() {
     };
     quota(5);
     until("the read replica holds 5", || holds(5));
+    w.copied("acme");
     w.links[2].park("/follow");
     w.links[0].cut();
     let (status, body) = shard(w.primary, "POST", "/_shard/nodes/eu1/failover", "");
@@ -2673,6 +2703,9 @@ fn a_look_s_worker_points_a_replica_at_its_primary_as_it_reaches_it() {
         ),
     );
     assert_eq!(status, 201, "{body}");
+    for t in ["acme", "beta"] {
+        w.copied(t);
+    }
     w.links[2].park("/follow");
     w.links[0].cut();
     let (status, body) = shard(w.primary, "POST", "/_shard/nodes/eu1/failover", "");
@@ -3741,6 +3774,7 @@ fn a_read_replica_is_re_pointed_while_another_s_node_holds_up_the_check() {
     until("the check is held up on ap1", || {
         ap.asked("GET /_admin/tenants") >= 1
     });
+    w.copied("acme");
     w.links[0].cut();
     let (status, answer) = shard(w.primary, "POST", "/_shard/nodes/eu1/failover", "");
     assert_eq!(status, 200, "{answer}");
