@@ -437,7 +437,10 @@ file before and after and how long it held the lock.</p>
 <details class="deep"><summary>Connection ceilings and health checks</summary>
 <p>One thread per connection means unlimited connections would leave the stack
 memory ceiling to the client. Past <code>--max-connections</code> a client
-gets 503; <code>--idle-timeout</code> closes a quiet connection. A
+gets 503 with <code>Retry-After</code>, its request read off and the
+connection ended after the answer, so a client writing its request as the
+answer comes reads the 503, not a reset; <code>--idle-timeout</code> closes
+a quiet connection. A
 subscription holds a thread for as long as it lasts, so subscriptions are
 counted apart as well, under <code>--http-max-streams</code>, a database's
 own: on a tenant node each tenant's, where <code>--max-connections</code> is
