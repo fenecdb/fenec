@@ -105,6 +105,7 @@ export function pagePreloadFor(name: string): string {
 
 export function watchPage(win: BrowserWindow, name: string) {
 	pages.set(name, { win, view: win.webview });
+	report("window-created", { key: name });
 	watchNavigation(win.webview, name);
 	(win.webview as any).on("host-message", (e: any) => {
 		const d = detailOf(e);

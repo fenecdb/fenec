@@ -14,7 +14,7 @@
 import Electrobun, { Utils } from "electrobun/main";
 import { anythingOpen, isQuitting, openFile, serversBusy, stopAll } from "./app.ts";
 import { startMenu } from "./menu.ts";
-import { closeLauncher, showLauncher } from "./pages.ts";
+import { closeLauncher, launcherOpen, showLauncher } from "./pages.ts";
 
 const started = Date.now();
 /** The launcher was shown because nothing else was opening, not because someone asked for it. */
@@ -28,16 +28,19 @@ Electrobun.events.on("open-url", (event: any) => {
 	const url = String(event?.data?.url ?? "");
 	if (__TESTABLE__) void import("./testhooks.ts").then((h) => h.report("open-url", { url }));
 	if (url.startsWith("file:")) {
-		// The test variant can hold the event back, as a slow launch does.
-		const hold = __TESTABLE__ ? Number(process.env["FENEC_DESKTOP_HOLD_OPEN_URL"] ?? 0) : 0;
-		setTimeout(() => {
+		void (async () => {
+			// The test variant can hold the event back until the launcher is up, as a
+			// slow launch delivers it after: the order a timer could only hope for.
+			if (__TESTABLE__ && process.env["FENEC_DESKTOP_HOLD_OPEN_URL"] === "launcher") {
+				for (let i = 0; i < 200 && !launcherOpen(); i++) await Bun.sleep(50);
+			}
 			// A file handed over after the launcher was shown on its own (the launch
 			// was slow, and the 400 ms below was not enough) is what the launch was
 			// for: the launcher, which nobody has had time to use, is closed.
 			handedOver = true;
 			if (autoLauncher && Date.now() - started < AUTO_LAUNCHER_GRACE_MS) closeLauncher();
 			void openFile(decodeURIComponent(new URL(url).pathname));
-		}, hold);
+		})();
 	}
 });
 

@@ -77,6 +77,9 @@ const launcherRPC = BrowserView.defineRPC<LauncherRPC>({
 	},
 });
 
+/** Is the launcher's window there? */
+export const launcherOpen = () => launcher !== null;
+
 /** Closes the launcher, if it is open. */
 export function closeLauncher() {
 	launcher?.close();

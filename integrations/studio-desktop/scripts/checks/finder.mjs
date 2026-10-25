@@ -17,15 +17,15 @@ const FILE = `${R}/data/with space/şirket 1.fenec`;
 copyFileSync(original, FILE);
 
 /**
- * `open -a <the app> <file>`, the app not running; `hold` is how long the test
- * variant holds the file back, as a slow launch does (the app shows its
- * launcher when nothing opens within 400 ms).
+ * `open -a <the app> <file>`, the app not running. With `hold`, the test
+ * variant keeps the file back until the launcher is up, as a slow launch
+ * delivers it after the 400 ms the app waits for it.
  */
 async function launch(hold) {
   logName('finder');
   rmSync(REPORT, { force: true });
   writeFileSync(CONTROL, '');
-  const env = ['--env', `FENEC_DESKTOP_REPORT=${REPORT}`, '--env', `FENEC_DESKTOP_CONTROL=${CONTROL}`, ...(hold ? ['--env', `FENEC_DESKTOP_HOLD_OPEN_URL=${hold}`] : [])];
+  const env = ['--env', `FENEC_DESKTOP_REPORT=${REPORT}`, '--env', `FENEC_DESKTOP_CONTROL=${CONTROL}`, ...(hold ? ['--env', 'FENEC_DESKTOP_HOLD_OPEN_URL=launcher'] : [])];
   const r = spawnSync('open', ['-a', APP, ...env, FILE], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
   const url = await waitFor((l) => l.what === 'open-url', 30000, 'the open-url event');
@@ -42,15 +42,16 @@ async function launch(hold) {
     const seen = await waitFor((l, i) => i >= n && l.what === 'sessions', 5000, 'sessions');
     return !seen.pages.includes('launcher');
   }, 15000, 'no launcher window over the file');
-  return lines().some((l) => l.what === 'page-text' && l.key === 'launcher');
+  return lines().some((l) => l.what === 'window-created' && l.key === 'launcher');
 }
 
 step('open -a <the app> <file>, the app not running');
-await launch(0);
+// Whether the launcher was shown first depends on how slow the launch was; that none is left over the file does not.
+await launch(false);
 await quit({ exited: Promise.resolve() });
 
 step('the same, the file handed over late: the launcher was shown first, and is closed when the file comes');
-assert.equal(await launch(1500), true, 'the launcher was up before the file came (the test holds it back 1.5 s)');
+assert.equal(await launch(true), true, 'the launcher was up before the file came (the test holds it back until it is)');
 step('quit');
 await quit({ exited: Promise.resolve() });
 log('clean');
