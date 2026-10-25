@@ -192,6 +192,7 @@ statements before it and before those after, so what it saw is what the
 writes around it see: "the price is still 12", "the coupon is still
 good".</p>
 
+{{builder "docs: a product that must be there at its price" "docs: a coupon that must still be usable" "docs: no hold that must be there"}}
 <pre data-lang="fenecql">get products where sku = $1 and price = $2 and stock &gt; 0 require 1
 get coupons where code = $1 and uses &lt; max_uses limit 1 require 1     -- one is enough
 get holds where order_ref = $1 and state = "held" require 0           -- none may be held
@@ -416,6 +417,7 @@ create index on docs (embed) @hnsw(cosine)
 
 <h2 id="update-and-delete">Update and delete</h2>
 
+{{builder "docs: an article set by id" "docs: an article's views counted" "docs: the articles before a year deleted"}}
 <pre data-lang="fenecql">set articles {year: 2025} where id = 42
 set articles {views: coalesce(views, 0) + 1} where id = 42   -- an increment
 del articles where year &lt; 2000

@@ -64,6 +64,7 @@ under <a href="#hybrid">Hybrid search</a>; the vectors are on
 words. <code>rerank</code> then reorders the best of them by vector
 distance.</p>
 
+{{builder "docs: articles matching words" "docs: articles matching words since a year" "docs: articles matching words reranked"}}
 <pre data-lang="fenecql">get articles match body $1 limit 10
 get articles where year >= 2024 match body $1 limit 10
 get articles match body $1 rerank embed $2 candidates 500 limit 10
@@ -237,6 +238,7 @@ the <code>@hnsw</code> graph <code>near</code> walks.</p>
 show where the words of a <code>match</code> are in a row's text, so a
 results page can mark them.</p>
 
+{{builder "docs: matches with their marks" "docs: matches with their marks tagged" "docs: matches with a snippet" "docs: matches with a snippet tagged"}}
 <pre data-lang="fenecql">get articles select title, highlight(body) match body $1 limit 10
 get articles select title, highlight(body, "&lt;mark&gt;", "&lt;/mark&gt;") match body $1 limit 10
 get articles select title, snippet(body, 20, "…") match body $1 limit 10
@@ -398,6 +400,7 @@ value: every range, in order, an empty one with 0, its value the
 outside every range count in none; a list counts once in each range a value
 of it falls in.</p>
 
+{{builder "docs: tents counted by price range"}}
 <pre data-lang="fenecql">get products where category = "tents" limit 24
   facet price ranges [0, 2500, 5000, 10000, 25000] disjunctive
 </pre>

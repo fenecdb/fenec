@@ -31,6 +31,7 @@ make packaging-test    # site/install.sh against a release of its own on localho
 make version V=X.Y.Z   # one version wherever a release reads it (RELEASING.md)
 make agents-md     # AGENTS.md written again from this file
 make builder-golden   # integrations/builder-golden.json written again from the JS builder (web/golden.mjs)
+make docs-builder     # the SDKs' tests of the FenecQL pages' builder tabs written again (site/builder_tabs.py)
 make schema-golden    # integrations/schema-golden.json written again through the module (web/schema-golden.mjs)
 make types-check  # web/fenec.d.ts held to web/fenec.js and a caller's code under tsc --strict, then docs-types
 make studio-highlight   # studio/highlight.js and the Grafana data source's copy written again from site/highlight.js
@@ -988,9 +989,14 @@ merge cannot hold exactly, and refuses (413) past its bounds, never cuts.
 not.](docs/design/integrations.md#integrations)** A builder change starts
 in `web/builder.js` and a case in `golden.mjs`, then every SDK's follows,
 held to `integrations/builder-golden.json`; `make types-check` holds
-`fenec.d.ts` to `fenec.js`. Go's and .NET's SDKs bound a request by its
-context or token, never the HTTP client's timeout; a store checks its
-names against FenecQL's and passes values as parameters.
+`fenec.d.ts` to `fenec.js`. A FenecQL page's builder tab is a golden
+case's chain rendered by `site/builder_tabs.py`, never written by hand:
+its statement held to the page's, the JS and Python tabs run by its
+`--check`, the others tests of their SDKs (`make docs-builder`); a
+builder's API change owes its renderer. Go's and .NET's SDKs bound a
+request by its context or token, never the HTTP client's timeout; a
+store checks its names against FenecQL's and passes values as
+parameters.
 
 **[Grafana's data source binds a dashboard's values; it never splices
 them.](docs/design/integrations.md#grafana)** Names become `$n`s

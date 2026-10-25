@@ -84,7 +84,7 @@ stores of their own (<a href="integrations.html">Integrations</a>).</p>
 <p><a href="https://github.com/fenecdb/fenecdb/tree/main/examples/python">Full example</a>: Notes, a CLI over the server with the builder, <code>match</code>, <code>fuse</code> and the change stream.</p>
 </div>
 
-<div class="lang" data-name="TypeScript">
+<div class="lang" data-name="JavaScript">
 <pre data-lang="ts" data-label="search.ts">async function query(q: string, params: unknown[] = []) {
   const res = await fetch('http://127.0.0.1:8080/query', {
     method: 'POST',
@@ -567,7 +567,12 @@ each operator and kind of value, parameter numbering across
 <code>where</code>, <code>near</code>, <code>match</code> and the levels of
 a lookup chain, and the names and combinations each builder refuses. Each
 SDK's tests also run builder queries against a real server and hold their
-answers to the same statements sent as text.</p>
+answers to the same statements sent as text. The tabs of the FenecQL
+reference's examples are cases of the file written in each language
+(<a href="fenecql-search.html#the-text-clause">Text search</a> has some): the
+JavaScript and Python tabs run as the page shows them, and each other
+language's tests hold a copy of its tabs' code, so a tab is code that
+sends the statement beside it.</p>
 <p>What a language has no word for is written its own way: Go's object
 conditions are <code>Fields</code> and <code>Ops</code>, names and values
 in turn, since a Go map has no order and the order is the text's; a Go
@@ -614,8 +619,8 @@ subscription, the change stream, a tenant and a scoped token. CI runs it on ever
 so a change to the HTTP endpoint that would break one of them is caught
 before it ships.</p>
 
-<p>The TypeScript tab's programs run there as the JavaScript they are
-without their types, and the tab's code itself is type-checked under
+<p>The JavaScript tab's programs are TypeScript, and run there as the
+JavaScript they are without their types; the tab's code itself is type-checked under
 <code>tsc --strict</code> against the client's declarations, as every
 TypeScript example in these docs is (<code>make docs-types</code>).</p>
 

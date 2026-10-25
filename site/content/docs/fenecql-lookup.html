@@ -54,6 +54,7 @@ rows.</p>
 each row — reviews to their products, say. A <code>limit</code> after it counts
 children per parent.</p>
 
+{{builder "docs: products with their newest reviews"}}
 <pre data-lang="fenecql">get products limit 20 lookup reviews on product_id order created desc limit 3
 </pre>
 
@@ -91,6 +92,7 @@ scoping rule, and it is why there are no qualified names in the language —
 is that a parent clause cannot follow a child one, which reads the way the
 query runs anyway.</p>
 
+{{builder "docs: shops, their orders and the orders' lines"}}
 <pre data-lang="fenecql">get shops limit 20
   lookup orders on shop_id limit 3
   lookup lines on order_id limit 5
@@ -215,6 +217,7 @@ with their names off a week's groups 8.3 ms, as the groups and a query for
 the names apart do, less the round trip between them (<code>make
 analytics-bench</code>).</p>
 
+{{builder "docs: products with a five-star review" "docs: products with a five-star review counted"}}
 <pre data-lang="fenecql">get products limit 20 lookup reviews on product_id required where stars = 5
 get products count lookup reviews on product_id required where stars = 5
 </pre>

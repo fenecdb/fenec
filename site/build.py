@@ -22,6 +22,8 @@ import subprocess
 import sys
 import urllib.parse
 
+import builder_tabs
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(ROOT)
 OUT = os.path.join(ROOT, "dist")
@@ -350,7 +352,9 @@ def render_code_blocks(body):
             return f"<pre{keep}>{highlight(code, lang)}</pre>"
         head = ""
         if label:
-            head = f'<div class="code-label">{html.escape(label.group(1))}</div>'
+            # An attribute's entities read back first (a builder tab's label
+            # names Go's import path in quotes), so a label is escaped once.
+            head = f'<div class="code-label">{html.escape(html.unescape(label.group(1)))}</div>'
         return (f'<div class="code" data-lang="{html.escape(lang)}">{head}'
                 f'<pre><code>{highlight(code, lang)}</code></pre></div>')
     return PRE_RE.sub(sub, body)
@@ -428,7 +432,7 @@ def docs_map():
 # database in an app and their first example opens a file, so they stay on
 # Your language; a tab in neither list is a build error, or a new HTTP
 # language would be skipped here with nothing said.
-HTTP_TABS = ("Python", "TypeScript", "Go", "Rust", ".NET", "Java", "PHP", "Ruby")
+HTTP_TABS = ("Python", "JavaScript", "Go", "Rust", ".NET", "Java", "PHP", "Ruby")
 EMBEDDED_TABS = ("Swift", "Kotlin", "Dart")
 LANG_TAB = re.compile(r'<div class="lang" data-name="([^"]+)">\n([\s\S]*?)\n</div>')
 CODE_BLOCK = re.compile(r'<pre[^>]*>[\s\S]*?</pre>\n')
@@ -517,10 +521,15 @@ def filled(raw, page=None):
     the install lines, the image's tag and the sample output with it; the
     docs index's map of every page; the HTTP endpoint page's tabs of
     languages; and, for a page that was split (`page` is its NAV key), the
-    script that sends a reader to where a section went (`{{moved_script}}`).
-    Claims are checked against this text, as it is read."""
+    script that sends a reader to where a section went (`{{moved_script}}`);
+    and a FenecQL example's tabs of the same query in each SDK's builder
+    (`{{builder "case" ...}}` over the block, `builder_tabs.py`), each case
+    held to its statement. Claims are checked against this text, as it is
+    read."""
     if "{{language_tabs}}" in raw:
         raw = raw.replace("{{language_tabs}}", language_tabs())
+    if "{{builder" in raw:
+        raw = builder_tabs.expand(raw, f"site/content/{page}.html" if page else "a page")
     if page is not None and "{{moved" in raw:
         raw = (raw.replace("{{moved_script}}", MOVED_SCRIPT.replace("@@MAP@@", moved_map(page)))
                   .replace("{{moved}}", moved_map(page)))

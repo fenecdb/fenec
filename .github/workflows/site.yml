@@ -13,6 +13,9 @@ on:
       - 'web/builder.js'
       - 'web/http.js'
       - 'web/client.js'
+      # The FenecQL pages' builder tabs are rendered from the golden cases.
+      - 'integrations/builder-golden.json'
+      - 'web/golden.mjs'
       - 'wrangler.jsonc'
       - 'crates/fenec-wasm/**'
       - 'crates/fenec-abi/**'

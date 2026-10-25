@@ -33,7 +33,7 @@ footer: the two stylesheets name the same classes and tokens (`.top`,
 `.btn`, `--sun`), and a frame keeps each to its own. `_headers` lets the
 site alone frame `/studio/*`, where every other page is `DENY`.
 
-Four placeholders are written into a page as it is read (`filled`): `{{version}}`
+Five placeholders are written into a page as it is read (`filled`): `{{version}}`
 is the release's number, from the workspace's `Cargo.toml` -- the one place
 `make version` writes -- so an install line, an image's tag or a sample's
 banner moves with a release instead of being found and edited;
@@ -42,9 +42,30 @@ banner moves with a release instead of being found and edited;
 `languages.html` as the tabs of the HTTP endpoint page, so the two cannot say
 different things (`make languages-test` holds that page's statements to the
 programs it runs, and runs the HTTP page's curl tab as written:
-`integrations/languages/docs_check.py`); and
+`integrations/languages/docs_check.py`);
 `{{moved_script}}` is the script of a page that was split ("Splitting a docs
-page", below). All are filled before the claims are checked and before the search and `llms.txt` read
+page", below); and `{{builder "case" ...}}`, on the line above a
+`<pre data-lang="fenecql">`, makes the block the first tab of a box whose
+other tabs are the same statements written with each SDK's builder
+(`builder_tabs.py`). Each name is a case of
+`integrations/builder-golden.json`, one for each statement of the block in
+order, and the build fails unless the case makes its statement -- its
+text, each parameter written in as FenecQL writes the value, or a `$n`
+where the page has one. A tab's code is rendered from the case's chain, and
+`python3 site/builder_tabs.py --check` (CI's integrations job) runs every
+JavaScript and Python tab as the page shows it and holds what it sent to
+the case; the Go, .NET, Swift, Kotlin and Dart tabs are tests of those
+SDKs (`make docs-builder` writes them: `integrations/go/docs_builder_test.go`
+and the like), which their own jobs run, and the check fails while they are
+behind the pages. A new example takes a case ending at an endpoint (`rows`,
+`count`, `update` ...) in `web/golden.mjs` (`make builder-golden`), the
+placeholder, then `make docs-builder`. FenecQL's tab keeps no language
+(`data-keep="false"`), so a box opens on the reader's language where one was
+chosen; JavaScript's tab is "JavaScript" in every box of languages, Your
+language's and the Quickstart's too, or one would not open on the other's
+choice. Each code block's label is the import its names come from, and the
+statements the tabs send are written once, under the panels (`styles.css`
+hides them under FenecQL's tab). All are filled before the claims are checked and before the search and `llms.txt` read
 the page, and a version in prose that is a fact about the past (a comparison
 checked against a competitor's page on a day, a benchmark's build) stays as
 written. The Quickstart installs that release, so its steps use only what the
