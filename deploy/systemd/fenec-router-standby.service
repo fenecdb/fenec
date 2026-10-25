@@ -21,7 +21,7 @@
 
 [Unit]
 Description=fenecdb region router (fenec-shard --region) standby
-Documentation=https://fenecdb.com/docs/sharding file:/usr/local/share/doc/fenecdb/RUNBOOK.md
+Documentation=https://fenecdb.com/docs/sharding-reference#deploying file:/usr/local/share/doc/fenecdb/RUNBOOK.md
 After=network-online.target
 Wants=network-online.target
 # One process on the directory file at a time: two corrupt it.

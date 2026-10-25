@@ -684,6 +684,14 @@ code:not(.code code) {
 /* A table of code side by side: a call is read whole, so it never breaks
    inside a word; the table scrolls sideways instead. */
 .tbl.code-grid td code { white-space: nowrap; word-break: normal; }
+/* A table of flags: the flag is read whole, never broken inside its name, and
+   on a phone it sits over what it does rather than beside it. */
+.tbl.flags td:first-child code { white-space: nowrap; word-break: normal; }
+@media (max-width: 640px) {
+  .tbl.flags thead { display: none; }
+  .tbl.flags tr, .tbl.flags td { display: block; }
+  .tbl.flags td:first-child { border-bottom: 0; padding-bottom: 0; }
+}
 table { border-collapse: collapse; width: 100%; font-size: 15.5px; }
 th, td { text-align: left; padding: 12px 16px 12px 0; border-bottom: 1px solid var(--rule); vertical-align: baseline; }
 th { font-weight: 600; font-size: 13.5px; color: var(--sun); border-bottom-color: var(--rule-hot); }

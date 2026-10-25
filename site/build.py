@@ -115,10 +115,24 @@ NAV = [
         ("docs/server", "Server"),
         ("docs/studio", "Studio"),
         ("docs/replication", "Replication"),
-        ("docs/sharding", "Tenants and sharding"),
         ("docs/monitoring", "Monitoring"),
         ("docs/datadog", "Datadog and others"),
         ("docs/grafana", "Grafana"),
+    ]),
+    # What `docs/sharding` once held, in a group of its own for what a reader
+    # is doing with it: the tutorial, a guide to each part, the reference to
+    # look a thing up in and the design. A section of the old page is followed
+    # to its new one by moved.json. The labels of the last two keep "Sharding":
+    # the previous and next links and llms.txt show a label with no group.
+    ("Tenants and sharding", [
+        ("docs/sharding", "Tenants and sharding"),
+        ("docs/sharding-tenants", "Tenants"),
+        ("docs/sharding-failover", "Replicas and failover"),
+        ("docs/sharding-regions", "Regions"),
+        ("docs/sharding-entry", "The global entry"),
+        ("docs/sharding-read-replicas", "Read replicas"),
+        ("docs/sharding-reference", "Sharding reference"),
+        ("docs/sharding-design", "Sharding design"),
     ]),
     # The comparisons are labelled "vs ...", since the group does not say
     # what the three are beside.
@@ -433,32 +447,56 @@ def language_tabs():
     return "\n".join(out)
 
 
-# Where each section of the old, whole docs/fenecql went (`moved.json`, by
-# the fragment it had), for the one script on that page to follow: a
-# fragment never reaches the server, so no redirect rule can. check_links.py
-# holds every target to a page and an id that were built.
+# Where the sections of a page that was split went (`moved.json`: the page,
+# then each fragment it had and the page and fragment that hold it now), for
+# a script on the old page to follow: a fragment never reaches the server, so
+# no redirect rule can. `{{moved_script}}` in a page is that script with the
+# page's own map, `{{moved}}` the map alone as an object literal;
+# check_links.py holds every target to a page and an id that were built, and
+# every page moved.json names to carry the script (`data-moved`).
 MOVED = os.path.join(ROOT, "moved.json")
+MOVED_SCRIPT = """<script data-moved>
+(function(){
+  /* A link to a section this page once held (a fragment of its address) is
+     sent where the section went. */
+  var moved=@@MAP@@;
+  function go(){
+    var h=location.hash.slice(1);
+    try{h=decodeURIComponent(h)}catch(e){}
+    if(h&&Object.prototype.hasOwnProperty.call(moved,h))location.replace(moved[h]);
+  }
+  go();
+  addEventListener('hashchange',go);
+})();
+</script>"""
 
 
-def moved_map():
-    """moved.json as the object literal the page's script reads."""
+def moved_map(page):
+    """The map of `page` (as NAV keys it: `docs/sharding`) in moved.json, as
+    the object literal the page's script reads."""
     with open(MOVED, encoding="utf-8") as f:
-        return json.dumps(json.load(f), separators=(",", ":"), sort_keys=True)
+        pages = json.load(f)
+    if page not in pages:
+        raise SystemExit(f"{page} asks for its moved sections, and moved.json has none for it")
+    return json.dumps(pages[page], separators=(",", ":"), sort_keys=True)
 
 
-def filled(raw):
+def filled(raw, page=None):
     """A page's text with what the build writes into it: the release's
     number wherever the page says `{{version}}`, from the one place
     `make version` writes it (the workspace's Cargo.toml), so a release moves
     the install lines, the image's tag and the sample output with it; the
     docs index's map of every page; the HTTP endpoint page's tabs of
-    languages; and the sections that moved off docs/fenecql (`{{moved}}`).
+    languages; and, for a page that was split (`page` is its NAV key), the
+    script that sends a reader to where a section went (`{{moved_script}}`).
     Claims are checked against this text, as it is read."""
     if "{{language_tabs}}" in raw:
         raw = raw.replace("{{language_tabs}}", language_tabs())
+    if page is not None and "{{moved" in raw:
+        raw = (raw.replace("{{moved_script}}", MOVED_SCRIPT.replace("@@MAP@@", moved_map(page)))
+                  .replace("{{moved}}", moved_map(page)))
     return (raw.replace("{{version}}", workspace_version())
-               .replace("{{docs_map}}", docs_map())
-               .replace("{{moved}}", moved_map()))
+               .replace("{{docs_map}}", docs_map()))
 
 
 def read_page(path):
@@ -471,7 +509,8 @@ def read_page(path):
                 k, v = line.split(":", 1)
                 meta[k.strip()] = v.strip()
         raw = raw[m.end():]
-    return meta, filled(ycsb_redis(raw))
+    key = os.path.relpath(path, os.path.join(ROOT, "content"))[:-len(".html")]
+    return meta, filled(ycsb_redis(raw), key)
 
 
 def nav_html(active, base):
@@ -1091,6 +1130,34 @@ def check_claims():
     return claims_against({**truth, **ycsb}, unit, lambda f: True)
 
 
+# The flags of fenec-shard, which docs/sharding-reference lists in a table of
+# their own: a flag added to its usage and not to the table fails the build
+# (as a number that drifted does), since nothing else would say the page was
+# behind the program.
+SHARD_MAIN = os.path.join(REPO, "crates", "fenec-shard", "src", "main.rs")
+SHARD_FLAGS_PAGE = os.path.join(ROOT, "content", "docs", "sharding-reference.html")
+
+
+def check_router_flags():
+    """The flags `fenec-shard --help` lists that the first column of the
+    reference's table of them lacks, and the rows of it for a flag the
+    usage no longer has."""
+    usage = re.search(r'const USAGE: &str = "\\\n([\s\S]*?)\n";', open(SHARD_MAIN, encoding="utf-8").read())
+    if usage is None:
+        return [f"{os.path.relpath(SHARD_MAIN, REPO)}: no USAGE to hold sharding-reference.html's flags to"]
+    flags = re.findall(r"^(?: {2}-\w, | {6})(--[a-z][a-z0-9-]*)", usage.group(1), re.M)
+    if not flags:
+        return ["fenec-shard's usage lists no flag: the pattern that reads it is out of date"]
+    page = open(SHARD_FLAGS_PAGE, encoding="utf-8").read()
+    # only its own section: the page has other tables
+    page = re.search(r'<h2 id="router-flags">[\s\S]*?(?=<h2)', page)
+    page = page.group(0) if page else ""
+    listed = re.findall(r"<tr><td><code>(?:-\w, )?(--[a-z][a-z0-9-]*)", page)
+    return ([f"docs/sharding-reference.html has no row for fenec-shard's {f}" for f in flags if f not in listed]
+            + [f"docs/sharding-reference.html has a row for {f}, which fenec-shard's usage no longer has"
+               for f in listed if f not in flags])
+
+
 # The names benchmarks.html#ycsb's full grid gives each system.
 YCSB_NAMES = {"fenec": "fenecdb", "sqlite": "SQLite", "server": "fenec-server",
               "server-docker": "fenec-server in Docker", "pg": "PostgreSQL", "mongo": "MongoDB",
@@ -1304,7 +1371,7 @@ def page_text(body):
             href = re.sub(r"\.html(?=#|$)", "", urllib.parse.urljoin(f"{SITE}/docs/", href))
         return f"[{text}]({href})"
 
-    # A page's own script (docs/fenecql follows a moved fragment) is not
+    # A page's own script (a split page follows a moved fragment) is not
     # text to read.
     t = re.sub(r"<script[\s\S]*?</script>", "", body)
     t = re.sub(r"<!--[\s\S]*?-->", "", t)
@@ -1821,7 +1888,7 @@ def build():
 
     print(f"built {len(pages)} pages -> {os.path.relpath(OUT, REPO)}")
 
-    problems = check_claims()
+    problems = check_claims() + check_router_flags()
     if problems:
         print("\n  the docs disagree with what was just built:")
         for p in problems:

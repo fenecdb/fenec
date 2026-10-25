@@ -330,4 +330,4 @@ paths through, a tenant's replication stream not among them.
 nodes (`entry/cluster.mjs`: a global router, us with a standby router, eu)
 and in front of stand-ins; `make entry-bench` measures it
 (`entry/bench.mjs`). See [One URL for every
-region](https://fenecdb.com/docs/sharding#global-entry).
+region](https://fenecdb.com/docs/sharding-entry#global-entry).

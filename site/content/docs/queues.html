@@ -257,7 +257,7 @@ moment it would write something, or the end of the wait.</p>
     workers raises. On a tenant node a tenant's held claims are its
     <code>held</code> quota, apart from its <code>streams</code> -- a
     quarter of the node's connections unless set
-    (<a href="sharding.html#quotas">quotas</a>) -- and a claim costs its
+    (<a href="sharding-reference.html#quota-bounds">quotas</a>) -- and a claim costs its
     tenant's rate of rows written only when a run writes: one held while
     the tenant is past its rate stays held, and runs once a row's worth is
     back.</li>
@@ -282,7 +282,7 @@ moment it would write something, or the end of the wait.</p>
     is held again on the tenant's new primary for what is left of its
     wait; without one it is a <code>502</code>, since the node may have run
     it as it died, and sent again it would take a second job
-    (<a href="sharding.html#in-flight">Requests out to a node failed
+    (<a href="sharding-design.html#in-flight">Requests out to a node failed
     over</a>).</li>
   <li><b>Shutdown.</b> At SIGTERM every held claim is answered at once,
     with the nothing it found, before the server syncs and exits.</li>

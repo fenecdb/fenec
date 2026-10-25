@@ -15,7 +15,7 @@
 
 [Unit]
 Description=fenecdb archive of node %i (fenec archive --tenants)
-Documentation=https://fenecdb.com/docs/sharding#archive file:/usr/local/share/doc/fenecdb/RUNBOOK.md
+Documentation=https://fenecdb.com/docs/sharding-tenants#archive file:/usr/local/share/doc/fenecdb/RUNBOOK.md
 After=network-online.target
 Wants=network-online.target
 

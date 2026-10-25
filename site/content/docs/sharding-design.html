@@ -1,0 +1,450 @@
+<!--
+title: Sharding: design — fenecdb
+description: Why each tenant is a file of its own, how the router forwards a request, how a lease keeps a tenant from having two primaries, and what it costs and does not do.
+-->
+
+<h1>Why it is built this way</h1>
+<p class="kicker">Why each tenant is a file of its own, how the router forwards a request, how a lease keeps a tenant from having two primaries, and what it costs and does not do.</p>
+
+<h2>A file per tenant</h2>
+
+<p>Each tenant is its own file, chosen by the request path and never by the
+query. Tenants cannot see each other's rows, and ids, change numbers, search
+ranking and <code>lookup</code> all stay per tenant.</p>
+
+<p>The tenant is picked by the request path, never by the query text, so
+nothing rewrites a query to add <code>tenant = ...</code>. Two tenants sharing a
+collection would then read each other's rows. A file each keeps them apart by
+construction, and the same decision settles four things a shared file would
+have had to solve:</p>
+
+<ul>
+  <li><b>Ids</b> are counted per file, so they never collide and a moved tenant
+    keeps its own.</li>
+  <li><b>The change sequence</b> behind <code>/changes</code> is one number per
+    file, so a client's cursor stays a plain number.</li>
+  <li><b>BM25 statistics</b> — document count, average length, document
+    frequency — are the tenant's own, which is what ranking inside a tenant
+    should mean.</li>
+  <li><b><code>lookup</code></b> never crosses a file, so it stays one bucket
+    probe per parent.</li>
+</ul>
+
+<h2>Why tenants and not hash partitioning</h2>
+
+<p>A tenant lives whole on one node, so every query runs where all its data is
+and means what it means on a single database. The cost: one tenant has to fit
+in one node's memory.</p>
+
+<p>With a tenant whole on one node, every query runs where all of its data is:
+<code>near</code>, <code>match</code>, <code>order</code>, <code>count</code>
+and <code>lookup</code> keep their single-database meaning, and the router never
+parses a query. Spreading one collection across nodes would need a merge for
+every read shape — and global statistics before <code>match</code> could rank
+anything, because per-node IDF gives scores that do not compare and a merged
+order that is quietly wrong. That is a different feature, and the case for it
+is a single tenant that outgrows a node. Until then, a tenant has to fit one
+node's memory.</p>
+
+<h2>What it does not do</h2>
+
+<p>No join across tenants -- a query across them is an operator's read,
+merged as it says -- no tenant bigger than a node, and only one router
+makes changes at a time. Failover is never guessed.</p>
+
+<ul>
+  <li><b>Failover is decided on a lease, not a guess.</b> A router cannot
+    tell a node that is gone from one it cannot reach, and guessing would
+    make two primaries for one tenant. Without <code>--auto-failover</code>
+    someone who knows the node is gone calls the failover; with it, the
+    router promotes a node's tenants only once the node's own lease has
+    certainly lapsed, and the node stops its writes as it does (<a
+    href="sharding-failover.html#automatic-failover">Automatic failover</a>).</li>
+  <li><b>No join across tenants.</b> A data request names one tenant. The
+    router's <a href="sharding-tenants.html#across-tenants">query across tenants</a> runs one
+    read on each and merges the answers by a rule the request states --
+    one after another, the first rows of an order, sums and extremes by
+    group -- and never parses the query: nothing joins one tenant's rows to
+    another's, and the answers are each tenant's own, of no one moment.</li>
+  <li><b>No tenant larger than a node.</b> A tenant has to fit one node's
+    memory, with the same 2× open and 3× checkpoint peaks as any file.</li>
+  <li><b>One router takes changes at a time.</b> A standby follows its
+    directory and forwards from the same placements, but only the primary
+    places, moves and deletes; promoting the standby is a decision someone
+    makes, not a vote the routers hold.</li>
+</ul>
+
+<h2 id="forwarding">How the router forwards a request</h2>
+
+<p>How <a href="sharding-reference.html#the-router-fenec-shard"><code>fenec-shard</code></a> passes a request on, retries one, and ends what it has out to a node that was failed over.</p>
+
+<p>The router reads a request's head and body, looks the tenant up, and forwards
+it byte for byte — the original target, not a re-encoding of it. An answer with
+a length is read and passed back on a kept-alive connection; one without is a
+subscription, copied as it arrives until either side closes, so the stream
+format lives in one place, the node.</p>
+
+<p>Connections to a node are kept and reused, and each is looked at before a
+request goes out on it: one the node closed for its silence
+(<code>--idle-timeout</code>) is let go of. A request that fails before it is
+wholly sent goes again on a fresh connection. One sent whole whose connection
+ends before an answer goes again only where running it twice is harmless — a
+<code>GET</code>, <code>HEAD</code> or <code>OPTIONS</code>, or a write with an
+<code>Idempotency-Key</code>, which the node makes once
+(<a href="/docs/http#idempotency">Retrying a write</a>). Any other write is
+answered <code>502</code>, since the node may have run it: a client that sends
+it again should send it with a key.</p>
+
+<p id="in-flight"><b>Requests out to a node failed over.</b> A node that dies
+with no reset — a machine lost, a network cut — answers nothing and closes
+nothing, so what the router has out to it would wait for
+<code>--upstream-timeout</code> (60 s), even once its tenants answer on
+their new primaries. When the router fails a node over, by hand or on a
+lease, it ends what it has out to the node for each tenant it promoted, as
+soon as the directory points the tenant at its new primary, and answers
+each by the rule above: a request the node cannot have run, a read, or a
+write with an <code>Idempotency-Key</code> goes to the new primary — a keyed
+write the old node made and sent its copy is answered from the key there,
+one it never sent runs there once — and any other write is answered
+<code>502</code>, saying it may have run. A held request (<code>Fenec-Wait</code>) goes by the same rule, with
+what is left of its wait: the router cannot tell one still held from one
+the node had just run as it died, and a claim run twice takes two jobs. A
+subscription ends, for its client to open it again where the tenant is now.
+A request whose answer had begun is left to the node, as is everything out
+to a node only suspected — a grant missed, its lease still running — whose
+writes may well land, and whose reads have nowhere better to go, and what
+is out to the node for a tenant the failover left there. A request still
+connecting to the node gives up within a second of the failover, and one
+refused as it comes is not a <code>502</code>: both go to the new
+primary. Under leases a promoted copy takes its tenant's
+writes once the router's grant names it there, which the failover sends
+each node it moved tenants to as it ends; a write sent there before is
+refused unrun, and the router then grants the copy its list at once and
+asks again — twice, since a grant under way for another tenant may have
+read the list before this one was promoted. What is cut and what became of it is counted
+(<code>fenec_router_cut_requests_total</code>,
+<a href="monitoring.html#router">Monitoring</a>). A standby router, and a
+region's router forwarding by its copy of the global directory, fail
+nothing over themselves, but end what they have out to the node by the same
+rule as soon as their copy of the directory shows the failover: the
+directory names the node a failover took each tenant off, so a move ends
+nothing, its source still answering. They grant nothing: a write one sends
+on before the leading router's grant has reached the new primary is asked
+again there until it has -- for two thirds of a lease or
+<code>--upstream-timeout</code>, whichever is sooner, and only while its
+client is still there. In the deploy kit's drill (<code>make drill</code>, a
+lease of 2 s, the routers' timeout 4 s, a node cut off the network and
+killed) the dead node's writers wrote again as the router failed it over,
+1.93 and 2.52 s after the kill, where they waited for the timeout before,
+3.94 and 3.95 s; none of their acknowledged writes was lost.</p>
+
+<h2 id="leases">Leases</h2>
+
+<p>The long form of <a href="sharding-failover.html#automatic-failover">Automatic failover</a>: how a node's lease, the router's grants and a failover fit together so that no tenant has two primaries, and what they do not cover.</p>
+
+<h3 id="lease-failover">The lease and the failover</h3>
+
+<p>With <code>fenec-shard --auto-failover &lt;s&gt;</code> the router fails a
+node over on its own. It leases each node the tenants it places there for
+that long, renews the lease as it starts and every third of it after while
+the node answers, and fails over a node that has gone a tenth past its lease
+unrenewed. A node
+started with <code>--lease</code> writes a tenant only while its lease names
+the tenant and has not lapsed, and starts with none.</p>
+
+<h3 id="lease-cut-off">A node cut off from the router</h3>
+
+<p>The router still cannot tell a node that is gone from one cut off from it
+while its own clients reach it, and it does not have to. A node that hears
+from the router no more stops taking writes when its lease lapses, by its
+own clock, and the router promotes its tenants elsewhere only a tenth of a
+lease later, measured from the answer that came back rather than from the
+grant it sent — so no tenant has two primaries, whichever it was. What such
+a node took from clients of its own before its lease lapsed, and had not
+sent its replicas, goes with the failover as a crash takes it; a client
+going through the router loses nothing that way, since the router could not
+reach the node either. A write is refused as a replica's is: <code>503</code>
+with <code>Retry-After</code>.</p>
+
+<h3 id="lease-grants">Numbered grants</h3>
+
+<p>That no tenant has two primaries holds of a grant however late the node reads it. Each grant is
+numbered and names the newest grant whose answer came back to the router in
+time, and the node runs its lease from the moment it answered that one,
+never from when it reads a grant. A grant read late — held on its way, or
+left unread by a node stopped or slow — acknowledges only answers the router
+had already counted, whose lease ran out before the failover; a grant whose
+answer never came back is acknowledged by no grant after it. Neither gives
+the node a lease, so a node that reads grants waiting in its socket after
+its tenants were promoted elsewhere takes no write for them: with the lease
+run from when it read them, as it was, it took a whole lease's writes beside
+the new primary. A grant newer than the one the lease came from — by the
+answer it acknowledges, then by its own number — is taken whole, its list
+with its lease, which may cut the lease held short: a router restarted or
+promoted with a shorter lease shortens the node's with its first
+acknowledged grant. One that is not newer is taken not at all while a lease
+runs, so a late one cannot hand back a tenant failed over elsewhere, and a
+node says so in its answer (<code>took</code>), which has the router send
+the grant acknowledging it at once, with the list. The price is about a
+round: a node's lease runs from the grant before the last it read, so a
+node cut off stops writing a third of a lease sooner than it did, while the
+failover comes when it did; and a node holding no lease — new, restarted,
+back from a failover — needs a second grant, acknowledging the first, which
+the router sends at once. A router from before numbered grants sends none,
+and a node takes its grants from when it reads them, as before: a late grant
+can still outlast a failover until every router is upgraded. A node from
+before them is leased as before too, and the router says so once in its
+log.</p>
+
+<h3 id="lease-clock">The boot clock</h3>
+
+<p>A node measures its lease on its machine's boot clock —
+<code>CLOCK_BOOTTIME</code> on Linux, <code>mach_continuous_time</code> on
+macOS — which counts the time the machine was suspended. A node woken from
+a suspend that outlasted its lease holds none, and the grant it reads on
+waking acknowledges an answer from before the suspend, which runs nothing
+past that answer's lease. Measured on the monotonic clock, as it was, a
+suspend did not count: the node woke with the lease it had left and wrote
+beside its tenants' new primaries until it ran out. The router counts on
+its own monotonic clock, which its machine's suspend stops, so a router
+suspended fails over later, never sooner.</p>
+
+<h3 id="lease-answered-late">A write answered after the lease lapsed</h3>
+
+<p>A write is checked against the lease as it lands, and again as it is
+answered. One that landed while the lease ran and is answered after it
+lapsed — its process stopped or starved between the two, its machine
+suspended, or its fsync or its wait for the replicas' streams outlasting
+the lease — is answered <code>500</code> with <code>"outcome":
+"unknown"</code> (<a href="http.html#statuses">statuses</a>): it is in the
+node's file, and its tenant may have been failed over without it or may
+still be on the node with it, which the node cannot know. Sent with an
+<code>Idempotency-Key</code>, send it again with the same key: the node
+refuses it while its lease has lapsed, before it looks the key up, and once
+the tenant settles a node still holding the write answers it as made, and a
+new primary makes it once. Sent with none, read it back — but not at once:
+the node still answers reads, the write among them, and routers send them
+there until they fail the tenant over, a lease and a tenth
+(<code>--auto-failover</code> × 1.1) after the answer, while
+the copy promoted may lack it. After that, and not before, read it back
+through the router, or send a read with <code>Fenec-After</code> and
+<code>Fenec-History</code> set to the <code>seq</code> and
+<code>history</code> the answer's body names, which a primary holding the
+write answers and one without it refuses 504 — sent at once, that read is
+answered 200 by the lapsed node, whose history holds the write. The body
+names them, not <code>Fenec-Seq</code>, which a client would take as its
+own position. Answered as a success, as it was, a failover lost it. A
+<code>/batch</code> holding a <code>compact</code>, whose statements run on
+their own, is answered so too where one of them landed before a later one
+was refused, with <code>completed</code> and <code>at</code> (it was told
+to come back, 503, as if none had); its <code>seq</code> is the last landed
+statement's, so a 200 after it says every landed statement survived, and a
+504 does not say which earlier ones did, which are read back.</p>
+
+<h3 id="lease-gaps">Where a lease does not hold</h3>
+
+<p>What leases do not cover. A virtual machine stopped by its host is no
+suspend to its kernel. Under QEMU/KVM's defaults, x86 and arm64, a guest
+stopped and continued (<code>virsh suspend</code> and <code>resume</code>)
+finds every clock where it stopped, the boot clock too, and so does a guest
+saved and restored or live-migrated under any of its settings; so do
+Hyper-V's saved state and Azure's freezes for maintenance, VMware's suspend
+and Firecracker's snapshot restore. A node paused so wakes with lease left
+and writes beside its tenants' new primaries until the lease runs out or it
+reads the router's first grant after the failover, which names none of them
+— with no late grant needed — and nothing inside the guest tells it soundly
+that it was paused: every signal there is comes once it runs again. Stop
+the node before its machine is paused, saved or migrated (<code>systemctl
+stop fenec-node</code>), on a cloud's notice where it gives one (Azure's
+Scheduled Events, GCE's <code>maintenance-event</code>), and where a host
+may pause it unannounced, keep the lease short: two primaries last no
+longer than the lease the node had left. The
+<a href="https://github.com/fenecdb/fenecdb/blob/main/deploy/RUNBOOK.md#known-gaps">runbook's
+known gaps</a> say which pauses are counted and which are not. An answer that passed the second
+check just before its process stopped still goes out whenever the process
+runs again. A stall of sixteen rounds or more can leave a node without the
+answer its next grant acknowledges, holding no lease until the grant after
+it, which the router sends at once. Two directories leasing one node — a
+misconfiguration — can take it in turns as each other's lease lapses,
+neither holding one for long.</p>
+
+<h3 id="lease-shorter">A router started with a shorter lease</h3>
+
+<p>A router may start with a shorter lease than the one before it —
+<code>--auto-failover</code> lowered, then a restart or a standby promoted.
+A node it never reaches may still hold the longer lease, so the directory
+records the longest lease a router leasing from it may have granted, raised
+before a router's first grant with a longer one and sent to its standbys
+first. A router counts a node by that record until the node has run a lease
+from one of its grants, which the node says in its answer
+(<code>ran</code>); from then on, by its own lease, since that grant cut the
+longer one short. A grant taken for its list alone, by a node whose lease
+had lapsed, runs none, and a late grant of the router before could still run
+the longer lease again. Once the router has led for the recorded lease and a
+tenth, every lease granted before it has run out, and it lowers the record
+to its own. Where the record cannot be written, a grant runs no longer than
+the record, renewed every third of that, or the router's own lease where
+there is none.</p>
+
+<p>What the record does not cover: it is a directory's own, so a node
+leased by one directory and then by another — the global one's, then a
+region's — is counted by the second's record, which knows nothing of the
+first's lease. And a router from before the record writes none, so the first
+router with it after an upgrade starts with no record, and counts by its own
+lease. Lower <code>--auto-failover</code> at a restart after that one; never
+at the upgrade itself.</p>
+
+<h3 id="lease-tenants">Why a lease is per tenant</h3>
+
+<p>The lease names tenants, not the node. A node failed over comes back with
+the files of tenants served elsewhere now, primaries' files still; a lease
+over the whole node would have them take writes again the moment it was
+renewed. Its new lease names none of them, and the router runs a repair as
+the node answers, which has those copies follow the tenants' new primaries.
+The list rides with a grant only when it changed, and a create or a move
+grants the node its new one at once, so a tenant takes writes as soon as it
+is placed. A router that starts leasing — a restart, or a standby promoted —
+counts every node as granted then, at its first round as the primary: its
+predecessor may have granted a lease just before it stopped. A grant names the directory's term, which a
+promotion moves on, and a node refuses grants from a lower term once it has
+taken a higher one, so a router promoted over one still running fences it at
+every node it reaches (<a href="sharding-regions.html#region-directories">Fencing</a>). A node started without <code>--lease</code> answers
+that it takes none, and is never failed over on its own.</p>
+
+<h3 id="lease-waits">Slow nodes, and copies that are not their tenant</h3>
+
+<p>No node waits for another. Each node's grant goes out on a thread of its
+own and the router judges the leases without waiting for any, so a node
+slow to answer — or to be found at all: one recorded by a name its resolver
+is slow to refuse once the machine is gone — holds up its own renewal and
+its own failover, nobody else's. A name is looked up within the call's own
+bound, a third of the lease for a grant; the repair a node's return
+triggers runs beside the leasing, as do failovers; and a replica being
+promoted stops reconnecting to the node it followed at once rather than
+wait out the connect. A node's lapse is judged only once the router has
+stopped waiting for any grant it sent the node, so an answer that comes
+back is counted (a grant it gave up on gives the node nothing). A tenant that
+another operation was holding — a quota being set, a move — when its node
+was failed over is failed over once that operation ends, onto the copy it
+had then and no other, and its node's grants name it no more meanwhile, so
+the node does not take it back as it answers again. A
+copy that is not its tenant as its primary has it is never promoted: the
+router tells the node the tenant's lineage and the history its primary
+forked at its last failover, and the node refuses a copy of another
+lineage — one that never took its primary's image, or a file put in its
+place — and an old primary's copy that has not heard from the new primary
+since, which would take back every write after that failover; the tenant
+waits for its node, where its rows are. A copy that has heard from the node
+it follows since it was last told to follow it is promoted whatever
+history it holds, and its node remembers the hello across a restart, so a
+tenant restored in place on its primary's node — <code>fenec restore</code>
+installed with <code>DELETE</code> and <code>PUT .../file</code>, or the
+whole node with <code>fenec restore --tenants</code> — fails over as before
+once its copies have taken the restored file. A tenant not yet written
+fails over as any other. A file of another lineage put in a primary's place
+by hand — another tenant's, or one made again under the name — is not the
+tenant the router knows: every failover of it is refused until a read
+replica's look teaches the router the new lineage, or an operator forces
+one. An operator who knows better sends
+<code>{"force": true}</code> to <code>POST /_shard/nodes/&lt;n&gt;/failover</code>
+or to the node's <code>POST /_admin/tenants/&lt;t&gt;/promote</code>, which
+promotes the copy whatever it holds and is written to the audit log. Nor is
+a tenant given a new replica while its primary does not answer; the repair
+looks again a few times over the next minutes, and <code>POST
+/_shard/replicas</code> asks at once. Before, one such node held
+up the leasing of its whole region: in a drill on GitHub's runner, whose
+Docker resolver is slow to refuse a removed container's name, the region's
+healthy nodes went 18 s without a write and one was failed over, and the
+dead node's tenants wrote again only after 30 s. In the same drill run
+locally, every unknown name sent to a resolver that never answers, the
+router now fails the dead node over 2.1 to 3.3 s after its kill at a lease
+of 2 s, and the region's other tenants never pause more than 19 ms.</p>
+
+<h3 id="lease-measured">Measured</h3>
+
+<p>Measured with <code>make shard-bench</code>, three nodes and the router in
+one process and a lease of a second: a node cut off stopped taking writes
+386 to 406 ms after — its lease ran from the grant before its last renewal,
+about two thirds of a lease before the cut — and its 10 tenants took writes
+on their replicas again 1.27 to 1.36 s after, the lease and a tenth from the
+last answer, the next round and the promotions. Before grants were numbered,
+the node ran its lease from its last renewal and stopped 714 to 777 ms after
+the cut, and the failover came as it does now, 1.26 to 1.42 s after (four
+runs each, in turns). With a lease of five seconds, a node lost costs its
+tenants' writes 5.5 to 7.2 s.</p>
+
+<h2 id="quota-design">Quotas: what is bounded and why</h2>
+
+<p>Why <a href="sharding-tenants.html#quotas">a quota</a> bounds what it does, where it is asked, and what it costs. What each one bounds, and what a refusal says, are in the <a href="sharding-reference.html#quota-bounds">reference</a>.</p>
+
+<p><b>What is bounded is what is known exactly and cheaply.</b> A file's
+bytes are the engine's count of what it appended, read with no system call;
+rows are each store's count, a sum over the collections (those whose names
+start with <code>_</code> are the server's: idempotency keys, consumers'
+places); streams and requests are counters a request takes and gives back;
+the rates are a token bucket each. A tenant with no quota touches none of it.
+Left out: the memory an open tenant holds (<code>memory_bytes</code> counts
+what has been built, and a read builds an index on first use — a quota on it
+would refuse a write because of a search, and the same data holds less after
+a restart; <code>--max-memory</code> closes idle tenants for the node as a
+whole), a statement's time (the engine cannot stop a running scan; requests
+in flight bound how many cores one tenant's long reads take), and rows per
+collection (a tenant's own design: <code>@ttl</code> on a log).</p>
+
+<p><b>The block is refused before it lands.</b> A quota asked before a write
+runs would let that write past it by whatever it adds, and a
+<code>set</code> over every row adds the whole collection again. The engine
+asks the quota as a block lands, with its record's length to the byte and
+its documents counted (<code>Database::set_limit</code>); one past it is put
+back as a failed one is. A block larger than 16 MB spills into the file
+before it lands, and each spill is asked first: let through and refused
+after, its bytes would stay in the file, dead and past the quota. The file
+passes its quota only by what a write that takes away adds — a delete's
+tombstones, a drop's record — and by what no client writes: the graphs a
+server keeps in its file's tail. The next compact gives both back. A rate is
+not asked at the landing: a write lands while its bucket holds a row's worth
+or any bytes, and its rows and bytes are charged as it lands -- the rows of
+the tenant's collections it wrote, not the server's own, such as an
+<code>Idempotency-Key</code>'s -- so a write larger than a second's worth
+goes through and the next waits out the debt.</p>
+
+<p><b>A refusal tells the quota, not what the tenant holds:</b> a scoped
+token's user is told the tenant is full, not how many rows the other users
+make. Only the admin token reads usage.</p>
+
+<p><b>The router enforces none of it.</b> It holds no keys and parses no
+query, and a tenant lives whole on one node, so the node's count is the
+tenant's. A quota a node does not take — a node down when it was set — is
+logged, and sent again as that copy is promoted.</p>
+
+<p><b>What it costs.</b> A tenant with no quota touches none of it: against
+the code before quotas, in turns, a request to a tenant took 19.5–21.7 µs
+straight to the node and 43.7–46.0 µs through the router, against
+19.9–21.8 and 43.6–45.7. A tenant with every quota answered as one with none
+over HTTP — reads 20.9 µs either way, writes 23.7 against 23.6 — and in
+process a <code>put</code> held to bytes and rows took 593 ns against 566,
+618 with a bytes-a-second bucket besides (<code>make quota-bench</code>).</p>
+
+<h2>What it costs</h2>
+
+<p>The router adds about 21 µs a request on one machine: one extra round trip.
+Moving a 58.7 MB tenant took under 0.3 s.</p>
+
+<p>Node and router in one process on loopback, one keep-alive client, 5 000
+requests after 500 of warm-up (<code>make shard-bench</code>):</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">p50</th><th class="n">p95</th><th class="n">p99</th></tr></thead>
+<tbody>
+<tr><td>straight to the node</td><td class="n">23.1 µs</td><td class="n">31.5 µs</td><td class="n">38.1 µs</td></tr>
+<tr><td>through the router</td><td class="n">44.7 µs</td><td class="n">53.2 µs</td><td class="n">64.0 µs</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>About 21 µs per request, which is one more loopback round trip; across a
+network the extra hop is whatever that network charges for one. Moving a tenant
+of 100 000 × 128 with an HNSW index — a 58.7 MB image — took 188–267 ms end to
+end over three runs, and the first query on the target about 70 ms, most of it
+opening the file: the graph travels in the image, so nothing is rebuilt.</p>

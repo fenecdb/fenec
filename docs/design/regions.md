@@ -6,7 +6,7 @@ The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *Region
 
 **A node is in a region and a zone, and a tenant in its node's region**
 (`directory::Node`, `Router::replica_node`, `relocate`;
-`site/content/docs/sharding.html#regions`). A global service runs nodes in
+`site/content/docs/sharding-regions.html#regions`). A global service runs nodes in
 several regions, each in two datacenters or more, and a tenant has one home:
 `PUT /_shard/nodes/<n> {region, zone}` records them -- fields of `nodes`,
 added by an `alter` to a directory from before them, whose nodes read the
@@ -54,7 +54,7 @@ on a machine whose load rose to 12 was left out. The gauges by node carry
 
 **A region may keep its own directory, and leases and fails over inside
 itself** (`fenec-shard/src/region.rs`, `--region`, `--global`, `PUT
-/_shard/regions/<r>`; `site/content/docs/sharding.html#region-directories`).
+/_shard/regions/<r>`; `site/content/docs/sharding-regions.html#region-directories`).
 With one directory every lease came from the primary router, so every
 region's writes hung on the primary's region. A region's router (`--region us --global
 <url>`) keeps the region's nodes and tenants in a directory of its own -- the

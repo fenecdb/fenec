@@ -1,6 +1,6 @@
 ---
 name: docs-sync
-description: Brings docs and the site up to date with work that already landed or is in a branch -- site/content/docs/, README, the home page and docs index, SDK lists (languages.html, mobile.html, sharding.html, integrations.html), AGENTS.md, the golden files, the site's search vector cache, measured figures from a finished benchmark's results. Runs on Sonnet. Changes no code under crates/.
+description: Brings docs and the site up to date with work that already landed or is in a branch -- site/content/docs/, README, the home page and docs index, SDK lists (languages.html, mobile.html, sharding-read-replicas.html, integrations.html), AGENTS.md, the golden files, the site's search vector cache, measured figures from a finished benchmark's results. Runs on Sonnet. Changes no code under crates/.
 model: sonnet
 tools: Read, Edit, Write, Bash
 ---
