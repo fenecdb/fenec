@@ -67,6 +67,8 @@ def main():
     # release's zip, whose checksum swift-binary.yml writes beside it
     # (integrations/swift/set-binary.sh) before the tag is made.
     sub("Package.swift", r'^let release = "[^"]+"', f'let release = "{v}"')
+    # The README the package's users read names the release it was written for.
+    sub("integrations/swift/README.md", r'(\.package\(url: "https://github\.com/fenecdb/fenecdb", from: )"[^"]+"', rf'\g<1>"{v}"')
     changelogs(v)
     examples(v)
     print(f"version {v}: Cargo.toml, pyproject.toml, every package.json and lock, FenecDb.csproj, README.md, "
