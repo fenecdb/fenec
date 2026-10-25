@@ -19,7 +19,7 @@
 #                       rust-toolchain.toml asks for, else the one on PATH)
 #   FENEC_RELEASES      where releases are downloaded from (a test points it at a
 #                       directory with file://), default
-#                       https://github.com/fenecdb/fenec/releases/download
+#                       https://github.com/fenecdb/fenecdb/releases/download
 #   FENEC_SERVER_OUT    where the server goes, default bin/fenec-server
 #   TARGET_TRIPLE       the release asset's target, default this machine's
 set -eu
@@ -68,7 +68,7 @@ else
       *) die "no release asset for $(uname -s) $(uname -m); set TARGET_TRIPLE" ;;
     esac
   fi
-  base=${FENEC_RELEASES:-https://github.com/fenecdb/fenec/releases/download}/v$version
+  base=${FENEC_RELEASES:-https://github.com/fenecdb/fenecdb/releases/download}/v$version
   asset=fenec-v$version-$triple.tar.gz
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fenec-server.XXXXXX")
   curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" || die "could not download $base/SHA256SUMS (is there a release v$version?)"
