@@ -107,6 +107,55 @@ collection of those rows alone gives -- alice's memo went 9.87 -> 4.79
 once bob wrote 200 holding the word -- 0.16 -> 0.24 ms for 2.5% of 100
 000 rows; the browser module leaves the counting out.
 
+### ES256, and the algorithms still refused
+
+An `EC` key on P-256 verifies ES256 (`crypto::P256Key`,
+`crypto/p256.rs`), RFC 7518's ECDSA with SHA-256, its signature the 64
+bytes `R || S` and never DER. Before it a JWKS's EC keys were passed over:
+a provider signing with one -- Supabase Auth's EC signing keys, the auth
+recipes' table found -- could only be used by making it an RSA key, and a
+file mixing the two kinds verified only the RSA key's tokens. Written
+without a dependency, as `RsaKey` is: field elements and scalars are four
+64-bit limbs in Montgomery form under one `Modulus` (p and n, its
+constants worked out by `const fn` from the modulus alone), points are
+Jacobian, and `u1·G + u2·Q` is Shamir's trick over an addition that asks
+first whether its two points share an x -- a doubling or infinity, which
+the formulas get wrong and the trick meets (`G + Q` is `2G` for Q = G and
+infinity for Q = -G, both tried by signing in the module's tests). A key's
+coordinates are 32 bytes each, below p and on the curve, or the file is
+refused; r and s lie in [1, n), and R's x is reduced mod n before it is
+compared. Nothing runs in constant time: a public key and a signature are
+public. It is held to every case of Project Wycheproof's
+`ecdsa_secp256r1_sha256_p1363_test.json` (262: 173 valid, 89 invalid, none
+acceptable, committed with its licence in `fenec-http/tests/es256/`, the
+nine groups giving their key in hex alone included -- they are the ones
+whose R has an x past n), RFC 7515's A.3, and tokens node:crypto signed
+(`tests/es256/tokens.mjs`) taken over HTTP and refused once changed.
+Dropping the reduction of x, the doubling branch or the range check of r
+and s each fails the vectors.
+
+A check costs 145 us against RS256's 37 in the same run, a token's first
+`scope` 149 against 42, one found in `verified` 0.35 (`make jwt-bench`,
+Apple M1): a field multiplication is 21 ns, a doubling 0.21 us, an addition
+0.33, and a verification 256 doublings, some 192 additions and two
+inversions of 6 us each. A window method, additions with an affine point
+or a reduction using p's special form would take a share of that off, each
+at the price of code a reader has to take on trust, and `verified` already
+makes it once a token on each server: a client sends one token for its
+lifetime, and only a server with more than 4 096 live tokens -- a shard
+emptied as it fills -- checks one again. It made fenec-server's code and
+constants 10.2 KB larger (`__TEXT` 4 289 588 -> 4 299 816 bytes), the file
+16.5 KB, Mach-O's 16 KiB pages rounding it.
+
+Still refused, with `only HS256, RS256 and ES256 tokens are accepted`:
+EdDSA, which is a second curve (2^255 - 19) and SHA-512, neither here; PS256,
+whose RSA is `RsaKey`'s but whose padding is MGF1's; and RS384, RS512,
+ES384 and ES512, which need SHA-384 or SHA-512, and the last two P-384's
+and P-521's fields besides. OpenID Connect makes RS256 the algorithm every
+provider must offer, and the providers whose keys a server is likely to
+read sign with RS256 or ES256; each other one is added when a provider a
+user meets signs with nothing else, held to its own vectors as these are.
+
 ## Field lists
 
 **A read rule may name the fields it shows, and a field it withholds is
