@@ -703,11 +703,11 @@ fn a_promoted_standby_router_counts_every_lease_from_its_promotion() {
     tenant_on(a_port, "t", "n1");
     let (_, replica) = placed(a_port, "t");
     assert_eq!(replica.as_deref(), Some("n2"));
-    // Its copy on n2 holds its collection, its primary's image taken: the
+    // Its copy on n2 has taken its primary's image and heard from it: the
     // failover promotes it. A copy that has not is of a lineage of its own,
     // which its node refuses to promote (409), and cut off from n1 it never
     // takes the image: `t` stayed on n1.
-    until(n2.port, "/t/t/query", "get notes count", "\"count\":0");
+    until_copied("t", &n1, &n2);
     let deadline = Instant::now() + WITHIN;
     while !call(b_port, "GET", "/_shard/tenants", "", None)
         .1

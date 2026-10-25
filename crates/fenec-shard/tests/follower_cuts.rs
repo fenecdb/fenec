@@ -28,7 +28,7 @@ use fenec_core::prelude::Database;
 use fenec_http::replication::{fresh_id, Follower, Replication};
 use fenec_shard::directory::Directory;
 use fenec_shard::{Config, Router};
-use nodes::{call, node, placed, until, Node};
+use nodes::{call, node, placed, until, until_copied, Node};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::net::TcpStream;
@@ -624,27 +624,21 @@ fn a_standby_s_cut_write_whose_bucket_another_failover_moves_still_waits_for_the
         .find(|t| fenec_shard::upstream::same_bucket(t, "acme"))
         .expect("one in 64 names is in a bucket");
     let at = format!("/_shard/tenants/{beta}");
-    let made = r#"{"node":"n1","schema":"create collection notes (title text)"}"#;
-    let (status, b) = call(p.primary, "PUT", &at, made, None);
+    let (status, b) = call(p.primary, "PUT", &at, r#"{"node":"n1"}"#, None);
     assert_eq!(status, 201, "{b}");
     let beta_replica = placed(p.primary, &beta).1.expect("beta has a replica");
     assert_ne!(
         beta_replica, replica,
         "beta's copy is on the node acme's is not"
     );
-    // Its copy holds its collection, its primary's image taken: one that
+    // Its copy has taken its primary's image and heard from it: one that
     // has not is of a lineage of its own, which its node refuses to promote
     // (409), and `beta` stayed on n1 where its image was held two seconds
     // at n1's wire.
-    until(
-        p.port_of(&beta_replica),
-        &format!("/t/{beta}/query"),
-        "get notes count",
-        "\"count\":0",
-    );
+    let index = |n: &str| n[1..].parse::<usize>().unwrap() - 1;
+    until_copied(&beta, &p.nodes[0], &p.nodes[index(&beta_replica)]);
     until_placed(p.standby, "acme", "n1");
     until_placed(p.standby, &beta, "n1");
-    let index = |n: &str| n[1..].parse::<usize>().unwrap() - 1;
     let (x, y) = (index(&replica), index(&beta_replica));
     // The primary's pool holds a connection to each node, so the failover's
     // calls dial nothing: the lookup held is the standby's.
