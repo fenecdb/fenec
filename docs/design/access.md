@@ -107,15 +107,15 @@ collection of those rows alone gives -- alice's memo went 9.87 -> 4.79
 once bob wrote 200 holding the word -- 0.16 -> 0.24 ms for 2.5% of 100
 000 rows; the browser module leaves the counting out.
 
-**A claim names someone or is not there** (`usable`, `kind_held`). A rule
-naming a claim the token lacked did not apply, but one the token held as
-`null` was bound as it came: `owner = $jwt.sub` became `owner = null`,
-which FenecQL's `=` holds of a null (`compare`), so a token an app minted
-with `"sub": null` for an anonymous user read, `set` and deleted every row
-with no owner -- every row written before `alter collection notes add
-field owner text` -- through `/query`, REST, `/batch`, a subscription and
-MCP, reached another collection's rows through a rule's inner `get`, took
-a transition's update, and inserted rows pinned `owner: null` that `WITH
+**A claim names someone or is not there** (`usable`). A rule naming a
+claim the token lacked did not apply, but one the token held as `null` was
+bound as it came: `owner = $jwt.sub` became `owner = null`, which
+FenecQL's `=` holds of a null (`compare`), so a token an app minted with
+`"sub": null` for an anonymous user read, `set` and deleted every row with
+no owner -- every row written before `alter collection notes add field
+owner text` -- through `/query`, REST, `/batch`, a subscription and MCP,
+reached another collection's rows through a rule's inner `get`, took a
+transition's update, and inserted rows pinned `owner: null` that `WITH
 CHECK` passed. A `null` in a list claim read the rows `room in [...]`
 found with no room, and `""` the rows an app stored with no owner as
 `""`. Such a claim is now one the token lacks: `null`, `""`, an object, a
@@ -126,38 +126,49 @@ rule naming it does not apply. Rules only grant, as PostgreSQL's
 permissive policies do, and the stricter judgement of field lists and
 transitions (`Scope::overwrites`) weighs only the rules that apply, among
 which rules with no field list still widen each other, so a rule left out
-grants nothing and takes nothing away. Refusing the token (401) was the
-other way, not taken: an anonymous user's token reads `board read` as one
-without `sub` does. Neither was leaving the bad values out of a list: a
-shorter list admits more under `not in`. A number and a bool stay values:
-`=` and `in` never take one kind for another (`cmp_value` is not `Equal`
-across kinds), so `"sub": 7` matches no text owner. Ordered, they did:
-values of two kinds order by kind, every number below every text, so
-`level <= $jwt.clearance` given `"top"` read every row of an `int` level
-and `name >= $jwt.from` given `5` every name. The scope is bound per
-token with no schema at hand, and a `compare` ordering nothing across
-kinds would part the scan from `@sorted`'s ranges, so `kind_held` ANDs in
-the edge of the claim's kind on the side the comparison leaves open: `>
-true` below a number and `< ""` above it, `>= ""` below a text and `<` the
-byte `0xFF` above it (no UTF-8 text holds it; a vector literal, the kind
-ranked next, is refused beside a json field), `<= true` above a bool. A
-time ordered below a text claim falls outside it, a JWT's times being
-numbers. The tenant claim is the one whose absence widens
+grants nothing of its own. It can still take away from another rule that
+reads its collection: an inner `get` is held to the token's rules there,
+so where those are left out its list is empty, and `author not in (get
+bans select author)` beside `bans read where viewer = $jwt.sub` admits
+every post to a token without `sub` -- as it did to one lacking the claim
+before, nothing new, but a deny list is written to fail closed: name the
+claim in the rule whose `not in` it is (`author not in (get bans select
+author where viewer = $jwt.sub)`), so that a token without it has no rule
+there at all, and give the token a rule reading `bans`, or the list is
+empty whatever it holds; an allow list (`in`) fails closed either way.
+Refusing the token (401) was the other way, not taken: an anonymous
+user's token reads `board read` as one without `sub` does. Neither was
+leaving the bad values out of a list: a shorter list admits more under
+`not in`. A number and a bool stay values: `=` and `in` never take one
+kind for another (`cmp_value` is not `Equal` across kinds), so `"sub": 7`
+matches no text owner. The tenant claim is the one whose absence widens
 (`--jwt-unbound-tenants`): held as `null`, `""` or a value naming no
 tenant it reached every tenant there, and reaches none now. A `sub` of
 `""` kept its Idempotency-Keys under the server token's own, whose answer
-it was replayed: it is no subject (400). `$3` beside one claim, a
-parameter past the claims, panicked every request under its rule and is
-refused at startup. `tests/claim_values.rs`, MCP's
-`a_null_subject_s_agent_reads_and_writes_no_ones_rows` and `tests/tenants.rs`'s
-unbound case fail without it. Binding a token's rules (`Access::scope`,
-every request) went 329 -> 339 ns for `owner = $jwt.sub`, 1 091 -> 1 122
-for two rules and 2 619 -> 2 636 for a list of 50 rooms (medians of 15
-runs in turns), and 269 -> 384 ns for a rule ordering by a claim, its edge
-two nodes more; `make policy-bench`'s plain side over the server token's
-was +2.2-4.4 us a `set`, +2.5-4.4 a row and +2.5-4.7 a page on main,
-+2.2-4.6, +2.5-3.9 and +2.7-4.8 with it (six runs each in turns, the
-machine loaded: the spread is the load's).
+it was replayed: it is no subject (400). A policy's own `$<n>` stood for
+whichever claim the rewrite to parameters numbered so -- `d = $3` after
+three claims for the third, after fewer for none, which panicked every
+request under the rule -- and is refused at startup wherever it stands.
+`tests/claim_values.rs`, MCP's
+`a_null_subject_s_agent_reads_and_writes_no_ones_rows` and
+`tests/tenants.rs`'s unbound case fail without it. Binding a token's
+rules (`Access::scope`, every request) went 329 -> 339 ns for `owner =
+$jwt.sub`, 1 091 -> 1 122 for two rules and 2 619 -> 2 636 for a list of
+50 rooms (medians of 15 runs in turns); `make policy-bench`'s plain side
+over the server token's was +2.2-4.4 us a `set`, +2.5-4.4 a row and
++2.5-4.7 a page on main, +2.2-4.6, +2.5-3.9 and +2.7-4.8 with it (six
+runs each in turns, the machine loaded: the spread is the load's).
+
+**Known open: an ordered comparison against a claim of another kind.**
+Values of two kinds order by kind (`cmp_value`'s type rank), every number
+below every text, so `level <= $jwt.clearance` given the text `"top"`
+reads every row of an `int` level, and `name >= $jwt.from` given `5`
+every name; a claim inside a call (`lower($jwt.c)`, `coalesce($jwt.c,
+0)`, `least(level, $jwt.c)`) does the same. A token's issuer types its
+claims, and `=`, `in` and `has` are not touched by it, but an ordered rule
+is held to the claim's kind in a follow-up of #408 ("ordered comparisons
+against a claim"), which has to keep the guard right under `not`, a time
+field's ISO claims and `@sorted`'s exact ranges.
 
 ## Field lists
 

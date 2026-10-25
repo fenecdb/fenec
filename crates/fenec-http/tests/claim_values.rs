@@ -3,8 +3,7 @@
 //! token lacks it, and grants nothing. Bound as it came, `"sub": null`
 //! made `owner = $jwt.sub` the filter `owner = null`, which every row with
 //! no owner matched -- every row written before `alter collection notes
-//! add field owner text` -- to read, `set` and `del` by every route, and a
-//! claim of another kind than its field, ordered by kind, passed every row.
+//! add field owner text` -- to read, `set` and `del` by every route.
 
 use fenec_http::access::Access;
 use fenec_http::{Config, Server};
@@ -306,57 +305,15 @@ fn a_list_claim_holding_no_one_is_no_claim() {
     assert_eq!((status, body.as_str()), (200, "[]"));
 }
 
-/// A claim compared by order holds the other side to its kind: values of
-/// two kinds order by kind, every number below every text, so a text
-/// clearance admitted every level, and a number every name.
+/// A parameter a policy numbers itself stands for no claim: `$3` beside
+/// three claims was taken as the third (the review of #408, r5).
 #[test]
-fn an_ordered_claim_holds_its_field_to_the_claims_kind() {
-    let n = start(
-        "files  read  where level <= $jwt.clearance\n\
-         people read  where name >= $jwt.from\n\
-         grades read  where $jwt.at_least <= score\n\
-         flags  read  where state >= $jwt.flag\n",
-        &[
-            "create collection files (name text, level int @sorted)",
-            "put files [{name: \"a\", level: 1}, {name: \"b\", level: 5}, {name: \"c\", level: 9}]",
-            "create collection people (name text @sorted)",
-            "put people [{name: \"alice\"}, {name: \"bob\"}, {name: \"carol\"}]",
-            "create collection grades (score json)",
-            "put grades [{score: 3}, {score: 8}, {score: \"A\"}, {score: true}]",
-            "create collection flags (state json)",
-            "put flags [{state: true}, {state: false}, {state: 1}, {state: \"yes\"}]",
-        ],
+fn a_parameter_the_policy_numbers_itself_is_refused() {
+    let r = Access::new(
+        SECRET,
+        "notes read where a = $jwt.a or b = $jwt.b or c = $jwt.c or d = $3\n",
     );
-    let rows = |claims: &str, sql: &str| {
-        let t = n.token(claims);
-        let (status, body) = n.query(&t, sql);
-        assert_eq!(status, 200, "{claims}: {body}");
-        body
-    };
-    let files = "get files select name order name";
-    assert_eq!(
-        rows(r#"{"clearance":5}"#, files),
-        r#"[{"name":"a"},{"name":"b"}]"#
-    );
-    assert_eq!(rows(r#"{"clearance":"top"}"#, files), "[]");
-    assert_eq!(rows(r#"{"clearance":true}"#, files), "[]");
-    let people = "get people select name order name";
-    assert_eq!(
-        rows(r#"{"from":"b"}"#, people),
-        r#"[{"name":"bob"},{"name":"carol"}]"#
-    );
-    assert_eq!(rows(r#"{"from":5}"#, people), "[]");
-    // A field of every kind, the claim on the left.
-    let grades = "get grades select score order id";
-    assert_eq!(rows(r#"{"at_least":5}"#, grades), r#"[{"score":8}]"#);
-    assert_eq!(rows(r#"{"at_least":"B"}"#, grades), "[]");
-    assert_eq!(rows(r#"{"at_least":"A"}"#, grades), r#"[{"score":"A"}]"#);
-    let flags = "get flags select state order id";
-    assert_eq!(rows(r#"{"flag":true}"#, flags), r#"[{"state":true}]"#);
-    assert_eq!(
-        rows(r#"{"flag":false}"#, flags),
-        r#"[{"state":true},{"state":false}]"#
-    );
+    assert!(r.is_err(), "`$3` beside three claims was taken");
 }
 
 /// The rules of a transition, of a field list, and of one reading another

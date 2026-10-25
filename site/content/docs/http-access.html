@@ -377,9 +377,9 @@ messages   read,insert  where room in (get members select room where user = $jwt
     or as a list where the rule reads one value: <code>"sub": null</code>
     is no subject, and <code>owner = $jwt.sub</code> does not become
     <code>owner = null</code>, which every row with no owner matches. A
-    number and a bool are values like any other. A claim a rule compares by
-    order (<code>level &lt;= $jwt.clearance</code>) admits only values of
-    its own kind: given <code>"top"</code>, no number is below it. A
+    number and a bool are values like any other. A policy names its
+    parameters by claim alone: one writing <code>$1</code> or
+    <code>$3</code> of its own stops the server at startup. A
     subscription is checked when it opens, and
     ended at its token's <code>exp</code> with
     <code>event: error</code> and

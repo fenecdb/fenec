@@ -361,9 +361,9 @@ scoped poll's tag digests its answer (`content_tag`), a scoped `match`
 scores its rows alone (`Match::within`), and the algorithm is the key's,
 never the token's. A claim held as `null`, `""` or a value its rule cannot
 compare (`usable`) is a claim the token lacks: the rule naming it does
-not apply, granting nothing, and no filter is bound to it. A claim a rule
-orders by holds the field to its kind (`kind_held`), a tenant claim naming
-no tenant reaches none, and a `sub` of `""` is no subject.
+not apply and no filter is bound to it. A tenant claim naming no tenant
+reaches none, a `sub` of `""` is no subject, and a policy writing a `$<n>`
+of its own is refused at startup.
 
 **[A field a read rule withholds is held out of what a statement
 does.](docs/design/access.md#field-lists)** `fields::hold` and
