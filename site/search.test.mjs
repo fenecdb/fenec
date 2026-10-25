@@ -140,8 +140,11 @@ test('a question the words miss finds its page by its meaning', () => {
     // 4th over the 408 sections embedded on 2026-10-14: "saklamak" is
     // keeping, and the archive's object storage and sealing and the
     // half-precision vectors speak of keeping data too. 3rd while 128 of
-    // them had no vector.
-    ['telefonda veri saklamak', 'docs/mobile', 4],
+    // them had no vector. 5th with the guides to an identity provider, files
+    // and functions: "verifies" and "tells" are fuzzy neighbours of "veri" and
+    // "telefonda", and two of their sections take places from the words
+    // side of the fusion that a section of mobile held.
+    ['telefonda veri saklamak', 'docs/mobile', 5],
     ['dosyanın büyümesini durdurmak', 'docs/server#compaction', 3],
   ]) {
     const [words, meaning] = standing(q, url);

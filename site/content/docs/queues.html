@@ -26,6 +26,10 @@ ready again, and the next claim takes it. See
 <a href="/docs/fenecql-writing#pick">Writes that pick their rows</a> for the
 rules.</p>
 
+<p>The job written in the same <code>/batch</code> as the row it is about, and
+a worker as the function that reacts, are run on <a href="/docs/functions#queue">Functions
+and webhooks</a>.</p>
+
 <p>This is Redis's <code>LPUSH</code> and <code>BRPOP</code>, with a lease
 so that a job outlives the worker that took it. The other jobs an app adds
 Redis for — locks, rate limits, caches, <a

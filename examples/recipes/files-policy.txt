@@ -1,0 +1,17 @@
+# collection  access                  rows                                          role
+
+# A person lists, reads and deletes their own files' metadata ...
+files         read,delete             where owner = $jwt.sub
+
+# ... and adds a file of up to 10 MiB, pending: only the backend, once the
+# object is in the bucket, marks it ready.
+files         insert                  where owner = $jwt.sub and state = "pending" and size > 0 and size <= 10485760
+
+# ... and renames it.
+files         update(name)            where owner = $jwt.sub
+
+# The backend's own token: reads rows to check, and moves a pending one to
+# ready -- a transition, because one filter asked of the row before and after
+# would refuse the move it grants (`new.` is the row as the write leaves it).
+files         read                                                                  for app
+files         update(state)           where state = "pending" and new.state = "ready"   for app

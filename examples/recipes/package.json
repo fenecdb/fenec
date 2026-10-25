@@ -1,0 +1,16 @@
+{
+  "name": "fenecdb-recipes",
+  "private": true,
+  "type": "module",
+  "description": "Recipes for what a backend platform offers, done with fenec-server and a standard service: an identity provider's tokens, files in S3 or R2, functions on writes",
+  "scripts": {
+    "auth": "sh auth.sh",
+    "files": "node files-demo.mjs",
+    "functions": "node functions-demo.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1100.0",
+    "@aws-sdk/s3-request-presigner": "^3.1100.0",
+    "@fenecdb/web": "^0.1.12"
+  }
+}

@@ -1,0 +1,17 @@
+# Rules that name a claim's value, for what the policy cannot name as a role.
+# (policy.txt's `for admin` reads the claim `role`; a claim the provider
+# names `cognito:groups` or `https://example.test/role` has no name here.)
+
+# Cloudflare Access signs every application of a team with the same keys, so
+# a token for another application would verify: pin the audience, a list.
+notes         read                        where owner = $jwt.sub and '32eafc7626e974616deaf0dc3ba5c0a0eb5f4d2d1e3b8f0a6c1a2e7d9a4b5c6d' in $jwt.aud
+
+# Auth0's `permissions` is a list claim, which a rule can test.
+notes         read                        where 'read:notes' in $jwt.permissions
+
+# Whatever the provider sends: staff are rows, and a rule asks for them.
+staff         read                        where user = $jwt.sub
+notes         read                        where $jwt.sub in (get staff select user)
+
+profiles      read(name)
+audit         read,insert                 where actor = $jwt.sub

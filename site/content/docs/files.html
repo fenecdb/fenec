@@ -1,0 +1,437 @@
+<!--
+title: Files with S3 and R2 — fenecdb
+description: The bytes in an object store, the facts about them in a collection: presigned upload and download links made only after the database says the user may, the object deleted when its row is, and why the bytes stay out of the database file. Run against a real server and an S3-compatible store.
+-->
+
+<h1>Files with S3 and R2</h1>
+<p class="kicker">Keep the bytes in an object store and the facts about them in
+a collection. A policy says who may have a link; the link itself comes from
+the store.</p>
+
+<p>A file is two things. The bytes are what an object store (Amazon S3,
+Cloudflare R2, anything that speaks the S3 API) keeps cheaply and serves from
+a CDN. The facts are whose it is, how big, what type, whether the upload
+finished, and those are rows. fenecdb keeps the rows. The app's backend,
+which can be a Worker, makes the links, and makes one only after fenec-server
+has said that this person may.</p>
+
+<h2 id="why">Why the bytes stay out of the database file</h2>
+
+<p>A <code>text</code> field can hold a megabyte, and a request can carry up to
+64 MiB. A file full of them is the wrong place, for reasons that belong to
+the file:</p>
+
+<ul>
+  <li><b>The file only grows until it is compacted.</b> Records are appended;
+    a document that is replaced or deleted leaves its old bytes behind. 200
+    puts of 1 MiB into a server started with <code>--auto-compact off</code>
+    made a file of 200 MiB; deleting a hundred of them left it
+    200 MiB; <code>compact</code> brought it to 100 MiB
+    (104 858 600 bytes reclaimed). By default the server compacts a file
+    itself once half of it is dead and it is 64 MB, and each compaction copies
+    every live byte, so its cost follows the bytes you keep
+    (<a href="/docs/server#compaction">Compaction</a>); <code>fenec-server
+    --help</code> says <code>compact</code> peaks at about 3x the file in
+    memory.</li>
+  <li><b>The file is mapped and lives in the page cache.</b> A 40 MB photo
+    sits beside the rows that are read a thousand times a second, and the
+    operating system has room for fewer of those.</li>
+  <li><b>Every byte is replicated, archived and fed.</b> A replica follows the
+    writes, an archive keeps them, and <code>/_changes</code> hands them to
+    consumers from a buffer of 64 MiB by default: a few uploads, and a
+    consumer a moment behind is answered 410 and starts over.</li>
+  <li><b>Requests have a ceiling.</b> A body is at most 64 MiB, and chunked
+    uploads are refused (<a href="/docs/limits">Limits</a>).</li>
+  <li><b>The store is built for it.</b> Ranges, multipart uploads, lifecycle
+    rules, a CDN in front, a price a gigabyte.</li>
+</ul>
+
+<p>A <code>bytes</code> field is for what is small and belongs with the row,
+a thumbnail's worth or a hash.</p>
+
+<h2 id="shape">The shape</h2>
+
+<ol>
+  <li><b>Add.</b> The client asks the backend for an upload, sending its own
+    token. The backend inserts the row, <code>pending</code>, <i>as that
+    person</i>: the policy decides whether they may, pins <code>owner</code> to
+    their <code>sub</code> and caps <code>size</code>. Only then does it make a
+    presigned <code>PUT</code> URL for the key <code>files/&lt;id&gt;</code>.</li>
+  <li><b>Upload.</b> The client sends the bytes to the store with that URL. They
+    never pass the backend.</li>
+  <li><b>Done.</b> The client tells the backend. It reads the row as the person,
+    asks the store for the object's size, and, if it is the size announced,
+    moves the row to <code>ready</code> with a token of its own.</li>
+  <li><b>Download.</b> The backend reads the row as the person, and if it is
+    theirs and ready, makes a presigned <code>GET</code> URL.</li>
+  <li><b>Delete.</b> The person deletes the row, by the backend or with their
+    own token from a page. A consumer of the change stream sees the deletion
+    and deletes the object.</li>
+</ol>
+
+<p>The backend holds no JWT library and checks no token itself. It passes the
+<code>Authorization</code> header on, and fenec-server verifies it
+(<a href="/docs/auth">Auth with your identity provider</a>). The policy is the
+whole of who may do what:</p>
+
+<pre data-lang="text" data-label="files-policy.txt"># collection  access                  rows                                          role
+
+# A person lists, reads and deletes their own files' metadata ...
+files         read,delete             where owner = $jwt.sub
+
+# ... and adds a file of up to 10 MiB, pending: only the backend, once the
+# object is in the bucket, marks it ready.
+files         insert                  where owner = $jwt.sub and state = "pending" and size &gt; 0 and size &lt;= 10485760
+
+# ... and renames it.
+files         update(name)            where owner = $jwt.sub
+
+# The backend's own token: reads rows to check, and moves a pending one to
+# ready -- a transition, because one filter asked of the row before and after
+# would refuse the move it grants (`new.` is the row as the write leaves it).
+files         read                                                                  for app
+files         update(state)           where state = "pending" and new.state = "ready"   for app</pre>
+
+<ul>
+  <li><b>A person adds what is theirs and pending, up to 10 MiB.</b> The
+    insert rule is checked against the document written, so a client that
+    sends <code>state: "ready"</code> or a size of 20 MiB straight to the
+    database with its own token is refused (403). The backend does not have to
+    remember to check.</li>
+  <li><b>Only the backend moves a file to ready</b>, and only from pending. A
+    rule that names <code>new.</code> is a transition: a plain
+    <code>where state = "pending"</code> would refuse the very write it grants,
+    because the row after it is not pending. (<a href="/docs/http-access#scoped-access">Transitions</a>.)</li>
+  <li><b>The key is the id</b>, <code>files/&lt;id&gt;</code>, not the name a
+    person typed. The change stream names a deleted row by its id alone, and a
+    key made from it needs no lookup to delete. The name is a column, and
+    <code>Content-Disposition</code> carries it on download.</li>
+</ul>
+
+<h2 id="backend">The backend</h2>
+
+<p>The calls are the AWS SDK's, the same for S3 and for R2. Two settings
+matter, shown after the code.</p>
+
+<details class="deep" open><summary>files-backend.mjs</summary>
+<pre data-lang="js">// Files in an object store (S3, R2 or anything that speaks S3), their metadata
+// in fenecdb: the app's small backend, docs/files. It holds no JWT library and
+// checks no token itself. Each request's `Authorization` goes to fenec-server
+// as it came, and the server's rules (files-policy.txt) say whether this
+// person may add a file, see it or delete it; a presigned URL is made only
+// after the server has said yes.
+//
+//   POST   /files          {name, type, size}  a row, pending, and a URL to PUT the bytes to
+//   POST   /files/:id/done                     the bytes are there: the row is ready
+//   GET    /files                              the person's files
+//   GET    /files/:id                          a URL to GET the bytes from
+//   DELETE /files/:id                          the row; the bucket's copy goes with it (blobs.mjs)
+//
+// The object's key is `files/&lt;id&gt;`, never the name a person gave it: the
+// stream of changes names a deleted row by its id alone.
+import { createServer } from 'node:http';
+import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { connect } from '@fenecdb/web/client';
+
+export const keyOf = (id) =&gt; `files/${id}`;
+
+export function s3From(env) {
+  return new S3Client({
+    region: env.S3_REGION ?? 'auto', // R2 wants "auto"; S3 proper, the bucket's region
+    endpoint: env.S3_ENDPOINT, // https://&lt;account&gt;.r2.cloudflarestorage.com for R2
+    forcePathStyle: env.S3_PATH_STYLE === '1', // a local server has no bucket.localhost
+    credentials: { accessKeyId: env.S3_KEY, secretAccessKey: env.S3_SECRET },
+    // Since 3.729 the SDK adds a CRC32 of the body to a request it signs. A
+    // presigned PUT is signed before there is a body, so the checksum is the
+    // empty body's, and the bucket answers 400 BadDigest to the bytes that
+    // follow (seen on SeaweedFS; R2's docs ask for these two settings too).
+    requestChecksumCalculation: 'WHEN_REQUIRED',
+    responseChecksumValidation: 'WHEN_REQUIRED',
+  });
+}
+
+export function backend({ fenec, appToken, s3, bucket, expiresIn = 300 }) {
+  const as = (token) =&gt; connect(fenec, { token });
+  const app = as(appToken);
+
+  const bearer = (req) =&gt; (req.headers.authorization ?? '').replace(/^Bearer /, '');
+
+  return createServer(async (req, res) =&gt; {
+    const reply = (status, body) =&gt; {
+      res.writeHead(status, { 'content-type': 'application/json' });
+      res.end(body === undefined ? undefined : JSON.stringify(body));
+    };
+    try {
+      const token = bearer(req);
+      if (!token) return reply(401, { error: 'no token' });
+      const me = as(token); // fenec-server verifies it, and holds every query to its rules
+      const [, route, id, verb] = new URL(req.url, 'http://x').pathname.split('/');
+      if (route !== 'files') return reply(404, { error: 'not found' });
+      const body = ['POST', 'PUT'].includes(req.method) ? JSON.parse((await text(req)) || '{}') : {};
+
+      if (req.method === 'POST' &amp;&amp; !id) {
+        const { name, type, size } = body;
+        // The row first: if the rules refuse this person, no URL is made.
+        const [file] = await me.from('files').insert(
+          { name, type, size, state: 'pending', created: new Date() },
+          { returning: true },
+        );
+        const url = await getSignedUrl(
+          s3,
+          new PutObjectCommand({ Bucket: bucket, Key: keyOf(file.id), ContentType: type, ContentLength: size }),
+          { expiresIn, signableHeaders: new Set(['content-type', 'content-length']) },
+        );
+        return reply(201, { id: file.id, url, headers: { 'content-type': type } });
+      }
+
+      if (req.method === 'POST' &amp;&amp; verb === 'done') {
+        const file = await me.from('files').where('id', Number(id)).first(); // a row this person may read
+        if (!file) return reply(404, { error: 'no such file' });
+        let held;
+        try {
+          held = await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: keyOf(file.id) }));
+        } catch {
+          return reply(409, { error: 'the bytes are not in the bucket yet' });
+        }
+        if (held.ContentLength !== file.size) {
+          await me.from('files').where('id', file.id).delete(); // blobs.mjs removes the object
+          return reply(422, { error: `the object is ${held.ContentLength} bytes, not the ${file.size} announced` });
+        }
+        await app.from('files').where('id', file.id).update({ state: 'ready' }, { require: 1 });
+        return reply(200, { id: file.id, state: 'ready' });
+      }
+
+      if (req.method === 'GET' &amp;&amp; !id) {
+        const rows = await me.from('files').select('id', 'name', 'type', 'size', 'state')
+          .order('created', 'desc').limit(100).rows();
+        return reply(200, rows);
+      }
+
+      if (req.method === 'GET') {
+        const file = await me.from('files').where('id', Number(id)).first();
+        if (!file) return reply(404, { error: 'no such file' }); // not found, whether it is another's or nobody's
+        if (file.state !== 'ready') return reply(409, { error: 'not uploaded yet' });
+        const url = await getSignedUrl(
+          s3,
+          new GetObjectCommand({
+            Bucket: bucket,
+            Key: keyOf(file.id),
+            ResponseContentType: file.type,
+            ResponseContentDisposition: `attachment; filename="${encodeURIComponent(file.name)}"`,
+          }),
+          { expiresIn },
+        );
+        return reply(200, { url, name: file.name, type: file.type, size: file.size });
+      }
+
+      if (req.method === 'DELETE') {
+        await me.from('files').where('id', Number(id)).delete({ require: 1 });
+        return reply(204);
+      }
+      return reply(405, { error: 'not a route' });
+    } catch (e) {
+      // 412: `require 1` found no row of this person's. The server's own
+      // refusals (401, 403) are passed on as they came.
+      if (e.status === 412) return reply(404, { error: 'no such file' });
+      return reply(e.status ?? 500, { error: e.message });
+    }
+  });
+}
+
+const text = async (req) =&gt; {
+  let s = '';
+  for await (const chunk of req) s += chunk;
+  return s;
+};
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const env = process.env;
+  const server = backend({
+    fenec: env.FENEC_URL,
+    appToken: env.APP_TOKEN,
+    s3: s3From(env),
+    bucket: env.BUCKET,
+  });
+  server.listen(Number(env.PORT ?? 0), '127.0.0.1', () =&gt;
+    console.log(`files backend on http://127.0.0.1:${server.address().port}`));
+}</pre>
+</details>
+
+<ul>
+  <li><b>R2 or S3 is the client's configuration.</b> For R2:
+    <code>endpoint: https://&lt;ACCOUNT_ID&gt;.r2.cloudflarestorage.com</code>
+    and <code>region: 'auto'</code>, which is all R2 asks of the SDK
+    (<a href="https://developers.cloudflare.com/r2/api/s3/presigned-urls/">R2's
+    presigned URLs</a>). For S3 the bucket's region and no endpoint.</li>
+  <li><b>A presigned URL is a bearer token.</b> Anyone holding it can do what
+    it signs until it expires, which is why the backend asks the database
+    first and keeps the lifetime short (300 seconds here; S3 allows up to 7
+    days with an IAM user's credentials, and R2 from 1 second to 7 days). The
+    key is no secret, and nothing here relies on it being one.</li>
+  <li><b>R2 signs <code>GET</code>, <code>HEAD</code>, <code>PUT</code> and
+    <code>DELETE</code>, not a <code>POST</code> form</b>, and only on the S3
+    domain, not on a custom domain (R2's docs). A browser that uploads straight
+    to the bucket needs CORS rules on it for the page's origin.</li>
+  <li><b>Recent SDK versions checksum the request they sign.</b> A presigned
+    <code>PUT</code> is signed before there is a body, so the checksum is the
+    empty body's, and the store answers the real bytes <code>400
+    BadDigest</code>. <code>requestChecksumCalculation: 'WHEN_REQUIRED'</code>
+    (and the response one beside it) turns that off; R2's documentation asks
+    for the same. It was seen here, on the store below.</li>
+</ul>
+
+<h2 id="deleting">The object goes with its row</h2>
+
+<p>The store is not part of fenec-server's write, so a deleted row could leave
+its object behind if the delete ran in the backend and the backend died after
+it. A consumer of the change stream closes that. It runs beside the server
+(<code>--cdc</code>), reads every write once it is on disk, and deletes the
+object of each deleted row, whoever deleted it: the backend, a page's own
+token, the sweep of pending uploads.</p>
+
+<pre data-lang="js" data-label="blobs.mjs">// The bucket follows the table, docs/files: a consumer of the change stream
+// (`fenec-server --cdc`) that deletes an object once its row is gone, whoever
+// deleted the row -- the backend, a person's own token from a page, the sweep
+// of pending uploads. The server keeps the consumer's place, so a restart
+// carries on where it stopped; a crash between the delete and the commit
+// deletes again, which an object store answers as it answered the first time.
+//
+//   FENEC_URL=... ADMIN_TOKEN=... S3_ENDPOINT=... S3_KEY=... S3_SECRET=... BUCKET=... node blobs.mjs
+//
+// /_changes takes the server's own token and no scoped one: it carries every
+// row of every person, documents and all.
+import { DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { keyOf, s3From } from './files-backend.mjs';
+
+export async function follow({ fenec, adminToken, s3, bucket, name = 'blobs', wait = 10_000, signal }) {
+  const headers = { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' };
+  // Made once; asking again answers that it exists.
+  await fetch(`${fenec}/_changes/consumers/${name}`, { method: 'POST', headers });
+  let deleted = 0;
+  while (!signal?.aborted) {
+    const page = await fetch(`${fenec}/_changes?consumer=${name}&amp;wait=${wait}`, { headers, signal }).catch(() =&gt; null);
+    if (!page) break;
+    if (!page.ok) throw new Error(`/_changes: ${page.status} ${await page.text()}`);
+    const next = Number(page.headers.get('fenec-next'));
+    for (const line of (await page.text()).split('\n').filter(Boolean)) {
+      const change = JSON.parse(line);
+      if (change.collection === 'files' &amp;&amp; change.op === 'del') {
+        await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: keyOf(change.id) }));
+        deleted += 1;
+        console.log(`blobs: row ${change.id} deleted, so object ${keyOf(change.id)} too`);
+      }
+    }
+    // Only now: the consumer's place moves once everything it read is done.
+    await fetch(`${fenec}/_changes/consumers/${name}`, { method: 'POST', headers, body: JSON.stringify({ since: next }) });
+  }
+  return deleted;
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const env = process.env;
+  await follow({ fenec: env.FENEC_URL, adminToken: env.ADMIN_TOKEN, s3: s3From(env), bucket: env.BUCKET });
+}</pre>
+
+<ul>
+  <li><b>At least once, and deleting twice is fine.</b> The server keeps the
+    consumer's place; a crash between the delete and the commit repeats it,
+    and a store answers the second delete as the first. A consumer is the
+    server's token alone: <code>/_changes</code> carries every row of every
+    person, so a scoped token is refused (<a href="/docs/http-reference#changes">Change data capture</a>,
+    <a href="/docs/http-reference#consumers">Consumers</a>).</li>
+  <li><b>A queue job is the other way.</b> When a key cannot be made from the
+    id, write the job in the same <code>/batch</code> as the delete:
+    <code>del files where id = $1 require 1</code> and <code>put jobs {kind:
+    "delete-object", ...}</code> land together or not at all, and a worker with
+    a lease and a back-off deletes the object (<a href="/docs/functions">Functions
+    and webhooks</a>).</li>
+  <li><b>An upload never finished</b> leaves a pending row and no object. A
+    statement on a timer sweeps it, and the consumer sees the deletion like
+    any other:
+    <code>del files where state = "pending" and created &lt; now() - 3600000</code>.</li>
+</ul>
+
+<h2 id="run">A run</h2>
+
+<p>Two people, a real fenec-server with <code>files-policy.txt</code>, the
+backend above, the consumer, and an S3-compatible server in Docker
+(<code>npm install</code> in <code>examples/recipes</code>, then <code>node
+files-demo.mjs</code>, which starts and removes the container; give
+<code>S3_ENDPOINT</code>, <code>S3_KEY</code>, <code>S3_SECRET</code> and
+<code>BUCKET</code> to use a store of your own). The signed URLs are
+shortened here. The store was SeaweedFS's S3 gateway: MinIO's container images
+and binaries could not be downloaded when this was written (quay.io refused
+the pull, dl.min.io answered 410), and any S3-compatible server takes the
+same SDK calls. S3 and R2 themselves were not run for this page.</p>
+
+<pre data-lang="text">fenec-server http://127.0.0.1:57250, bucket recipes at http://127.0.0.1:55003
+
+-- alice adds a file
+POST /files             201 {"id":1,"url":"http://127.0.0.1:55003/recipes/files/1?X-Amz-Algorithm=…&amp;X-Amz-Signature=…"}
+the row the server holds: [{"id":1,"owner":"alice","name":"hello.txt","type":"text/plain","size":17,"state":"pending"}]
+
+-- she sends the bytes to the bucket herself, with the URL
+PUT &lt;presigned&gt;         200
+GET /files/1 before done 409 {"error":"not uploaded yet"}
+POST /files/1/done    200 {"id":1,"state":"ready"}
+
+-- she downloads it; bob is told there is no such file
+GET /files/1 (alice)   200 {"url":"http://127.0.0.1:55003/recipes/files/1?X-Amz-Algorithm=…&amp;X-Amz-Signature=…","name":"hello.txt","size":17}
+GET &lt;presigned&gt;         200 "hello from alice\n"
+GET /files/1 (bob)     404 {"error":"no such file"}
+DELETE /files/1 (bob)  404 {"error":"no such file"}
+GET /files (bob)        200 []
+alice's total, for a quota   200 [{"sum(size)":17}]
+
+-- what the rules and the bucket refuse
+POST /files, 20 MiB     403 {"error":"the document is outside what this token may write to `files`"}
+alice's own token, state ready  403 {"error":"the document is outside what this token may write to `files`"}
+PUT 20 bytes to a URL signed for 5   403 SignatureDoesNotMatch
+POST /files/2/done            409 {"error":"the bytes are not in the bucket yet"}
+POST /files/2/done, 20 bytes there   422 {"error":"the object is 20 bytes, not the 5 announced"}
+blobs: row 2 deleted, so object files/2 too
+HEAD files/2: 404, the row having gone
+
+-- alice deletes the file: the object goes with the row
+DELETE /files/1 (alice) 204
+blobs: row 1 deleted, so object files/1 too
+HEAD files/1: 404
+
+-- a pending upload nobody finished is swept
+del files where state = "pending" and created &lt; now() - 3600000: {"affected":1}</pre>
+
+<ul>
+  <li><b>No row, no URL.</b> The 20 MiB request, and the insert with
+    <code>state: "ready"</code> sent straight to the database, were refused by
+    the rules (403): the backend never got as far as the store.</li>
+  <li><b>Another person's file is no file.</b> Bob's request for alice's is a
+    404, whether it is hers or nobody's, and so is his delete: his
+    <code>del</code> with <code>require 1</code> found no row of his.</li>
+  <li><b>A URL signed for 5 bytes does not take 20.</b> The store refused (403)
+    because the length is part of what was signed. That is this store; the
+    check at <code>done</code> is what holds whatever a store does, and
+    it deletes the row and the object of one whose size is not the announced
+    one (422 above, with the 20 bytes put there directly).</li>
+  <li><b>The sweep</b> deleted the abandoned row, and the consumer deletes
+    whatever object it had.</li>
+</ul>
+
+<h2 id="limits">What this does not do</h2>
+
+<ul>
+  <li><b>It does not stop a replaced upload.</b> The upload URL stays good until
+    it expires, 300 seconds, and a client holding it can send other bytes to
+    the key after <code>done</code>. A short lifetime narrows the window; closing
+    it is the store's job (a copy of the object to a key the client never
+    held, say), not the database's.</li>
+  <li><b>It does not scan, resize or transcode.</b> A consumer of the change
+    stream that sees a file go <code>ready</code> is where that belongs
+    (<a href="/docs/functions">Functions and webhooks</a>).</li>
+  <li><b>It does not do multipart or resumable uploads</b>, for files past what
+    one <code>PUT</code> takes. The row and the check at <code>done</code> stay
+    the same; the URLs for the parts are the store's and the SDK's.</li>
+  <li><b>It does not meter a person's total.</b> The policy caps one file; a
+    quota across files is a statement the backend reads before it presigns,
+    run above as <code>get files select sum(size)</code>.</li>
+</ul>

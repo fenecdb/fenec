@@ -56,7 +56,10 @@ its own outbox. Where the event should say something the rows do not —
 a command, an intent — write it into a collection of its own in the same
 <code>/batch</code>, and it comes in the same record.</p>
 
-<p>A consumer in Python:</p>
+<p>A consumer that calls a webhook, with a signature and a dead-letter
+collection, is on <a href="/docs/functions#webhook">Functions and
+webhooks</a>, beside the other two ways to react to a write. A consumer in
+Python:</p>
 
 <pre data-lang="python">from fenecdb import Client
 

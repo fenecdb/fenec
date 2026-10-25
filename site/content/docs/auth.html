@@ -1,0 +1,500 @@
+<!--
+title: Auth with your identity provider — fenecdb
+description: Clerk, Auth0, Supabase Auth, Amazon Cognito or Cloudflare Access sign the users in; fenec-server checks their tokens against the provider's keys and holds each to a policy down to the rows and fields. What it checks, what it does not take, the keys kept fresh, and a run.
+-->
+
+<h1>Auth with your identity provider</h1>
+<p class="kicker">Sign-in stays with a provider you already use. fenec-server
+checks the token it hands out, and a policy file decides, row by row and
+field by field, what that person may read and write.</p>
+
+<p>A backend platform bundles three things: sign-in, rules about who may touch
+which rows, and a database. fenecdb is the last two. The provider (Clerk,
+Auth0, Supabase Auth, Amazon Cognito, Cloudflare Access) signs a user in and
+issues a JSON Web Token. The app, or the browser, sends it to fenec-server as
+<code>Authorization: Bearer</code>. The server checks the signature against
+the provider's public keys and holds every statement the token sends to
+<a href="/docs/http-access#scoped-access">the policy</a>.</p>
+
+<div class="note trap">
+  <p><b>Four things to check for your provider before anything else.</b>
+  fenec-server fetches no URL, so the provider's keys are a file you keep
+  fresh (<a href="#keys">Keys</a>). It takes RS256 and HS256 tokens only, so
+  a provider that signs with ES256 needs an RSA key. It checks neither
+  <code>iss</code> nor <code>aud</code>. And a policy names a claim by a
+  plain, top-level name, which leaves out <code>cognito:groups</code>,
+  Auth0's namespaced claims and everything nested (<a href="#claims">What
+  each provider's token carries</a> says what each of five does about it).
+  Each of the four is shown below with a run, against a stand-in provider
+  that signs RS256 tokens of the shapes the five providers' documentation
+  describes.</p>
+</div>
+
+<h2 id="try">Try it with nothing to sign up for</h2>
+
+<p>Make a secret, start a server that takes tokens signed with it, and mint
+some. <code>--mint-token</code> prints a token for the claims it is given,
+signed with the secret (or the first <code>oct</code> key of a keys file)
+and good for an hour unless the claims say otherwise.</p>
+
+<pre data-lang="bash">head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' &gt; jwt.secret
+
+fenec-server --file app.fenec --http 127.0.0.1:8080 --http-token "$ROOT" \
+    --jwt-secret-file jwt.secret --policy policy.txt
+
+fenec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice"}'
+fenec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"carol","role":"admin"}'
+</pre>
+
+<p>The policy is one line a rule. It holds per-user rows, an admin role,
+fields that only their owner reads, and an audit trail nobody edits:</p>
+
+<pre data-lang="text" data-label="policy.txt"># collection  access                      rows                           role
+
+# Per-user rows: a person reads and writes their own notes.
+notes         read,write                  where owner = $jwt.sub
+
+# An admin also reads every note, and changes none. `role` is a claim of the
+# token (a text, or a list holding the role).
+notes         read                                                       for admin
+
+# Field read rules: every profile's name is public, the rest is its owner's.
+profiles      read(name)
+profiles      read,update(name, phone)    where owner = $jwt.sub
+
+# An audit trail a person adds lines about themselves to, and nobody edits.
+audit         read,insert                 where actor = $jwt.sub
+audit         read                                                       for admin
+audit         append-only</pre>
+
+<p>What the server answered alice, bob, an admin and a token that has lapsed,
+statement by statement. <code>sh examples/recipes/auth.sh</code> runs it from
+a clone, with a <code>fenec-server</code> built by <code>cargo build -p
+fenec-server</code> (or any binary, as <code>FENEC_SERVER=</code>), and it
+needs Node, curl and jq; it also creates the collections of
+<code>schema.fenecql</code>. The scripts are in
+<a href="https://github.com/fenecdb/fenecdb/tree/main/examples/recipes">examples/recipes</a>:</p>
+
+<pre data-lang="text">alice writes a note                        {"affected":1} [200]
+alice writes a note as bob                 {"error":"the document is outside what this token may write to `notes`"} [403]
+bob writes a note                          {"affected":1} [200]
+alice reads notes                          [{"owner":"alice","title":"buy oat milk"}] [200]
+bob reads notes                            [{"owner":"bob","title":"call the dentist"}] [200]
+the admin reads notes                      [{"owner":"alice","title":"buy oat milk"},{"owner":"bob","title":"call the dentist"}] [200]
+the admin deletes a note                   {"affected":0} [200]
+everyone reads profiles                    [{"id":1,"owner":null,"name":"Alice","email":null,"phone":null},{"id":2,"owner":"bob","name":"Bob","email":"bob@example.test","phone":"222"}] [200]
+bob renames alice                          {"affected":0} [200]
+bob changes his email                      {"error":"this token may not change `email` in `profiles`"} [403]
+bob changes his phone                      {"affected":1} [200]
+alice adds an audit line                   {"affected":1} [200]
+alice deletes it                           {"error":"`audit` is append-only: a scoped token inserts into it, and neither updates nor deletes its rows"} [403]
+a token that has lapsed                    {"error":"the token has expired"} [401]
+no token                                   {"error":"invalid or missing token"} [401]</pre>
+
+<ul>
+  <li><b>Rows.</b> Alice's <code>put</code> that leaves out <code>owner</code>
+    gets her <code>sub</code> in it; one naming bob is refused (403), as is
+    any row that stops matching the filter after the write.</li>
+  <li><b>An admin who only reads.</b> Carol reads every note. Her
+    <code>del</code> writes <code>{"affected":0}</code>, not an error: the
+    rows she may delete are none, because <code>for admin</code> grants
+    <code>read</code> alone.</li>
+  <li><b>Fields.</b> <code>profiles read(name)</code> shows every row's
+    <code>name</code> and <code>id</code>; the rest of a row is
+    <code>null</code> unless it is the reader's own. Bob changes his phone
+    and is refused his email, which <code>update(name, phone)</code> does not
+    list.</li>
+  <li><b>An audit trail.</b> Alice adds a line about herself and cannot take
+    it back, by any route, whatever her rules say.</li>
+  <li><b>Tokens that do not pass.</b> A lapsed one and none at all are 401,
+    and the body of the first says it has expired.</li>
+</ul>
+
+<p><code>GET /_whoami</code> shows what the server took a token for, rules and
+all:</p>
+
+<pre data-lang="json">{"node":"single","tenant":null,"read_only":false,"kind":"scoped","sub":"alice","tenants":null,"unbound":false,"append_only":["audit"],"rules":[{"collection":"notes","grants":["read","insert","update","delete"],"fields":null,"read_fields":null,"rows":"owner = $jwt.sub"},{"collection":"profiles","grants":["read"],"fields":null,"read_fields":["name"],"rows":null},{"collection":"profiles","grants":["read","update"],"fields":["name","phone"],"read_fields":null,"rows":"owner = $jwt.sub"},{"collection":"audit","grants":["read","insert"],"fields":null,"read_fields":null,"rows":"actor = $jwt.sub"}]}</pre>
+
+<h2 id="checks">What the server checks, and what it does not</h2>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th>What the server does</th></tr></thead>
+<tbody>
+<tr><td><b>Checked</b></td><td>The signature: RS256 against an <code>RSA</code> key of at least 2048 bits, HS256 against an <code>oct</code> key of at least 32 bytes. A key is used for its own algorithm alone, so a provider's public RSA key is never taken as an HMAC secret.</td></tr>
+<tr><td></td><td><code>kid</code>: a token that names one is checked against that key and no other. One that names none is tried against every key of its algorithm.</td></tr>
+<tr><td></td><td><code>exp</code>, which a token must have (401 otherwise; <code>--jwt-require-exp off</code> takes tokens without); <code>--jwt-max-age &lt;s&gt;</code> also refuses an <code>exp</code> further ahead than that. <code>nbf</code> too.</td></tr>
+<tr><td><b>Not checked</b></td><td><code>iss</code>, <code>aud</code>, <code>azp</code>, <code>client_id</code>, <code>token_use</code>: not read. Every token the keys sign is a token for this database. That is right when the provider's keys belong to one app, and wrong where they do not; <a href="#pin">Pin the audience</a> is the answer.</td></tr>
+<tr><td></td><td>Revocation. A token is good until its <code>exp</code> (<a href="#expiry">Expiry</a>).</td></tr>
+<tr><td><b>Not supported</b></td><td>A keys URL. <code>--jwt-keys</code> takes a path, read again when the file changes.</td></tr>
+<tr><td></td><td>ES256, EdDSA, PS256, RS384 and RS512. Such a token is 401, <code>only HS256 and RS256 tokens are accepted</code>. Keys of any other kind in a JWKS (<code>EC</code>, <code>OKP</code>) are skipped, and a file with no <code>RSA</code> or <code>oct</code> key is refused at the start.</td></tr>
+<tr><td></td><td>A claim by any name. <code>$jwt.&lt;name&gt;</code> takes letters, digits and <code>_</code>, from the top of the token. <code>cognito:groups</code>, <code>custom:tenant</code>, <code>https://example.com/role</code> and <code>app_metadata.role</code> have no name in a policy.</td></tr>
+<tr><td></td><td>A role under another name: the role of <code>for admin</code> is the claim called <code>role</code>, a text or a list holding it.</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The server reads the token from <code>Authorization: Bearer</code> and from
+no other header.</p>
+
+<details class="deep"><summary>Details</summary>
+<p>A rule whose filter names a claim the token lacks does not apply, so a
+missing claim narrows what a token may do, never widens it. A token that has
+been checked is kept by its text, up to 4 096 of them, and the kept ones are
+dropped whenever the keys change; <code>exp</code> and <code>nbf</code> are
+asked again on every request. A claim holding a list of more than 1 000
+values is refused (401). The whole story of rules and claims is in
+<a href="/docs/http-access">HTTP security and scoped access</a>.</p>
+</details>
+
+<h2 id="keys">Keys: the provider's JWKS, in a file kept fresh</h2>
+
+<p>Every provider publishes its public keys as a JWKS, a JSON document
+<code>{"keys": [...]}</code>. fenec-server reads one from a file. A job that
+fetches it every few minutes is the other half.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Provider</th><th>Keys</th><th>Signs with</th></tr></thead>
+<tbody>
+<tr><td><a href="https://clerk.com/docs/guides/sessions/manual-jwt-verification">Clerk</a></td><td><code>https://&lt;Frontend API URL&gt;/.well-known/jwks.json</code></td><td>RS256</td></tr>
+<tr><td><a href="https://auth0.com/docs/secure/tokens/json-web-tokens/json-web-key-sets">Auth0</a></td><td><code>https://&lt;your domain&gt;/.well-known/jwks.json</code></td><td>RS256 or HS256 per application; a JWKS publishes the RS256 keys</td></tr>
+<tr><td><a href="https://supabase.com/docs/guides/auth/signing-keys">Supabase Auth</a></td><td><code>https://&lt;project&gt;.supabase.co/auth/v1/.well-known/jwks.json</code></td><td>ES256, RS256 or HS256 per signing key. Create an <b>RSA 2048</b> one: an ES256 key is skipped, and the legacy HS256 secret is not in the JWKS</td></tr>
+<tr><td><a href="https://docs.aws.amazon.com/cognito/latest/developerguide/amazon-cognito-user-pools-using-tokens-verifying-a-jwt.html">Amazon Cognito</a></td><td><code>https://cognito-idp.&lt;region&gt;.amazonaws.com/&lt;userPoolId&gt;/.well-known/jwks.json</code></td><td>RS256, one key pair for access tokens and another for ID tokens, both in the JWKS</td></tr>
+<tr><td><a href="https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/">Cloudflare Access</a></td><td><code>https://&lt;team&gt;.cloudflareaccess.com/cdn-cgi/access/certs</code></td><td>RS256</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>How often a key changes, as each one's documentation says:</p>
+
+<ul>
+  <li><b>Auth0:</b> one key signs at a time, and the endpoint may hold several
+    during a rotation.</li>
+  <li><b>Supabase:</b> a standby key is rotated in and the old one revoked
+    once its tokens have expired. The edge caches the JWKS 10 minutes, and the
+    docs say to wait at least 20 minutes after creating a standby key or
+    revoking one.</li>
+  <li><b>Cognito:</b> keys "might rotate"; cache by <code>kid</code> and
+    refresh.</li>
+  <li><b>Cloudflare Access:</b> every 6 weeks, and the previous key stays valid
+    for 7 days.</li>
+  <li><b>Clerk:</b> not said on the pages read.</li>
+</ul>
+
+<p>The job below fetches the file beside the one in use and renames it over.
+The server looks at the file at most once a second and reads it again when
+its modification time has changed, so the rename is the rotation: no
+restart, and no half-written file to read. A fetch that fails, or that
+returns a page with no RSA key, leaves the file that works where it is.</p>
+
+<pre data-lang="bash" data-label="refresh-jwks.sh">#!/bin/sh
+# Keep the JWKS file fenec-server reads (--jwt-keys) as fresh as the provider's.
+# fenec-server fetches no URL itself: it reads this file, and again whenever
+# its modification time changes (at most once a second). Run this from cron or
+# a systemd timer every few minutes.
+#
+#   refresh-jwks.sh https://acme.us.auth0.com/.well-known/jwks.json /etc/fenec/jwks.json
+#
+# The new file is written beside the old one and renamed over it, so the server
+# never reads half of one, and only a file holding an RSA key replaces the one
+# in use: an error page, an empty body or a provider that went EC-only leaves
+# the keys that work where they are, and the job fails for whoever watches it.
+set -eu
+url=$1
+file=$2
+tmp=$(mktemp "$file.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+curl -fsS --max-time 10 "$url" -o "$tmp"
+jq -e '[.keys[]? | select(.kty == "RSA")] | length &gt; 0' "$tmp" &gt;/dev/null ||
+    { echo "refresh-jwks: $url holds no RSA key; $file left as it was" &gt;&amp;2; exit 1; }
+chmod 644 "$tmp"
+mv "$tmp" "$file"
+trap - EXIT</pre>
+
+<pre data-lang="bash"># crontab: every five minutes, well inside what any of the five asks
+*/5 * * * *  /usr/local/bin/refresh-jwks.sh https://acme.us.auth0.com/.well-known/jwks.json /etc/fenec/jwks.json
+
+fenec-server --file app.fenec --http 0.0.0.0:8080 --http-token "$ROOT" \
+    --jwt-keys /etc/fenec/jwks.json --policy policy.txt
+</pre>
+
+<p>A rotation as the server sees it, with the stand-in provider serving its
+JWKS over HTTP and a <code>kid</code> of <code>idp-2</code> signing after
+the rotation:</p>
+
+<pre data-lang="text">-- the provider rotates: a new key signs, and the server's file has not heard
+a token of the new key                     {"error":"no key has the token's kid"} [401]
+-- the refresh job fetches the provider's file; no restart
+the same token                             [{"title":"clerk note"}] [200]
+-- the job asks for a page that is not there one night
+curl: (22) The requested URL returned error: 404
+(the job failed, rc 22)
+the same token                             [{"title":"clerk note"}] [200]
+-- and a file that is no JWKS, written over the keys by hand
+the same token                             [{"title":"clerk note"}] [200]
+jwks.json: a JWKS file is {"keys": [...]}; the keys read before stay
+-- a provider that signs with EC keys
+an ES256 token                             {"error":"only HS256 and RS256 tokens are accepted"} [401]</pre>
+
+<ul>
+  <li><b>Behind a rotation</b> a token is 401 with <code>no key has the
+    token's kid</code> until the next fetch. Cloudflare's overlap of seven
+    days and Supabase's twenty minutes are both longer than a five-minute
+    job.</li>
+  <li><b>A fetch that fails</b> (the 404 above, a provider that is down)
+    makes the job exit non-zero and touches nothing; the keys read last stay
+    in use.</li>
+  <li><b>A file that no longer reads</b> (written over by hand above) is
+    logged, <code>the keys read before stay</code>, and the server goes on
+    with the keys it has. A file with no usable key is refused at the start:
+    <code>ec.json: no HS256 or RS256 key in the JWKS file</code>.</li>
+  <li><b>A token already checked</b> is dropped from the server's memory
+    when the keys change, so a key taken out takes its tokens with it.</li>
+  <li><b>Cloudflare Access</b> answers with <code>keys</code> and, beside
+    them, <code>public_cert</code> and <code>public_certs</code> in PEM. A
+    file of that shape loads (tried here with a stand-in, not with
+    Cloudflare's endpoint), and the job's filter looks at <code>keys</code>
+    alone.</li>
+</ul>
+
+<h2 id="claims">What each provider's token carries</h2>
+
+<p>The claim shapes below are taken from each provider's documentation and
+carried by the stand-in (<code>examples/recipes/idp.mjs</code>). For each: who
+the user is, where a role or a tenant can come from, and what a policy cannot
+reach.</p>
+
+<h3 id="clerk">Clerk</h3>
+<ul>
+  <li><b><code>sub</code></b> is the user id, <code>user_…</code>
+    (<a href="https://clerk.com/docs/guides/sessions/session-tokens">session token</a>).</li>
+  <li><b>A role, a tenant:</b> add <code>role</code> and <code>tenant</code> as claims
+    of the <a href="https://clerk.com/docs/guides/sessions/customize-session-tokens">session
+    token</a> (Dashboard, Sessions, Customize session token; shortcodes such as
+    <code>{{user.public_metadata.role}}</code>). Up to 1.2 KB of custom claims fit the cookie.</li>
+  <li><b>Out of reach:</b> the active organization's role is <code>o.rol</code>, nested.
+    A <a href="https://clerk.com/docs/guides/sessions/jwt-templates">JWT template</a> lives
+    60 seconds unless set otherwise.</li>
+</ul>
+
+<h3 id="auth0">Auth0</h3>
+<ul>
+  <li><b><code>sub</code></b> is the connection's name, a bar and the id:
+    <code>auth0|…</code>, <code>facebook|…</code>
+    (<a href="https://auth0.com/docs/manage-users/user-accounts/identify-users">docs</a>).</li>
+  <li><b>A role, a tenant:</b> an access token for an API carries RBAC
+    <code>permissions</code> as a list
+    (<a href="https://auth0.com/docs/get-started/apis/enable-role-based-access-control-for-apis">docs</a>),
+    which a rule tests: <code>'read:notes' in $jwt.permissions</code>. A login to an
+    Organization carries <code>org_id</code>
+    (<a href="https://auth0.com/docs/manage-users/organizations/using-tokens">docs</a>):
+    <code>--jwt-tenant-claim org_id</code>.</li>
+  <li><b>Out of reach:</b> custom claims in an access token for an API must be
+    namespaced URLs (<a href="https://auth0.com/docs/secure/tokens/json-web-tokens/create-custom-claims">docs</a>):
+    such a token "cannot have private, non-namespaced custom claims".
+    <code>https://example.com/role</code> has no name in a policy, so a role set that way
+    is out of reach.</li>
+</ul>
+
+<h3 id="supabase">Supabase Auth</h3>
+<ul>
+  <li><b><code>sub</code></b> is the user's id
+    (<a href="https://supabase.com/docs/guides/auth/jwt-fields">claims</a>).</li>
+  <li><b>A role:</b> <code>role</code> is <code>authenticated</code> for every signed-in
+    user (<code>anon</code> and <code>service_role</code> are the others), so <code>for
+    authenticated</code> admits every signed-in user and cannot single out an admin.</li>
+  <li><b>Out of reach:</b> <code>app_metadata</code> and <code>user_metadata</code> are
+    objects, so a role kept there has no name. Keep admins as rows
+    (<a href="#rows">below</a>).</li>
+</ul>
+
+<h3 id="cognito">Amazon Cognito</h3>
+<ul>
+  <li><b><code>sub</code></b> is the user's id. An access token has <code>client_id</code>
+    and no <code>aud</code>; an ID token has <code>aud</code>
+    (<a href="https://docs.aws.amazon.com/cognito/latest/developerguide/amazon-cognito-user-pools-using-tokens-verifying-a-jwt.html">docs</a>).</li>
+  <li><b>A role, a tenant:</b> add a plain claim (<code>role</code>, <code>tenant</code>) with a
+    <a href="https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-lambda-pre-token-generation.html">pre
+    token generation trigger</a>: version 1 for the ID token, 2 or 3 for access tokens, which
+    needs the Essentials or Plus plan. The trigger may add any claim not in the pool's token
+    schema.</li>
+  <li><b>Out of reach:</b> <code>cognito:groups</code> and <code>custom:…</code> attributes: a
+    colon is not part of a name.</li>
+</ul>
+
+<h3 id="access">Cloudflare Access</h3>
+<ul>
+  <li><b><code>sub</code></b> is the user's id, unique to an email address per account;
+    <code>email</code> is a claim too
+    (<a href="https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/application-token/">docs</a>).</li>
+  <li><b>A role:</b> none of its own. Rows (<a href="#rows">below</a>), or the email.</li>
+  <li><b>Out of reach:</b> the token reaches the origin in <code>Cf-Access-Jwt-Assertion</code>,
+    and fenec-server reads <code>Authorization: Bearer</code> alone: a Worker or proxy in front
+    moves it. <code>aud</code> is a list holding the application's tag, and a team's
+    applications are signed with the same keys: <a href="#pin">pin it</a>.</li>
+</ul>
+
+<p>The user's <code>sub</code> is what <code>owner = $jwt.sub</code> compares
+with, so a row's owner holds it exactly as the provider writes it. The same
+stand-in alice is five different people to five providers; a note written for
+each one's <code>sub</code> and read back with that one's token:</p>
+
+<pre data-lang="text">clerk: sub user_2xYzAbc                    [{"owner":"user_2xYzAbc","title":"clerk note"}] [200]
+auth0: sub auth0|0123456789                [{"owner":"auth0|0123456789","title":"auth0 note"}] [200]
+supabase: sub 7c9e6679-7425-40de-944b-e07fc1f90ae7 [{"owner":"7c9e6679-7425-40de-944b-e07fc1f90ae7","title":"supabase note"}] [200]
+cognito: sub a1b2c3d4-5678-90ab-cdef-111111111111 [{"owner":"a1b2c3d4-5678-90ab-cdef-111111111111","title":"cognito note"}] [200]
+access: sub 3d9a0f0e-5c1b-4a3e-8f61-2b7d9c4e1a55 [{"owner":"3d9a0f0e-5c1b-4a3e-8f61-2b7d9c4e1a55","title":"access note"}] [200]</pre>
+
+<p>When the claims a provider offers do not fit, there is a last way round
+that needs nothing from it: the app verifies the provider's token with the
+provider's own SDK and signs one of its own, short, with the
+<code>role</code> and <code>tenant</code> the policy reads
+(<a href="https://github.com/fenecdb/fenecdb/tree/main/examples/saas">examples/saas</a>
+does that, with RS256 and its own keys file).</p>
+
+<h2 id="rows">Rules that name a claim's value</h2>
+
+<p>A rule is a filter over a row, and a filter may hold a claim on its own
+side of a comparison. That reads what <code>for &lt;role&gt;</code> cannot, and
+it fails closed: a token without the claim does not meet the rule.</p>
+
+<pre data-lang="text" data-label="policy-claims.txt"># Rules that name a claim's value, for what the policy cannot name as a role.
+# (policy.txt's `for admin` reads the claim `role`; a claim the provider
+# names `cognito:groups` or `https://example.test/role` has no name here.)
+
+# Cloudflare Access signs every application of a team with the same keys, so
+# a token for another application would verify: pin the audience, a list.
+notes         read                        where owner = $jwt.sub and '32eafc7626e974616deaf0dc3ba5c0a0eb5f4d2d1e3b8f0a6c1a2e7d9a4b5c6d' in $jwt.aud
+
+# Auth0's `permissions` is a list claim, which a rule can test.
+notes         read                        where 'read:notes' in $jwt.permissions
+
+# Whatever the provider sends: staff are rows, and a rule asks for them.
+staff         read                        where user = $jwt.sub
+notes         read                        where $jwt.sub in (get staff select user)
+
+profiles      read(name)
+audit         read,insert                 where actor = $jwt.sub</pre>
+
+<pre data-lang="text">access token for this app, alice           [{"owner":"alice","title":"alice note"}] [200]
+access token for another app, alice        [] [200]
+auth0 token holding read:notes             [{"owner":"alice","title":"alice note"},{"owner":"bob","title":"bob note"}] [200]
+auth0 token without it                     [] [200]
+dana, a row of staff                       [{"owner":"alice","title":"alice note"},{"owner":"bob","title":"bob note"}] [200]
+frank, not in staff                        [] [200]</pre>
+
+<ul>
+  <li id="pin"><b>Pin the audience.</b> The first rule asks the token's
+    <code>aud</code> to hold this application's tag, as Cloudflare asks any
+    verifier to; a token for another application on the same team verifies
+    and reads nothing. Without the pin the keys are the only thing that tells
+    applications apart. The same works with Cognito's access token, whose
+    claim is <code>client_id</code>: <code>$jwt.client_id = 'app-1'</code>.
+    It must be in every rule that grants the token anything: a rule without
+    it is a rule for tokens of any application.</li>
+  <li><b>A list claim is a test.</b> <code>'read:notes' in
+    $jwt.permissions</code> is true or false for the whole token, and a rule
+    holding it grants what it grants to the tokens for which it is true.</li>
+  <li><b>Admins are rows.</b> The last rule asks a collection, and works with
+    any provider because it asks nothing of the token but <code>sub</code>.
+    <code>staff read where user = $jwt.sub</code> lets the inner
+    <code>get</code> see the token's own row and no one else's; a rule's
+    inner <code>get</code> reads what the token's own would
+    (<a href="/docs/http-access#scoped-access">Rules that read another
+    collection</a>).</li>
+</ul>
+
+<h2 id="expiry">Expiry</h2>
+
+<p>A token is good until its <code>exp</code> and the server asks no one
+whether it was revoked. Keep tokens short, and for a person to turn away
+sooner, make it a row and let every rule that grants them anything ask for
+it:</p>
+
+<pre data-lang="text" data-label="policy-ban.txt"># A token is good until its `exp`, and the server asks no one whether it was
+# revoked. A person to turn away sooner is a row, and every rule that grants
+# them anything asks for it: they read `banned` for their own row alone, so
+# the rule sees whether it is there.
+notes         read,write                  where owner = $jwt.sub and $jwt.sub not in (get banned select user)
+banned        read                        where user = $jwt.sub</pre>
+
+<pre data-lang="text">bob reads                                  [{"title":"bob note"}] [200]
+bob reads, banned, the same token          [] [200]
+bob writes, banned                         {"error":"the document is outside what this token may write to `notes`"} [403]
+alice reads                                [{"title":"alice note"}] [200]</pre>
+
+<ul>
+  <li><b>Short tokens are normal.</b> A Clerk JWT template lives 60 seconds
+    by default. <code>FenecHttp</code> holds the token it was made with, so an
+    app that gets a fresh one per request makes a client per token
+    (<code>connect</code> opens no connection), and one that keeps a client
+    makes a new one when its provider refreshes.</li>
+  <li><b>A stream ends at its token's <code>exp</code></b>, with <code>event:
+    error</code> and <code>{"error":"the token has expired","status":401}</code>:
+    the client fetches a fresh token and opens the stream again. A member
+    taken off a team stops hearing the team no later than that.</li>
+  <li><b><code>--jwt-max-age &lt;s&gt;</code></b> refuses a token whose
+    <code>exp</code> lies further ahead than that: set to 3600, a provider
+    configured for day-long tokens is refused, and the fix is at the provider,
+    where the lifetime is set.</li>
+  <li><b>The ban is read at every statement</b>, so it takes hold on the next
+    one, whatever the token's age. It is the same for a subscription: a
+    scoped one is bound again when the collection its rules read is
+    written.</li>
+</ul>
+
+<h2 id="tenants">One database a tenant</h2>
+
+<p>On a <code>--dir</code> node (<a href="/docs/sharding">Tenants and
+sharding</a>) a token reaches <code>/t/&lt;tenant&gt;/</code> only when its
+<code>tenant</code> claim names the tenant, as a text or a list holding it. The
+policy is the node's, not a tenant's: <code>owner = $jwt.sub</code> would
+match the same user in every tenant's file, so a token that names none is
+refused on such a node, unless it is started with
+<code>--jwt-unbound-tenants</code>. <code>--jwt-tenant-claim &lt;name&gt;</code>
+reads another claim than <code>tenant</code>: Auth0's <code>org_id</code>
+below, a claim you add to Clerk's session token or Cognito's.</p>
+
+<pre data-lang="text">-- the claim `tenant`, which Clerk's session token carries once customized
+alice, token for acme, asks acme               [{"title":"acme note"}] [200]
+alice, token for acme, asks globex             {"error":"this token is for another tenant"} [403]
+a token naming no tenant, asks acme            {"error":"this token names no tenant, and this node serves tenants"} [403]
+-- --jwt-tenant-claim org_id, which Auth0 puts in a token for an organization
+alice, token for org_acme, asks org_acme       [{"title":"org_acme note"}] [200]
+alice, token for org_acme, asks org_globex     {"error":"this token is for another tenant"} [403]
+a token naming no tenant, asks org_acme        {"error":"this token names no tenant, and this node serves tenants"} [403]</pre>
+
+<ul>
+  <li><b>The tenant check comes before the tenant is looked up</b>, so a
+    refused token learns nothing of which tenants exist. It holds on every
+    route under the prefix, streams and <code>/_changes</code> among them.</li>
+  <li><b>A tenant is the unit of isolation</b>; rows inside it are the
+    policy's. A person in two organisations carries both in a list.</li>
+</ul>
+
+<h2 id="unsupported">What a provider needs that the server lacks</h2>
+
+<p>A short list, so that none of it is found out in production:</p>
+
+<ul>
+  <li><b>Fetching a JWKS from a URL, and following its rotation by itself.</b>
+    The server reads a file; a cron job or a timer is the fetch
+    (<a href="#keys">Keys</a>).</li>
+  <li><b>ES256, EdDSA and the other signatures.</b> Supabase's and others'
+    EC keys are skipped. Choose RSA where the provider offers it.</li>
+  <li><b>Checking <code>iss</code> and <code>aud</code>.</b> A rule can pin
+    <code>aud</code> or <code>client_id</code> (<a href="#pin">Pin the
+    audience</a>); the issuer is the keys file's.</li>
+  <li><b>Claims by their provider's names</b> (<code>cognito:groups</code>,
+    namespaced URLs, nested objects). Add a plain claim at the provider, use
+    a list claim, or keep the fact in a collection.</li>
+  <li><b>Revocation before <code>exp</code></b>, other than a row a rule
+    asks (<a href="#expiry">Expiry</a>).</li>
+  <li><b>The token in a header other than <code>Authorization</code></b>
+    (Cloudflare Access's <code>Cf-Access-Jwt-Assertion</code>, a cookie).</li>
+</ul>
+
+<p>Next: <a href="/docs/files">files in S3 or R2</a> with the same tokens, and
+<a href="/docs/functions">functions and webhooks</a> for reacting to
+writes.</p>

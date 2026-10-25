@@ -1,0 +1,5 @@
+create collection notes (owner text @hash, title text, body text)
+create collection profiles (owner text @unique, name text, email text, phone text)
+create collection audit (actor text @hash, action text, at timestamp)
+create collection staff (user text @hash)
+create collection banned (user text @hash)
