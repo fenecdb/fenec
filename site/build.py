@@ -1321,6 +1321,24 @@ def check_router_flags():
                for f in listed if f not in flags])
 
 
+def check_fold_labels():
+    """The folds (`<details class="deep">`) whose summary only says "Details":
+    a reader cannot tell what such a line hides, so each says what is inside."""
+    problems = []
+    for dirpath, _, files in os.walk(os.path.join(ROOT, "content")):
+        for name in sorted(files):
+            if not name.endswith(".html"):
+                continue
+            path = os.path.join(dirpath, name)
+            text = open(path, encoding="utf-8").read()
+            for m in re.finditer(r"<summary>\s*(?:Method and )?details\s*</summary>", text, re.I):
+                line = text.count("\n", 0, m.start()) + 1
+                said = re.sub(r"</?summary>", "", m.group(0)).strip()
+                problems.append(f"{os.path.relpath(path, ROOT)}:{line}: a fold's summary says only "
+                                f"{said!r}, not what is inside")
+    return problems
+
+
 # The names benchmarks-ycsb.html#ycsb's full grid gives each system.
 YCSB_NAMES = {"fenec": "fenecdb", "sqlite": "SQLite", "server": "fenec-server",
               "server-docker": "fenec-server in Docker", "pg": "PostgreSQL", "mongo": "MongoDB",
@@ -2115,7 +2133,7 @@ def build():
 
     print(f"built {len(pages)} pages -> {os.path.relpath(OUT, REPO)}")
 
-    problems = check_claims() + check_router_flags()
+    problems = check_claims() + check_router_flags() + check_fold_labels()
     if problems:
         print("\n  the docs disagree with what was just built:")
         for p in problems:

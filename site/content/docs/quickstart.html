@@ -74,7 +74,7 @@ document.querySelector('#out').textContent =
   <code>npx serve</code>, nginx.</p>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Bundlers, no npm, and Node</summary>
 <p>Serving <code>node_modules</code> as it is suits a first page. With a bundler
 you import <code>@fenecdb/web</code> and hand <code>Fenec.open</code> the
 module's URL, and a page whose queries run on a server imports
@@ -322,7 +322,7 @@ Night at the oasis</pre>
   </li>
 </ol>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Other languages, and the REST routes</summary>
 <p>These are cut down from the programs on <a href="languages.html">Your
 language</a>, which also have the query builders, batches and typed errors.
 Run one twice and the third row is written twice, since a <code>put</code>
@@ -409,7 +409,7 @@ fenec&gt; .quit</pre>
   </li>
 </ol>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Shell flags and multi-line statements</summary>
 <pre data-lang="bash">./fenec notes.fenec                          # interactive
 ./fenec notes.fenec -c 'get notes limit 5'
 echo 'get notes' | ./fenec notes.fenec

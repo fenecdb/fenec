@@ -92,7 +92,7 @@ set jobs {owner: $1} where run_at &lt;= now() order run_at limit $2 returning *
     a page's size and place are a request's data.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How a limit or offset parameter is read</summary>
 <p>The statement keeps the parameter, so what reads a statement by its
 shape reads <code>limit $2</code> as a limit: <code>count</code> and an
 aggregate without <code>group</code> refuse <code>offset $1</code> as they
@@ -148,7 +148,7 @@ get ticks select px as price, bucket(at, 1m) as minute, greatest(px, $1) as floo
 get orders select id, case when total >= 100 then "large" else "small" end as size
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How a select expression is typed and named</summary>
 <p>The types are a <code>set</code>'s (<a href="fenecql-writing.html#writes">Writes that read
 the row</a>): two <code>int</code>s make an <code>int</code>, and one past
 64 bits is refused, never wrapped; a null is null. An expression is bound
@@ -227,7 +227,7 @@ rows: 20
     versions.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>A worked explain over a million events</summary>
 <p><code>explain</code> in front of a <code>get</code> runs the query and
 answers with the path it took instead of its rows: one row a step, in the
 order the steps ran, in a single <code>plan</code> column. The last row is

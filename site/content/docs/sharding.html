@@ -119,7 +119,7 @@ acme.fenec
     on a single database; a client only changes its base URL.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What splitting by tenant changes for a client</summary>
 <p>A single fenecdb is bounded by one machine's memory and one writer. Past
 that, the data is split by tenant: each tenant is a file of its own, a node
 holds many of them, and <code>fenec-shard</code> knows which node holds

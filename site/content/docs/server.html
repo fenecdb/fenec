@@ -28,7 +28,7 @@ endpoint</a>, every route on <a href="/docs/http-reference">HTTP reference</a>,
 and each language's way of sending them on <a
 href="/docs/languages">Your language</a>.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>One writer process, and a thread a connection</summary>
 <p>One process writes one file. Two processes over the same file corrupt it,
 which is why everything a server does — HTTP, replication, the graph keeper,
 the sweeper of rows past their time (<a href="/docs/fenecql-indexes#ttl"><code>@ttl</code></a>),
@@ -130,7 +130,7 @@ they may read and write.</p>
   Caddy, nginx or a load balancer in front.</p>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Tokens, JWTs and the audit log</summary>
 <p><code>--http-token</code> is the server's own token: whoever sends it reads
 and writes everything. The comparison is constant time. Listening on a
 non-loopback address with no token is refused outright; it can be opened
@@ -200,7 +200,7 @@ audit log</a>).</p>
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What each --sync policy costs</summary>
 <p>Writes accumulate in a 1 MB buffer. Under <code>always</code> every write
 waits for an <code>fsync</code>, about 3.7 ms on macOS for a write alone, and
 writes arriving together share one; <code>250</code> costs next to nothing;
@@ -286,7 +286,7 @@ port opens as soon as before, and the first search finds its index built.
 <code>--warm products,orders.status</code> names the collections and fields
 to warm, <code>--warm off</code> none.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How warm-up builds indexes beside reads, measured</summary>
 <p>Each index is built under the read lock on its own, so reads go on beside
 it, a read that needs the index being built waits for that build rather than
 starting its own, and a write waits out one index at most (a
@@ -334,7 +334,7 @@ place.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Why a file compacts itself, and what it costs</summary>
 <p>Left alone, a file of updated rows grows by a record a write, and its live
 records end up a few to a page among dead ones: under YCSB's updates, a
 million records of 1 KB took the file to 4.7 to 6.5 GB on an 8 GB machine,
@@ -433,7 +433,7 @@ file before and after and how long it held the lock.</p>
 
 <pre data-lang="bash">fenec-server --ping --http 127.0.0.1:8080   # exits 0 when the server is up</pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Connection ceilings and health checks</summary>
 <p>One thread per connection means unlimited connections would leave the stack
 memory ceiling to the client. Past <code>--max-connections</code> a client
 gets 503; <code>--idle-timeout</code> closes a quiet connection. A
@@ -489,7 +489,7 @@ other monitoring systems</a>.</p>
     file is dropped.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How the image is built; memory and restarts</summary>
 <p>The <code>Dockerfile</code> is two-stage: a static musl build copied into
 <code>scratch</code>. There are no dependencies and the binary runs its own
 health check (<code>--ping</code>), so the runtime image holds nothing but the

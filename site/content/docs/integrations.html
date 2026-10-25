@@ -36,7 +36,7 @@ retriever = store.as_retriever(search_kwargs={"k": 8})
     <code>mode="text"</code> or <code>"hybrid"</code>.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How the LangChain store maps documents and filters</summary>
 <p>A document is a row: its id, its text, its metadata as JSON and its vector
 under <code>@hnsw</code>, in a collection created on the first write, once the
 embedding's size is known. Adding an id that is already there replaces it —
@@ -98,7 +98,7 @@ await store.similaritySearch('how do I compact', 4, { source: 'handbook' });
 await store.search('compact', 4, { mode: 'hybrid' });
 const retriever = store.asRetriever({ k: 4 });</pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>The JavaScript store: client, filters and search modes</summary>
 <p>The Python store's collection, from JavaScript: a document is a row of
 its id, text, metadata as JSON and vector under <code>@hnsw</code>, made on
 the first write; <code>metadataFields</code> get columns of their own under
@@ -136,7 +136,7 @@ index.as_retriever(similarity_top_k=4).retrieve("how do I compact")
     <code>vector_store_query_mode="hybrid"</code>.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How nodes, filters and deletes map</summary>
 <p>A node is a row with its document's id beside it, so
 <code>index.delete_ref_doc(...)</code> is one <code>del</code> over a hashed
 field. Filters take <code>==</code>, <code>!=</code>, <code>&lt;</code>,
@@ -182,7 +182,7 @@ const { text } = await generateText({
   prompt: 'How do I compact the database?',
 });</pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>The three functions in rag.js</summary>
 <p>The AI SDK has no vector store interface to implement — it has embedding
 models and <code>tool</code> — so the integration is a file of three
 functions to copy, <code>integrations/ai-sdk/rag.js</code>:
@@ -243,7 +243,7 @@ function Open() {
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How the hooks run a query again</summary>
 <p>Over a replica or a database in the page the rows come from the page, so
 no render waits on the network: <code>live</code> runs the query again after
 every write it may read — a write of this tab's, or one the server streamed
@@ -299,7 +299,7 @@ dotnet add package FenecDb</pre>
 language</a>, and the API in <code>integrations/go</code> and
 <code>integrations/dotnet</code>.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>One float's text, subscriptions and timeouts</summary>
 <p>The server reads a number as a double and rounds it to a float, and one
 float, <code>7.038531e-26</code>, has a shortest text whose double lands
 exactly between it and the float above: Go's <code>encoding/json</code>
@@ -363,7 +363,7 @@ holds its integrations to, against a real fenecdb.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>The graph bug LangChain's suite found</summary>
 <p>LangChain's suite writes the same documents twice under the same ids, and
 that is how it found a bug in the graph: a node whose every candidate
 neighbour had been deleted was linked to nothing, so a collection deleted and

@@ -43,7 +43,7 @@ POST   /_schema/apply           body: a description -- migrations, then what onl
 POST   /mcp                     MCP for agents (--mcp): one JSON-RPC message a request
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>The special routes: _replication, _schema, _metrics</summary>
 <p>With <code>--replication-token</code>, <code>/_replication</code> is taken
 as well: the stream a replica is fed, its status, and a replica's promotion —
 see <a href="/docs/replication">Replication</a>. It asks for that token
@@ -100,7 +100,7 @@ collection called <code>_metrics</code> cannot be read over
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How a filter value is typed</summary>
 <p>Values are parsed by the field's type: <code>?year=gte.2024</code> is an
 int, <code>?published=gte.2024-01-01</code> is a timestamp. An unknown field
 returns 404. <code>where=</code> exists for what the pattern cannot hold —
@@ -130,7 +130,7 @@ returns 404. <code>where=</code> exists for what the pattern cannot hold —
     <code>where</code>.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Why near is a POST</summary>
 <p><code>near</code> is a <code>POST</code> rather than a query parameter
 because a 768-dimension embedding does not fit in a query string. Squeezing it
 into the URL — base64, truncation — is unreadable and runs into proxy and
@@ -196,7 +196,7 @@ each row, such as each product's latest reviews.</p>
     <code>/orders?select=courier,count(*)&amp;group=courier&amp;lookup=couriers&amp;couriers.on=user&amp;couriers.parent=courier</code>.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How lookup parameters are prefixed</summary>
 <p><code>lookup=&lt;name&gt;</code> names the collection once; every key prefixed
 with it configures the clause — <code>on</code> (required, the child's field
 holding the key), <code>parent</code>, <code>select</code>,
@@ -288,7 +288,7 @@ caught up with its primary yet answers it <code>503</code>.</p>
 limit are refused with <code>507</code>. Reads, deletes and
 <code>compact</code> still work.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What --max-memory refuses and allows</summary>
 <p>Inside <code>fenec-server</code> started with <code>--max-memory</code>, the
 listener holds its writes to that ceiling: above
 it, a statement that grows the data — a put, a patch, a <code>create
@@ -408,7 +408,7 @@ the rows matching your filter, then each change to them as it happens.</p>
     stream.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Why a subscription does not poll</summary>
 <p><code>GET /&lt;name&gt;/changes</code> is a server-sent events stream: a seed
 carrying the current shape, then incremental diffs. No driver needed.</p>
 
@@ -488,7 +488,7 @@ curl -si http://127.0.0.1:8080/query -H 'If-None-Match: "48211"' -d '...the same
     had taken.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How a 304 is decided, and timed</summary>
 <p>Whether a collection was written since a tag is the change ring's answer
 (<code>Database::changed_collections_since</code>): a tag older than the ring
 reaches, or a collection dropped since, counts as a change and the query runs.
@@ -538,7 +538,7 @@ curl -i 'http://127.0.0.1:8080/_changes?since=0&amp;limit=1000&amp;wait=10000'
     server's disk comes on a later page.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How /_changes pages through writes, and what it costs</summary>
 <p>A subscription keeps a query's rows up to date, and a client that falls
 behind its ring of ids is sent the rows again. A service that must see every
 write — to index it elsewhere, send it on to Kafka, or keep a read model —
@@ -610,7 +610,7 @@ curl -X POST http://127.0.0.1:8080/_changes/consumers/search-index -d '{"since":
     those writes come again.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How a stored consumer cursor works</summary>
 <p>A consumer that keeps no state of its own can have the server keep where
 it is, as a Kafka consumer group keeps its committed offset. Made with a
 <code>POST</code> — at the last write on disk unless the body names a

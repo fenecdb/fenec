@@ -26,7 +26,7 @@ reads.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How the bindings share one library</summary>
 <p>Each binding calls the same native library, <code>crates/fenec-ffi</code>:
 the engine built for the device, behind a C ABI of a few functions --
 open, query, the change notice, sync, flush, checkpoint, close. A statement
@@ -249,7 +249,7 @@ text of several statements -- run it once, a frame after the last of them
 lands. A write to another collection runs nothing, and a text that fails
 is put back whole and runs nothing either.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How a live query re-runs</summary>
 <p>The engine keeps a ring of the writes it landed, and
 <code>fenec_changes(since)</code> names the collections written since a
 cursor -- or answers "everything" when the cursor fell behind the ring or a
@@ -346,7 +346,7 @@ static and instance member of one name.</p>
 from before), how many writes the server has not answered, and the last
 error.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How the sync core and the bindings divide the work</summary>
 <p>What to ask, what an answer means and what is written are one state
 machine in Rust (<code>fenec_abi::sync</code>), with no network of its own:
 a binding feeds it what happened -- a request's answer, a stream's bytes, a
@@ -431,7 +431,7 @@ a server on the machine at plain <code>http://</code> once allowed: iOS's
 <code>network_security_config</code> with <code>cleartextTrafficPermitted</code>
 for <code>10.0.2.2</code>.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Why a proxy can cut the change stream</summary>
 <p>The change stream is Server-Sent Events: a response that does not end.
 Caddy passes <code>text/event-stream</code> through as it comes; behind
 nginx, the server's <code>X-Accel-Buffering: no</code> does the same. A
@@ -453,7 +453,7 @@ As the app comes back, call <code>resume()</code> (on
 cursors, the waiting writes go first, and the live queries run again as the
 changes land.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What setOnline(false) and backoff do</summary>
 <p><code>setOnline(false)</code> as the app leaves the screen closes the
 streams at once rather than when the system cuts them, and spares the radio
 the keepalive. Backoff after a failure doubles from 250 ms to 15 s, with
@@ -562,7 +562,7 @@ keeps <code>&lt;name&gt;.lock</code> while it is open.</p>
     only when you run <code>compact</code>.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How the file is mapped and locked on a device</summary>
 <p>The file is mapped, as a server maps its own: the documents stay in it
 and the app holds only what it derived from them, the indexes and the
 graph. The mapping takes address space past the file's end -- a gigabyte at
@@ -602,7 +602,7 @@ with <code>noSync</code> calls <code>flush()</code> or <code>sync()</code>
 as it goes there -- <code>scenePhase</code> turning to
 <code>.background</code>, <code>onStop</code>, <code>AppLifecycleState.paused</code>.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What noSync and a refused write do</summary>
 <p>With <code>noSync</code> the buffer goes into the file once it holds
 64 KB, written by the call that filled it after it has let go of the
 database, as a server's buffered writes are: a read beside texts of 1 000
@@ -668,7 +668,7 @@ is the objects before the app's linker takes what it uses.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How the library was timed against the server's handler</summary>
 <p><code>make ffi-bench</code> makes the file through the library and
 opens it both ways: the library as an app opens it, the server's handler as
 <code>fenec-server</code> serves it, the request built in process with no
@@ -687,7 +687,7 @@ Every call returns a code -- 0, an error's kind, or the boundary's own:
 <code>FENEC_PANIC</code> -- and writes its answer or its error as
 NUL-terminated JSON, freed with <code>fenec_free_string</code>.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Handles, panics and JNI</summary>
 <p>A handle is a number, not a pointer: a handle used after its close finds
 nothing and is refused, where a pointer would reach freed memory, and a
 call holds its database for as long as it runs whatever closes meanwhile.

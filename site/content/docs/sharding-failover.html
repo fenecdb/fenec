@@ -27,7 +27,7 @@ curl -X PUT localhost:8090/_shard/nodes/n1 \
     loses no write.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How a standby follows every tenant</summary>
 <p>Every tenant file has a feed of its own, so a node's tenants are followed
 by another node's — the standby — tenant by tenant, through
 <code>/t/&lt;tenant&gt;/_replication</code>.</p>
@@ -128,7 +128,7 @@ curl -X PUT localhost:8090/_shard/tenants/acme -d '{"node":"n1"}'
     <code>fenec_router_files_left</code> counts it.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How --replicas places a copy for each tenant</summary>
 <p>A standby waits idle, and takes every tenant of its node at once when the
 node goes. With <code>--replicas</code> the router gives each tenant a
 replica of its own instead, on another node in no pair: the one holding the
@@ -249,7 +249,7 @@ fenec-shard --listen 127.0.0.1:8091 --directory standby.fenec --replication-toke
     standby.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How a standby router follows the directory</summary>
 <p>The directory is a fenecdb file, so it replicates the way any other does.
 A second router follows it and forwards from the same placements; the
 primary is the one that changes it.</p>

@@ -53,7 +53,7 @@ and pinned, over two runs.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Method and details</summary>
+<details class="deep"><summary>Method, and what each writer result means</summary>
 <p>fenecdb and SQLite both take one writer at a time. What that costs when
 many want to write, and what readers wait meanwhile, measured in one process:
 fenecdb's threads share one database behind a lock, as <code>fenec-server</code>
@@ -170,7 +170,7 @@ server's work.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Method and details</summary>
+<details class="deep"><summary>Method, and why the round trip is mostly loopback</summary>
 <p>What one request costs a client of <code>fenec-server</code>, on loopback: a
 row by id, a filter with a limit, a <code>near</code> for the top ten and a
 put, over 10 000 rows of 128 dimensions, asked by one client at a time — the
@@ -281,7 +281,7 @@ at 56 232; with an HNSW index kept up to date as they land, at about
     as fast as an array.</li>
 </ul>
 
-<details class="deep"><summary>Method and details</summary>
+<details class="deep"><summary>Method, and where the load time goes</summary>
 <p>What loading 100 000 rows of a text, an int and a 128-dim vector costs,
 each way a client can send them, into an empty collection: with the
 vector's HNSW graph kept as the rows land, and with no vector index.

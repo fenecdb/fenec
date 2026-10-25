@@ -34,7 +34,7 @@ curl -X POST replica:8081/_replication/promote -H "Authorization: Bearer $REPL"
     had not yet put on disk.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What a replica is and answers</summary>
 <p>A primary sends its replicas the writes that have reached its disk, and
 each applies them to a file of its own and serves reads from it.</p>
 
@@ -57,7 +57,7 @@ its own file. Only writes already on the primary's disk are sent.</p>
     replication token.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How records are sent and caught up</summary>
 <p>A fenecdb file is already a log: an image, then every write appended as a
 record. A replica is sent those records, whole and in order, and applies each
 the way the write path made it — the document, and the upkeep of every index
@@ -99,7 +99,7 @@ through; otherwise it is sent a fresh copy.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Positions, histories and forks</summary>
 <p>Every write moves the change counter by one, on the primary and on each
 replica alike, so a replica's position is its own counter and a subscriber's
 cursor means the same change on either. A block — the writes of one statement,
@@ -157,7 +157,7 @@ curl -H 'Fenec-After: 1042' -X POST http://replica:8080/query \
     <code>client.seq</code>, sent with <code>query(..., after=...)</code>.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How Fenec-Seq and Fenec-After work</summary>
 <p>A replica is behind its primary by the time a write takes to reach it —
 0.04 ms at the median under <code>--sync always</code>, up to the sync
 interval otherwise — so a client that writes on the primary and reads on a
@@ -203,7 +203,7 @@ HTTP listener, or restart it over its file with <code>--promote</code> in
 place of <code>--replica-of</code>. Keeping the old primary from taking more
 writes is up to you.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What promotion forks, and the old primary's part</summary>
 <p>Either way forks the history where the replica stands and turns writes on.
 A replica's file does not open any other way — started with neither flag,
 <code>fenec-server</code> refuses and says which to give — because a replica
@@ -232,7 +232,7 @@ loses up to the last 250 ms of writes.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How the loss was measured, per policy</summary>
 <p>How it was measured: a primary killed with <code>SIGKILL</code> while one
 client writes to it as fast as it answers, the replica promoted half a second
 later, ten times per policy; counted are the writes the client was told
@@ -270,7 +270,7 @@ replica keeps up with a bulk load.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Lag and bulk load, measured</summary>
 <p>How it was measured: primary and replica in one process over loopback, each
 over its own file; lag is from a write's answer on the primary to the write
 being readable on the replica, over 1 000 writes.</p>
@@ -318,7 +318,7 @@ fenec restore /backups/archive before.fenec --to-change 41873
     restore.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How a restore to a moment works</summary>
 <p>The same stream written to a directory instead of applied is an archive:
 base images, and every write after them with the time the primary appended
 it. The <code>fenec</code> command line writes and reads one.</p>
@@ -411,7 +411,7 @@ fenec-server --dir /data/n1 --replication-token "$REPL" ...
     replica does.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How one stream archives every tenant</summary>
 <p>A tenant's own stream (<code>/t/&lt;tenant&gt;/_replication</code>) is a
 connection and a thread on the node for as long as it runs, one of
 <code>--max-connections</code>, and it holds its tenant open the while.
@@ -572,7 +572,7 @@ aws s3 sync /backups/archive s3://backups/archive --delete
 rclone sync r2:backups/archive ./archive && fenec verify ./archive
 fenec restore ./archive before.fenec --to 2026-09-22T10:14:59Z</pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How a bucket copy stays consistent</summary>
 <p>fenecdb speaks no TLS, and S3, R2 and GCS speak only HTTPS, so an
 archive goes there the way any directory does: a sync tool beside the
 archiver.</p>
@@ -604,7 +604,7 @@ fenec restore /backups/archive before.fenec --to 2026-09-22T10:14:59Z \
 fenec backup http://primary:8080 today.sealed --key-file /secrets/archive.key
 fenec restore today.sealed today.fenec --key-file /secrets/archive.key</pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How archives and backups are sealed</summary>
 <p>A copy in a bucket or on another disk is out of reach of the machine's
 disk encryption. With a key every file of an archive — its images, its
 segments, its history — and a backup file are sealed: encrypted and
@@ -638,7 +638,7 @@ POST /_replication/tenants                         on a --dir node: every tenant
                                                    over one stream (fenec archive --tenants)
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Which token the endpoints want, and the status</summary>
 <p>All of them want <code>Authorization: Bearer &lt;replication token&gt;</code>,
 not the <code>--http-token</code>: the token is for replicas and for whoever
 promotes them. The status of a replica names its primary and says whether it

@@ -45,7 +45,7 @@ opens faster.</p>
     when it opens; from the first vector query after it, it is ahead.</li>
 </ul>
 
-<details class="deep"><summary>Method and details</summary>
+<details class="deep"><summary>Method, and how to read the comparison</summary>
 <p>Same data, and the same index settings wherever there is an index. SQLite
 3.53 and PostgreSQL 17 with pgvector 0.8.6, on an Apple M-series, 100 000 rows
 × 128 dimensions with clustered embeddings. Every figure is the median of three
@@ -161,7 +161,7 @@ answers 14 to 24 times sooner.</p>
   <li><b>768-dim vectors</b>: 250 000 of them, in the table below.</li>
 </ul>
 
-<details class="deep"><summary>Method and details</summary>
+<details class="deep"><summary>Method, and the million-row figures</summary>
 <p>The <a href="#against-sqlite-and-pgvector">table above</a> measures
 fenecdb in process. Here one client program asks both servers the same
 questions: <code>fenec-server</code> through a kept-alive HTTP/1.1
@@ -269,7 +269,7 @@ true neighbours.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Method and details</summary>
+<details class="deep"><summary>Method, and what a saved graph gives back</summary>
 <p>Apple M-series, single thread, <code>--release</code>. 100 000 documents ×
 128 dimensions, clustered embedding distribution.</p>
 
@@ -309,7 +309,7 @@ they are measured.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Method and details</summary>
+<details class="deep"><summary>Method, and why a build outgrows the data</summary>
 <p>The same measurement at 1 000 000 × 128, one run, and the full vectors of
 <code>make quant-bench QUANT_ROWS=1000000</code> at 1 000 000 × 768, stored as
 <code>f16</code> and spread along 32 directions, as embeddings are:</p>
@@ -351,7 +351,7 @@ data.</p>
     ground truth.</li>
 </ul>
 
-<details class="deep"><summary>Method and details</summary>
+<details class="deep"><summary>Method, and build-side tuning</summary>
 <pre data-lang="bash">cargo run --release -p fenec-core --example bench -- 100000 128 --ef 200
 make sweep      # walks the trade-off on both distributions
 </pre>
@@ -409,7 +409,7 @@ single-threaded measurement:</p>
 </table>
 </div>
 
-<details class="deep"><summary>Method and details</summary>
+<details class="deep"><summary>The data and the command</summary>
 <p>Same data, 100 000 × 128, clustered. The trade is explained in
 <a href="concepts.html#half-precision">How it works</a>.</p>
 

@@ -74,7 +74,7 @@ const stop = db.live(db.from('docs').where('year', 2024), (rows) => console.log(
     <code>{ collections }</code>.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What each package bundles, in KB</summary>
 <p><code>@fenecdb/web/client</code> is <code>client.js</code>, which
 re-exports the builder (<code>builder.js</code>) and the HTTP client
 (<code>http.js</code>), the two modules <code>fenec.js</code> imports beside
@@ -253,7 +253,7 @@ await restore(db);     // read it back
     directory beside the module (<a href="#collation">below</a>).</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>The four files, and why run() is synchronous</summary>
 <p><code>web/fenec.js</code> is a dependency-free ES module: the
 WebAssembly glue, persistence and the sync layer, with the query builder
 and the HTTP client in the two modules it imports and re-exports. Copy four
@@ -291,7 +291,7 @@ const bytes = file.bytes();                        // what fenec and fenec-serve
     every write <code>run</code> answered.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How openFile works, with timings</summary>
 <p><code>openFile</code> keeps the database in a file of the origin private
 file system, byte for byte the file <code>fenec-server</code> keeps on disk:
 download it and <code>fenec notes.fenec</code> opens it, and a server's file
@@ -356,7 +356,7 @@ await persist(db, 'notes', { cryptoKey });   // the image and each chunk sealed
 await restore(db, 'notes', { cryptoKey });   // another key, or none, is refused
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What the seal covers, and what it costs</summary>
 <p>With a <code>cryptoKey</code> (AES-GCM, from WebCrypto) the image and
 every chunk are sealed before they reach IndexedDB, each with a random nonce
 and a tag over the key it is stored under and its place. A chunk moved,
@@ -470,7 +470,7 @@ example: its database opens in the page or as a replica by one line of
     <code>{ onError }</code>, or <code>db.onError</code>.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How a live query learns what changed</summary>
 <p>The engine notes every write in its change ring, a collection id and a
 document id each, and <code>fenec_changes(since)</code> names the collections
 written since a cursor. A block's writes are noted as it lands, so a text of
@@ -562,7 +562,7 @@ const top = await db.from(products).select('name').lookup('reviews', { where: { 
     over.</li>
 </ul>
 
-<details class="deep"><summary>Details: declaring</summary>
+<details class="deep"><summary>Declaring columns, indexes and relations</summary>
 <p>A column builder takes no name: the key is the field's name. Columns are
 nullable unless <code>.notNull()</code>, FenecQL's <code>required</code>. A
 field takes one index, declared on the column (<code>.unique()</code>) or in
@@ -613,7 +613,7 @@ by a scan; a relation it cannot answer is refused as it is declared.
 <code>r.one</code> attaches the first child, still in a list.</p>
 </details>
 
-<details class="deep"><summary>Details: the check at an open</summary>
+<details class="deep"><summary>What the check does at an open</summary>
 <p>The engine compares, in the module or on the server, so every SDK applies
 and refuses the same things with the same words. What it does:</p>
 
@@ -659,7 +659,7 @@ messages, and FenecQL read into a schema. <code>make wasm SCHEMA=0</code>
 leaves it out.</p>
 </details>
 
-<details class="deep"><summary>Details: where it runs, and the description</summary>
+<details class="deep"><summary>Where the check runs, and the description</summary>
 <p>A database in the page (<code>Fenec.open</code>, <code>restore</code>,
 <code>openFile</code>) is the code's, and the check applies. A synced
 replica's schema is its server's: <code>sync({ schema })</code> compares
@@ -684,7 +684,7 @@ and refusals the engine makes of them, which the Rust tests run and every
 SDK will be held to.</p>
 </details>
 
-<details class="deep"><summary>Details: coming from Drizzle, and which way to choose</summary>
+<details class="deep"><summary>Coming from Drizzle, and which way to choose</summary>
 <p>One to one: a table function with columns and an array of indexes,
 column builders without a name, <code>.notNull()</code>,
 <code>.unique()</code>, <code>.array()</code>, <code>$type</code>,
@@ -744,7 +744,7 @@ await db.collation('all');                  // every script's: 145 KB, 67 KB gzi
     <code>FenecError</code> naming the chunks to load.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How collation data is loaded</summary>
 <p><code>collate und</code> and <code>collate tr</code> need the weights of
 the scripts they compare (<a href="fenecql-schema.html#collation">Collation</a>).
 The module carries the Latin ones and is handed the others as a page first
@@ -818,7 +818,7 @@ make wasm FEATURES=none SCHEMA=0       # no feature at all: 179 KB
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Which features a smaller module can leave out</summary>
 <p>The module carries five indexes and six more parts of the language, and
 a page that uses fewer can load one built without the rest:
 <code>FEATURES</code> names what it keeps, <code>indexes</code> and
@@ -871,7 +871,7 @@ extended with optional filters.</p>
   <li><b>No npm, no build step,</b> and no second schema definition.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Why a builder instead of strings or an ORM</summary>
 <p>FenecQL reads well, but on the application side the job is still building a
 string — and every interface with conditional filters ends up here:</p>
 
@@ -932,7 +932,7 @@ types take <code>'meta.lang'</code> as a path of it.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Details: lookup, or, not and raw</summary>
+<details class="deep"><summary>lookup, or, not and raw</summary>
 <p>Use whichever spelling reads better at the call site.</p>
 
 <p><code>lookup</code> hangs another collection's matching documents off each
@@ -1081,7 +1081,7 @@ async function search(words: string, brand: string | null = null) {
     with their <code>facets</code>, as <code>db.live</code> does.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Highlights, snippets and facets in the builder</summary>
 <p><code>.highlight(field, { pre, post })</code> answers the marked text
 instead of the offsets, and <code>.snippet(field, words, { ellipsis, pre,
 post })</code> a window of that many words around the marks — see <a
@@ -1130,7 +1130,7 @@ nothing; a query needs no call to it before it runs.</p>
     identifier rule; anything else throws.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How values and names stay out of the query text</summary>
 <p>Nothing is hidden. Every leaf value is bound to a parameter and text is
 never embedded into the query, which leaves a single injection boundary:
 <b>names</b>. Collection and field names cannot be parameterised, so they are
@@ -1168,7 +1168,7 @@ await q.bind(connect('http://localhost:8080')).rows();  // remote server
 q.toFenecQL();                                          // or just the text
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What connect() sends</summary>
 <p><code>connect()</code> returns the same builder; the FenecQL it produces
 goes to <code>POST /query</code> as is. See <a href="http.html">HTTP
 endpoint</a>.</p>
@@ -1204,7 +1204,7 @@ const products = await db.from('products')
 //    products[0].reviews[0].stars: number | null
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How types map, and what is generated</summary>
 <p>The schema is not written a second time — it is generated from the live
 file, so the two cannot drift apart. A schema declared in code is written a
 second time on purpose, and the check at every open is what keeps the two
@@ -1277,7 +1277,7 @@ easy to get wrong.</p>
     <code>in (get …)</code>, its parameters bound with the outer one's.</li>
 </ul>
 
-<details class="deep"><summary>Details: the tests</summary>
+<details class="deep"><summary>How the builder is tested</summary>
 <p>The Python, Go and .NET clients have the same builder, and
 <code>integrations/builder-golden.json</code> holds all four to one text: the
 chains there and what this builder makes of each, which every language's

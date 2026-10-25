@@ -123,7 +123,7 @@ and is alpha software.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Where the two differ: storage, search, vectors</summary>
 <p>Of the official build's browser storage, <code>opfs-sahpool</code>
 needs no COOP/COEP headers but "does not support multiple simultaneous
 connections to the same database"
@@ -208,7 +208,7 @@ its rows are read back and scored by fenecdb's own code.</p>
     alpha indexes; FTS5; and either in the browser.</li>
 </ul>
 
-<details class="deep"><summary>Method and details</summary>
+<details class="deep"><summary>Method for the YCSB, concurrency and 100 000-row runs</summary>
 <p>The numbers are <code>make ycsb</code>'s, <code>make
 concurrency-bench</code>'s and <code>make compare</code>'s, as <a
 href="benchmarks-ycsb.html#ycsb">Everyday reads and writes</a>, <a
@@ -255,7 +255,7 @@ the way a static file is served.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Method and details</summary>
+<details class="deep"><summary>Method, and what is left out of the sizes</summary>
 <p>Measured on 2026-10-02: fenecdb's module as <code>make wasm</code> builds
 it, and <code>dist/sqlite3.wasm</code> from the npm package
 <code>@sqlite.org/sqlite-wasm</code> 3.53.4-build2, each compressed with
@@ -306,7 +306,7 @@ WHERE embed MATCH ?1 AND k = 10 AND year >= 2024;
   limit 10
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What carries over from SQLite</summary>
 <p>The import reads the file format itself, and resolves untyped columns
 from the first 1 000 rows. A table with no equivalent type is refused until
 <code>--cast</code> says what to do (<a href="import.html#type-mapping">Type

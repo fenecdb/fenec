@@ -21,7 +21,7 @@ for stmt in parse("get docs near embed $1 limit 5")? {
 }
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What fenec-core depends on</summary>
 <p><code>fenec-core</code> is a plain Rust library with no dependencies.
 Parsing is <code>fenec-ql</code>; everything else is the engine.</p>
 </details>
@@ -45,7 +45,7 @@ match db.execute_block(&amp;block) {
   single-writer rule is yours to keep.</p>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How a block is begun, committed and put back</summary>
 <p><code>Database::query</code> takes a shared lock and
 <code>execute_with</code> the exclusive one. Every write is a block: what a
 statement writes lands in the file as one record, or — a hook's refusal, a
@@ -86,7 +86,7 @@ live, without reading a document.</p>
 <p>Call <code>sync</code> yourself: until you do, recent writes can be lost in
 a crash. The library never calls it for you.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What sync and a storage error do</summary>
 <p>File writes are buffered. If the process crashes before <code>sync</code> is
 called, the last writes are lost. In embedded use nothing calls it for you —
 <code>fenec-server</code> has the <code>--sync</code> policy and a shutdown hook
@@ -119,7 +119,7 @@ does. <code>Database::unlinked()</code> says how many are left.</p>
 <p><code>Database::memory_bytes()</code> tells you, for free, how much memory
 the engine's data takes. The process as a whole uses more.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What memory_bytes counts and leaves out</summary>
 <p><code>Database::memory_bytes()</code> sums the segment bytes, offset
 indexes, vector arenas, graph links and every other index from counters
 they keep as they change, so it costs nothing to ask. It is not RSS —
@@ -142,7 +142,7 @@ allocator slack, HNSW build buffers, upper-level neighbour allocations and the
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Why now() errors on wasm32</summary>
 <p><code>now()</code> errors on wasm32-unknown-unknown, which has no clock;
 time is passed in as a parameter there.</p>
 </details>
@@ -151,7 +151,7 @@ time is passed in as a parameter there.</p>
 
 <p>Every call returns the same error type, <code>Error</code>.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>The Error type and its HTTP statuses</summary>
 <p><code>Error</code> in <code>fenec-core/src/error.rs</code> is the single
 error type across the whole engine: allocation-free variants, no
 <code>Box</code>. <code>fenec-server</code> maps it onto HTTP statuses: 404
@@ -184,7 +184,7 @@ impl Plugin for MyPlugin {
 db.install_plugin(&amp;MyPlugin)?;   // get t select shout(name)
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How the plugin registry works</summary>
 <p>The registry takes after PostgreSQL's extension model. Scalar functions
 and write hooks in the shape of triggers can be registered; a plugin is
 installed once, and a second install of the same name is refused.
@@ -196,7 +196,7 @@ hook.</p>
 
 <p>Where each part of the engine lives in <code>fenec-core</code>.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>The modules and what each holds</summary>
 <div class="tbl">
 <table>
 <tbody>

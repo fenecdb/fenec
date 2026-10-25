@@ -332,6 +332,11 @@ map: the map is for the addresses outside it.
   reveals itself.
 - Every number needs its method nearby. The repo is careful about this and the
   site has to be too, or it stops being trustworthy.
+- What a page keeps for whoever wants it (a measurement, an internal, an edge
+  case) goes in `<details class="deep"><summary>…</summary>`, and the summary
+  says what is inside, in a few words: "Why 8 MiB segments", "How the lock is
+  taken", "Method, and where the load time goes". A bare "Details" is refused
+  by the build (`check_fold_labels`), since a reader cannot tell what it hides.
 
 ## The mark
 
