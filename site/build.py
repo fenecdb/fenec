@@ -69,9 +69,15 @@ def minify(body, ext):
 # is also why the file is as it is; Studio is Operate, an admin page the
 # server serves.
 NAV = [
+    # The Quickstart is one path, the server's, and no step of it stops to
+    # choose between installs: every way is on Install. The browser's path is
+    # beside it, not under Clients, since a reader who wants the database in a
+    # page would not look there to begin.
     ("Start", [
         ("docs/index", "Overview"),
         ("docs/quickstart", "Quickstart"),
+        ("docs/quickstart-browser", "Quickstart: in the browser"),
+        ("docs/install", "Install"),
     ]),
     ("Clients", [
         ("docs/languages", "Your language"),
@@ -79,6 +85,8 @@ NAV = [
         ("docs/mobile", "Mobile and native apps"),
         ("docs/http", "HTTP endpoint"),
         ("docs/embedding", "Embedded Rust"),
+        # A way to talk to a file, which the FenecQL tour is run in.
+        ("docs/shell", "The shell"),
         ("docs/integrations", "Integrations"),
         ("docs/mcp", "Agents and MCP"),
     ]),
@@ -167,8 +175,8 @@ NAV = [
         ("docs/benchmarks-vector", "Vector search benchmarks"),
         ("docs/benchmarks-size", "Size and memory benchmarks"),
     ]),
-    # Last, after the reader has what they came for: the Quickstart installs
-    # a release, and what is left for a clone is here.
+    # Last, after the reader has what they came for: Install installs a
+    # release, and what is left for a clone is here.
     ("Contribute", [
         ("docs/build", "Build from source"),
     ]),
@@ -232,7 +240,7 @@ KEYWORDS = {
     "ruby": """def end return if else elsif unless do require nil true false
         raise""".split(),
 }
-# A page whose script is the point of showing it (the Quickstart's): the
+# A page whose script is the point of showing it (the browser Quickstart's): the
 # tags are plain words and the script's words are JavaScript's.
 KEYWORDS["html"] = KEYWORDS["js"]
 
@@ -461,9 +469,9 @@ def first_example(name, body):
 def language_tabs():
     """The first example of each of Your language's tabs in `HTTP_TABS`, as
     the tabs of another page's `data-langs` box: the HTTP endpoint page's
-    examples are the languages page's, taken from it when the page is read,
-    so the two cannot say different things (`make languages-test` holds that
-    page's statements to the programs it runs)."""
+    and the Quickstart's examples are the languages page's, taken from it
+    when the page is read, so the three cannot say different things (`make
+    languages-test` holds that page's statements to the programs it runs)."""
     src = open(os.path.join(ROOT, "content", "docs", "languages.html"), encoding="utf-8").read()
     tabs = {name: body for name, body in LANG_TAB.findall(src)}
     unplaced = [n for n in tabs if n not in HTTP_TABS + EMBEDDED_TABS]

@@ -10,7 +10,7 @@
 # machine.
 # Last, docs_check.py holds the docs to these programs: the statements of
 # each tab on Your language are its program's, and the HTTP endpoint page's
-# curl tab is run as written.
+# curl tab and the Quickstart's curl steps are run as written.
 # Each language gets a server of its own over a new file, so every program
 # starts from an empty database and makes the same collection, on a port
 # the system picks: a run never meets another, or any other server, on one.
@@ -138,8 +138,8 @@ stop
 
 # The docs against these programs: the statements each HTTP tab of Your
 # language sends are the ones its program does, and the HTTP endpoint page's
-# curl tab is run as written, against a server with no token and a new file
-# (docs_check.py).
+# curl tab and the Quickstart's curl steps are run as written, against a
+# server with no token and a new file (docs_check.py).
 if command -v python3 >/dev/null 2>&1; then
     serve docs open
     python3 "$here/docs_check.py" "$local_url"

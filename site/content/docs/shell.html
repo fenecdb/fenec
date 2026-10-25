@@ -1,0 +1,132 @@
+<!--
+title: The shell — fenecdb
+description: fenec, the fenecdb shell: open a database file, run FenecQL a statement at a time, script it from a file or a pipe, and what the same program does besides: import, backup, types and MCP.
+-->
+
+<h1>The shell</h1>
+<p class="kicker">Open a database file and run FenecQL on it, one statement at
+a time. It is the quickest way to learn the language, and to look inside a file
+a server or an app keeps.</p>
+
+<h2 id="quickstart">Quickstart</h2>
+
+<p><code>fenec</code> comes beside <code>fenec-server</code> in every way of
+installing it (<a href="install.html">Install</a>), and the steps below need
+nothing else. Give it a file of its own: not one a server has open, since two
+processes writing one file would corrupt it.</p>
+
+<ol class="steps-doc">
+  <li>
+    <p>Open a file. It is made if there is none.</p>
+<pre data-lang="bash">fenec notes.fenec</pre>
+<pre data-lang="text" data-label="prints">fenecdb {{version}} — notes.fenec
+`.help` for help, `.quit` to exit</pre>
+  </li>
+  <li>
+    <p>At the prompt, make a collection, each field typed and the ones you
+    filter, order and search by indexed, and write two rows. A write ends at a
+    <code>;</code>.</p>
+<pre data-lang="text">fenec&gt; create collection notes (title text @text, year int @sorted)
+collection `notes` created
+fenec&gt; put notes [{title: "Dunes", year: 2021}, {title: "Night at the oasis", year: 2024}];
+2 records (30.00µs)</pre>
+  </li>
+  <li>
+    <p>Read them back by a filter and an order, then search the words, a typo
+    and all. The timings are yours.</p>
+<pre data-lang="text">fenec&gt; get notes where year &gt;= 2020 order year desc
+id  title               year
+--  ------------------  ----
+2   Night at the oasis  2024
+1   Dunes               2021
+(2 rows, 31.62µs)
+fenec&gt; get notes select title match title "oasys" fuzzy
+title               _score
+------------------  ------
+Night at the oasis  0.6224
+(1 rows, 37.46µs)
+fenec&gt; .quit</pre>
+  </li>
+</ol>
+
+<p>The file is the database: <code>fenec notes.fenec</code> opens it again with
+its rows, and <code>fenec-server --file notes.fenec</code> serves it once the
+shell has quit. <a href="fenecql.html">FenecQL</a> is a tour of the language
+in this shell, from a first write to a lookup and a total.</p>
+
+<h2 id="running">Running statements</h2>
+
+<pre data-lang="bash">fenec notes.fenec                          # interactive
+fenec notes.fenec -c 'get notes limit 5'   # one statement, then exit
+echo 'get notes' | fenec notes.fenec       # from a pipe
+fenec notes.fenec &lt; seed.fenecql           # a script</pre>
+
+<p>Inside the shell, a line that begins with a <code>.</code> is the shell's own:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Command</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><code>.help</code></td><td>the summary of FenecQL and of these commands</td></tr>
+<tr><td><code>.tables</code></td><td>the collections</td></tr>
+<tr><td><code>.stats</code></td><td>storage statistics</td></tr>
+<tr><td><code>.functions</code></td><td>the registered functions and plugins</td></tr>
+<tr><td><code>.save &lt;path&gt;</code></td><td>writes a snapshot of the database to a file</td></tr>
+<tr><td><code>.checkpoint</code></td><td>rewrites the file and saves the vector graphs in it, so the next open is fast</td></tr>
+<tr><td><code>.quit</code></td><td>exits</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2 id="statements-over-lines">Statements over several lines</h2>
+
+<p>A statement may run over several lines, and the shell runs it only once
+nothing after it can go on with it. Typed, a read or a schema change written on
+one line runs at Enter. A write, and a read written over several lines, wait
+for the next line: one that goes on with them — <code>where</code>,
+<code>order</code>, <code>and</code> — joins them, and an empty line or another
+statement runs them first. A <code>;</code> after a statement runs it at once.
+So <code>del notes</code> with <code>where id = 3</code> on the line under it
+deletes one row. A <code>.</code> command leaves a waiting statement waiting —
+<code>.tables</code> to look a name up before the <code>where</code> — and
+<code>.quit</code> leaves it unrun.</p>
+
+<p>Ending each write with a <code>;</code>, as the session above does, is the
+habit that behaves the same everywhere, including in releases up to 0.1.10:
+they run every line whose brackets close, so there <code>del notes</code>
+deletes every row before a <code>where</code> under it is refused.</p>
+
+<details class="deep"><summary>How a pipe, a paste and -c are read</summary>
+<p>Piped from a file, a statement runs once the next one begins, and a paste
+is read the same way, its lines all there at once — a <code>.</code> command in
+either waits behind the statement before it, and runs once that has.
+<code>-c</code> reads its text whole, as <code>POST /query</code> does, so a
+text that does not parse runs nothing. A line that begins no statement — a
+<code>where</code> after a read that already ran at Enter, a
+<code>wher</code> mistyped, a clause written past a <code>;</code> — is
+refused, and so is the statement before it, which it may have meant to go on
+with: <code>del notes; where id = 3</code> deletes nothing.</p>
+
+<p>A paste the terminal delivers in pieces further apart than 40 ms is read as
+typed lines, and a pasted statement whose last line has no newline yet waits
+for Enter like a typed one.</p>
+</details>
+
+<h2 id="more">What else the program does</h2>
+
+<p>The same <code>fenec</code> is the tool for a file or a server beyond the
+prompt. <code>fenec --help</code> lists each with its flags.</p>
+
+<ul>
+  <li><b><code>fenec import</code></b> copies a SQLite file or a PostgreSQL
+    table into a collection, and <code>--follow</code> keeps a PostgreSQL copy
+    up to date: <a href="import.html">Import</a>.</li>
+  <li><b><code>fenec backup</code>, <code>archive</code>, <code>restore</code>,
+    <code>prune</code> and <code>verify</code></b> take a running server whole,
+    keep its writes and rebuild it as it stood at a moment: <a
+    href="replication.html">Replication</a>.</li>
+  <li><b><code>fenec types</code></b> writes TypeScript, Python, Go or C# types
+    from a database file: <a href="javascript.html#typescript">TypeScript</a>.</li>
+  <li><b><code>fenec mcp</code></b> serves a file, or a server, to an agent
+    over stdio: <a href="mcp.html">Agents and MCP</a>.</li>
+</ul>

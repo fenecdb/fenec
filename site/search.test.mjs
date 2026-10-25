@@ -55,6 +55,12 @@ test('the index holds every page', () => {
     'benchmarks-size', 'http', 'http-reference', 'http-access']) {
     assert.ok(pages.has(`docs/${p}`), `no section of docs/${p}`);
   }
+  // docs/quickstart held three first runs and every way to install: the
+  // server's path is what it is now, the other two paths have a page each,
+  // and so has every way to install.
+  for (const p of ['quickstart', 'quickstart-browser', 'shell', 'install']) {
+    assert.ok(pages.has(`docs/${p}`), `no section of docs/${p}`);
+  }
 });
 
 test('a known query finds its page first', () => {
@@ -63,6 +69,10 @@ test('a known query finds its page first', () => {
   assert.equal(first('facet'), 'docs/fenecql-search#facets');
   assert.equal(first('highlight snippet'), 'docs/fenecql-search#highlights');
   assert.match(first('replica failover'), /^docs\/(replication|sharding(-failover)?)(#|$)/);
+  // What the Quickstart held before it was split.
+  assert.equal(first('homebrew'), 'docs/install#homebrew');
+  assert.equal(first('install script'), 'docs/install#install-script');
+  assert.equal(first('vite'), 'docs/quickstart-browser');
 });
 
 test('a word being typed finds the words it begins', () => {

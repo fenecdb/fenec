@@ -1,0 +1,165 @@
+<!--
+title: Install — fenecdb
+description: Every way to install fenecdb: the install script, Homebrew, a .deb or .rpm, a release tarball, the Docker image, the package for your language, or a build from source.
+-->
+
+<h1>Install</h1>
+<p class="kicker">fenecdb is two programs, <code>fenec-server</code> and the
+shell, <code>fenec</code>, and a package for each language that reaches the
+server. Pick the way that suits your machine.</p>
+
+<p>The commands here install release <b>{{version}}</b>, so what they print is
+what that release prints. The rest of these docs describe the repository's
+<code>main</code>, which can be ahead of the release: a flag or a statement they
+show that your install lacks is in the next one, and
+<code>fenec-server --help</code> lists what yours has.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Way</th><th>Gives you</th><th>On</th></tr></thead>
+<tbody>
+<tr><td><a href="#install-script">The install script</a></td><td><code>fenec-server</code> and <code>fenec</code>, in your home directory, no <code>sudo</code></td><td>macOS and Linux, arm64 and x86_64</td></tr>
+<tr><td><a href="#homebrew">Homebrew</a></td><td>the same two, kept up to date by <code>brew</code></td><td>macOS and Linux, arm64 and x86_64</td></tr>
+<tr><td><a href="#debian-and-fedora">.deb and .rpm</a></td><td>the same two, in <code>/usr/bin</code></td><td>Debian, Ubuntu, Fedora, RHEL; amd64 and arm64</td></tr>
+<tr><td><a href="#tarball">A tarball</a></td><td>the same two, in a folder</td><td>macOS and Linux, arm64 and x86_64</td></tr>
+<tr><td><a href="#docker">The Docker image</a></td><td><code>fenec-server</code> alone, under 3 MB</td><td>anywhere Docker runs, amd64 and arm64</td></tr>
+<tr><td><a href="#packages">A package for your language</a></td><td>a client for the server, or the database in your app</td><td>by language</td></tr>
+<tr><td><a href="#source">From source</a></td><td>whatever <code>main</code> is today</td><td>where Rust builds</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>There is no Windows build of the programs yet: run the image, or the script
+inside WSL. The clients run anywhere their language does.</p>
+
+<h2 id="install-script">The install script</h2>
+
+<pre data-lang="bash">curl -fsSL https://fenecdb.com/install.sh | sh</pre>
+
+<p>It puts <code>fenec-server</code> and <code>fenec</code> in
+<code>~/.fenecdb/bin</code> (<code>FENEC_INSTALL</code> names another
+directory) with no <code>sudo</code>, and edits no shell file: it prints the line
+that puts the directory on your <code>PATH</code> and leaves that to you.</p>
+
+<pre data-lang="bash">export PATH="$HOME/.fenecdb/bin:$PATH"   # in ~/.zshrc, ~/.bashrc or ~/.profile to keep it</pre>
+
+<ul>
+  <li><b>It downloads the latest release</b> from GitHub over https, with
+    <code>curl</code> or a <code>wget</code> that checks certificates;
+    <code>FENEC_VERSION={{version}}</code> names a release.</li>
+  <li><b>It checks the tarball</b> against the release's
+    <code>SHA256SUMS</code> before it unpacks anything. That sum comes from the
+    same release as the file, so it catches a damaged or cut-short download, not
+    a release someone replaced.</li>
+  <li><b>It is one function called on its last line,</b> so a download cut short
+    runs nothing. To read it before it runs: <code>curl -fsSL
+    https://fenecdb.com/install.sh | less</code>
+    (<a href="https://fenecdb.com/install.sh">install.sh</a>).</li>
+  <li><b>To remove it,</b> delete <code>~/.fenecdb</code>.</li>
+</ul>
+
+<h2 id="homebrew">Homebrew</h2>
+
+<pre data-lang="bash">brew install fenecdb/tap/fenecdb</pre>
+
+<p>The formula installs <code>fenec-server</code> and <code>fenec</code>, the
+shell, on macOS and Linux (arm64 and x86_64): the release's own binaries, checked
+against their SHA-256, not built on your machine. <code>brew upgrade
+fenecdb</code> takes the next release and <code>brew uninstall fenecdb</code>
+removes it.</p>
+
+<h2 id="debian-and-fedora">.deb and .rpm</h2>
+
+<p>Each release carries a package for amd64 and one for arm64, with its checksum
+in <code>SHA256SUMS</code>; releases from 0.1.12 on have them.</p>
+
+<pre data-lang="bash" data-label="Debian, Ubuntu">curl -fLO https://github.com/fenecdb/fenecdb/releases/download/v{{version}}/fenecdb_{{version}}-1_amd64.deb   # arm64 on an ARM machine
+sudo apt install ./fenecdb_{{version}}-1_amd64.deb</pre>
+<pre data-lang="bash" data-label="Fedora, RHEL">curl -fLO https://github.com/fenecdb/fenecdb/releases/download/v{{version}}/fenecdb-{{version}}-1.x86_64.rpm   # aarch64 on an ARM machine
+sudo dnf install ./fenecdb-{{version}}-1.x86_64.rpm</pre>
+
+<p>They install <code>fenec</code> and <code>fenec-server</code> in
+<code>/usr/bin</code> and depend on nothing: the binaries are static.</p>
+
+<h2 id="tarball">A release tarball</h2>
+
+<pre data-lang="bash">TARGET=aarch64-apple-darwin   # or x86_64-apple-darwin, aarch64-unknown-linux-musl, x86_64-unknown-linux-musl
+curl -LO https://github.com/fenecdb/fenecdb/releases/download/v{{version}}/fenec-v{{version}}-$TARGET.tar.gz
+tar -xzf fenec-v{{version}}-$TARGET.tar.gz
+cd fenec-v{{version}}-$TARGET
+./fenec-server --help</pre>
+
+<p>The folder holds <code>fenec-server</code> and <code>fenec</code>, and nothing
+needs installing: run them from there, or copy them where your
+<code>PATH</code> looks. The <a
+href="https://github.com/fenecdb/fenecdb/releases/tag/v{{version}}">release</a>
+page lists every file.</p>
+
+<h2 id="docker">The Docker image</h2>
+
+<p>The image holds <code>fenec-server</code> and nothing else: no shell, no
+libc, under 3 MB. Its data lives in <code>/data</code>, which the command
+below keeps in a volume.</p>
+
+<pre data-lang="bash">docker run -d --name fenecdb -v fenecdata:/data \
+  -p 127.0.0.1:8080:8080 -e FENEC_HTTP_TOKEN=a-token \
+  ghcr.io/fenecdb/fenec-server:{{version}}</pre>
+
+<p>A container listens beyond localhost, so the server asks for a token, or
+for <code>--insecure</code> where you publish the port to your own machine
+only, as the <a href="quickstart.html">Quickstart</a> does. Its command is
+<code>--http 0.0.0.0:8080 --file /data/data.fenec --sync 250</code>: write every
+flag out when you override it, or the file is dropped. <a
+href="server.html#containers">Run it in a container</a> has the rest: one
+instance a file, memory limits, Kubernetes.</p>
+
+<h2 id="packages">A package for your language</h2>
+
+<p>A server is reached from any language with its own HTTP client; these
+packages are the ones that do the typing for you, each its standard library
+alone, and the ones that keep the database in your app or your page.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Language</th><th>Install</th><th>Read</th></tr></thead>
+<tbody>
+<tr><td>Python</td><td><code>pip install fenecdb</code> (PyPI)</td><td><a href="languages.html">Your language</a></td></tr>
+<tr><td>JavaScript, TypeScript</td><td><code>npm install @fenecdb/web</code>: the client, and the database in a page</td><td><a href="quickstart-browser.html">Quickstart: in the browser</a>, <a href="javascript.html">JavaScript and TypeScript</a></td></tr>
+<tr><td>Go</td><td><code>go get github.com/fenecdb/fenecdb/integrations/go</code></td><td><a href="languages.html">Your language</a></td></tr>
+<tr><td>.NET</td><td><code>dotnet add package FenecDb</code> (NuGet)</td><td><a href="languages.html">Your language</a></td></tr>
+<tr><td>Swift</td><td>SwiftPM: <code>github.com/fenecdb/fenecdb</code>, product <code>FenecDB</code></td><td><a href="mobile.html">Mobile and native apps</a></td></tr>
+<tr><td>Kotlin, Java</td><td><code>com.fenecdb:fenecdb-android</code> (the AAR) or <code>com.fenecdb:fenecdb</code> (the JVM), on Maven Central</td><td><a href="mobile.html">Mobile and native apps</a></td></tr>
+<tr><td>Dart, Flutter</td><td><code>flutter pub add fenecdb_flutter</code>, or <code>fenecdb</code> in Dart alone (pub.dev)</td><td><a href="mobile.html">Mobile and native apps</a></td></tr>
+<tr><td>Rust</td><td><code>fenec-core</code> and <code>fenec-ql</code> from the repository: the engine as a library, with no dependencies</td><td><a href="embedding.html">Embedded Rust</a></td></tr>
+<tr><td>Java, PHP, Ruby</td><td>nothing: the language's own HTTP client</td><td><a href="languages.html">Your language</a></td></tr>
+</tbody>
+</table>
+</div>
+
+<p>React, Cloudflare and LangChain have packages of their own (<a
+href="integrations.html">Integrations</a>).</p>
+
+<h2 id="source">From source</h2>
+
+<p>For a build the releases do not have, or to work on fenecdb: clone the
+repository and build with <code>cargo</code> and <code>make</code>. <a
+href="build.html">Build from source</a> has the commands, the tests and what
+each make target does.</p>
+
+<h2 id="checking">Checking a download</h2>
+
+<p>A release's files are listed with their checksums in
+<code>SHA256SUMS</code>:</p>
+
+<pre data-lang="bash">curl -LO https://github.com/fenecdb/fenecdb/releases/download/v{{version}}/SHA256SUMS
+shasum -a 256 -c --ignore-missing SHA256SUMS    # Linux: sha256sum -c --ignore-missing SHA256SUMS</pre>
+
+<h2 id="next">Then</h2>
+
+<ul>
+  <li><b>Run the server and write a row:</b> the <a
+    href="quickstart.html">Quickstart</a>.</li>
+  <li><b>Open a file in the shell:</b> <a href="shell.html">The shell</a>.</li>
+  <li><b>Run it for real:</b> tokens, durability, limits and containers are on
+    <a href="server.html">Server</a>.</li>
+</ul>
