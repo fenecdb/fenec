@@ -54,55 +54,68 @@ def minify(body, ext):
         raise SystemExit(f"esbuild failed on a {loader} asset:\n{run.stderr}")
     return run.stdout
 
-# Ordered docs navigation. Groups are rendered as the sidebar sections.
+# Ordered docs navigation. Groups are rendered as the sidebar sections, in the
+# order of what a reader is doing: Start gets a first query running, Clients
+# is how an app talks to the database, Guides are what one builds with it,
+# Reference is where one looks a thing up, Operate is for whoever runs a
+# server, and Design and comparisons is why it is built as it is and how it
+# measures against others. A page that fits two groups sits with the task that
+# brings the reader to it: HTTP endpoint is in Clients, for the reader with no
+# SDK for their language, its route list being that client's reference (the
+# Reference group's Limits points there); File format is Reference, the place
+# one looks a byte up, though it is also why the file is as it is; Studio is
+# Operate, an admin page the server serves.
 NAV = [
     ("Start", [
         ("docs/index", "Overview"),
         ("docs/quickstart", "Quickstart"),
-        ("docs/concepts", "How it works"),
-        ("docs/languages", "Your language"),
     ]),
-    ("Query", [
-        ("docs/fenecql", "FenecQL"),
-        ("docs/sql", "From SQL"),
+    ("Clients", [
+        ("docs/languages", "Your language"),
         ("docs/javascript", "JavaScript and TypeScript"),
         ("docs/mobile", "Mobile and native apps"),
         ("docs/http", "HTTP endpoint"),
-        ("docs/sync", "Sync"),
+        ("docs/embedding", "Embedded Rust"),
         ("docs/integrations", "Integrations"),
         ("docs/mcp", "Agents and MCP"),
     ]),
-    # What an app adds Redis for, a page a family of patterns: the first
-    # says which page holds each.
-    ("Instead of Redis", [
-        ("docs/redis", "Recipes"),
+    ("Guides", [
+        ("docs/sync", "Sync"),
+        # What an app adds Redis for, a page a family of patterns: this one
+        # says which page holds each, and is named for what it replaces now
+        # that no group is.
+        ("docs/redis", "Instead of Redis"),
         ("docs/queues", "Job queues"),
         ("docs/geo", "Points and distances"),
         ("docs/analytics", "Analytics and market data"),
+        ("docs/microservices", "Services and events"),
+        ("docs/serverless", "Serverless and Cloudflare"),
+        ("docs/import", "Import"),
+    ]),
+    ("Reference", [
+        ("docs/fenecql", "FenecQL"),
+        ("docs/sql", "From SQL"),
+        ("docs/limits", "Limits"),
+        ("docs/file-format", "File format"),
     ]),
     ("Operate", [
         ("docs/server", "Server"),
+        ("docs/studio", "Studio"),
         ("docs/replication", "Replication"),
+        ("docs/sharding", "Tenants and sharding"),
         ("docs/monitoring", "Monitoring"),
         ("docs/datadog", "Datadog and others"),
         ("docs/grafana", "Grafana"),
-        ("docs/studio", "Studio"),
-        ("docs/sharding", "Tenants and sharding"),
-        ("docs/serverless", "Serverless and Cloudflare"),
-        ("docs/microservices", "Services and events"),
-        ("docs/import", "Import"),
-        ("docs/embedding", "Embedded Rust"),
     ]),
-    ("Compare", [
-        ("docs/compare", "Overview"),
-        ("docs/vs-postgres", "PostgreSQL"),
-        ("docs/vs-sqlite", "SQLite"),
-        ("docs/vs-pglite", "PGlite"),
-    ]),
-    ("Reference", [
+    # The comparisons are labelled "vs ...", since the group does not say
+    # what the three are beside.
+    ("Design and comparisons", [
+        ("docs/concepts", "How it works"),
         ("docs/benchmarks", "Benchmarks"),
-        ("docs/file-format", "File format"),
-        ("docs/limits", "Limits"),
+        ("docs/compare", "Compare"),
+        ("docs/vs-postgres", "vs PostgreSQL"),
+        ("docs/vs-sqlite", "vs SQLite"),
+        ("docs/vs-pglite", "vs PGlite"),
     ]),
     # Last, after the reader has what they came for: the Quickstart installs
     # a release, and what is left for a clone is here.
@@ -354,13 +367,68 @@ def docs_map():
     return f'<div class="docmap">{"".join(groups)}</div>'
 
 
+# The tabs of Your language that talk to a server with the HTTP client the
+# language has, as the HTTP endpoint page shows them. The others embed the
+# database in an app and their first example opens a file, so they stay on
+# Your language; a tab in neither list is a build error, or a new HTTP
+# language would be skipped here with nothing said.
+HTTP_TABS = ("Python", "TypeScript", "Go", "Rust", ".NET", "Java", "PHP", "Ruby")
+EMBEDDED_TABS = ("Swift", "Kotlin", "Dart")
+LANG_TAB = re.compile(r'<div class="lang" data-name="([^"]+)">\n([\s\S]*?)\n</div>')
+CODE_BLOCK = re.compile(r'<pre[^>]*>[\s\S]*?</pre>\n')
+
+
+def first_example(name, body):
+    """A tab's first example: its install line, if it has one, then the
+    program, and nothing after that. A tab goes on from there with prose and
+    the builder's example, and the example is cut at the prose: with the
+    prose gone a third block would be taken in with no word said, so a tab
+    that is not an install line (labelled `install`) and one program, or a
+    program alone, is an error."""
+    blocks, at = [], 0
+    while (m := CODE_BLOCK.match(body + "\n", at)):
+        blocks.append(m.group(0))
+        at = m.end()
+    installs = ['data-label="install"' in b for b in blocks]
+    if installs not in ([False], [True, False]):
+        raise SystemExit(
+            f"docs/languages.html's `{name}` tab does not start with an install line "
+            "(labelled `install`, optional) and one program, then prose: docs/http.html "
+            f"takes that much of it, and found {len(blocks)} blocks in a row")
+    return "".join(blocks)
+
+
+def language_tabs():
+    """The first example of each of Your language's tabs in `HTTP_TABS`, as
+    the tabs of another page's `data-langs` box: the HTTP endpoint page's
+    examples are the languages page's, taken from it when the page is read,
+    so the two cannot say different things (`make languages-test` holds that
+    page's statements to the programs it runs)."""
+    src = open(os.path.join(ROOT, "content", "docs", "languages.html"), encoding="utf-8").read()
+    tabs = {name: body for name, body in LANG_TAB.findall(src)}
+    unplaced = [n for n in tabs if n not in HTTP_TABS + EMBEDDED_TABS]
+    missing = [n for n in HTTP_TABS + EMBEDDED_TABS if n not in tabs]
+    if unplaced or missing:
+        raise SystemExit(
+            "docs/languages.html's tabs are not the ones docs/http.html is made for: "
+            f"{'a tab named ' + ', '.join(unplaced) if unplaced else 'no tab named ' + ', '.join(missing)}"
+            " -- put it in HTTP_TABS (a language the server is reached from with the "
+            "language's own HTTP client) or EMBEDDED_TABS (one that opens a file) in build.py")
+    out = []
+    for name in HTTP_TABS:
+        out.append(f'<div class="lang" data-name="{name}">\n{first_example(name, tabs[name]).rstrip()}\n</div>\n')
+    return "\n".join(out)
+
+
 def filled(raw):
     """A page's text with what the build writes into it: the release's
     number wherever the page says `{{version}}`, from the one place
     `make version` writes it (the workspace's Cargo.toml), so a release moves
-    the install lines, the image's tag and the sample output with it; and the
-    docs index's map of every page. Claims are checked against this text, as
-    it is read."""
+    the install lines, the image's tag and the sample output with it; the
+    docs index's map of every page; and the HTTP endpoint page's tabs of
+    languages. Claims are checked against this text, as it is read."""
+    if "{{language_tabs}}" in raw:
+        raw = raw.replace("{{language_tabs}}", language_tabs())
     return (raw.replace("{{version}}", workspace_version())
                .replace("{{docs_map}}", docs_map()))
 
@@ -470,7 +538,7 @@ CLAIMS = [
     ("site/content/index.html", r"compiles to (\d+) KB of gzipped WebAssembly", "kb_gz", 0),
     ("site/content/index.html", r"(\d+) KB of gzipped WebAssembly with no", "kb_gz", 0),
     ("site/content/playground.html", r"\((\d+) KB\s+gzipped\)", "kb_gz", 0),
-    ("site/content/docs/index.html", r"(\d+) KB gzip<br><small>the wasm", "kb_gz", 0),
+    ("site/content/docs/concepts.html", r"(\d+) KB gzip<br><small>the wasm", "kb_gz", 0),
     ("site/content/docs/benchmarks.html",
      r'wasm32, browser</td><td class="n"><b>(\d+) KB</b>', "kb", 0),
     ("site/content/docs/benchmarks.html",
@@ -1330,7 +1398,8 @@ def search_documents(rendered):
         if group is None:
             continue
         kind = ("benchmark" if key == "docs/benchmarks"
-                else "compare" if group == "Compare" else "doc")
+                else "compare" if key == "docs/compare" or key.startswith("docs/vs-")
+                else "doc")
         title = re.sub(r"\s+—\s+fenecdb$", "", meta.get("title", "")).strip()
         if key == "index":
             title = "fenecdb"

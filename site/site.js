@@ -682,7 +682,10 @@ if (motions.length) {
    example shows, one under another, each under its name. A set of tabs that
    are not languages (the Quickstart's ways to install) names what they are,
    `data-tabs`, and the key to keep the choice under, `data-key`: the
-   languages share `fenec-lang`, and a choice of Docker is not a language. */
+   languages share `fenec-lang`, and a choice of Docker is not a language.
+   A panel that is not a language of the key's (the HTTP page's curl, in the
+   languages' box) says `data-keep="false"`: choosing it keeps nothing, or
+   the reader's language, which Your language reads back, would be gone. */
 for (const box of document.querySelectorAll('[data-langs]')) {
   const panels = [...box.querySelectorAll(':scope > .lang')];
   const key = box.dataset.key || 'fenec-lang';
@@ -702,7 +705,7 @@ for (const box of document.querySelectorAll('[data-langs]')) {
   const show = (i, keep) => {
     panels.forEach((p, j) => { p.hidden = j !== i; });
     tabs.forEach((b, j) => b.setAttribute('aria-selected', String(j === i)));
-    if (keep) { try { localStorage.setItem(key, panels[i].dataset.name); } catch {} }
+    if (keep && panels[i].dataset.keep !== 'false') { try { localStorage.setItem(key, panels[i].dataset.name); } catch {} }
   };
   box.prepend(bar);
   box.classList.add('on');
