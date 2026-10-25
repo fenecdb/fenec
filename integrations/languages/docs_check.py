@@ -33,7 +33,7 @@ PAGES = os.path.join(HERE, "..", "..", "site", "content", "docs")
 # first example is cut from (the Go and .NET tabs are the SDKs').
 PROGRAMS = {
     "Python": "python/search.py",
-    "TypeScript": "javascript/search.mjs",
+    "JavaScript": "javascript/search.mjs",
     "Go": "go-sdk/main.go",
     "Rust": "rust/src/main.rs",
     ".NET": "dotnet-sdk/Program.cs",
