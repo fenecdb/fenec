@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.12
+
+The release notes: https://github.com/fenecdb/fenecdb/releases/tag/v0.1.12
+
 ## 0.1.11
 
 The release notes: https://github.com/fenecdb/fenecdb/releases/tag/v0.1.11
