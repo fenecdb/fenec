@@ -57,6 +57,7 @@ Add <code>group</code> for one row per distinct set of its keys' values;
 a list of the keys alone, <code>select city group city</code>, answers each
 set once, as SQL's <code>select distinct city</code> does.</p>
 
+{{builder "docs: aggregates over every order" "docs: aggregates of each status" "docs: the ten customers who spent most" "docs: distinct users an hour and event" "docs: one-minute bars of a symbol" "docs: vwap of each symbol" "docs: totals of a json path"}}
 <pre data-lang="fenecql">get orders select count(*), sum(total), avg(total), min(at), max(at)
 get orders select status, count(*), avg(total) where year = 2026 group status
 get orders select customer, sum(total) group customer order sum(total) desc limit 10
@@ -196,12 +197,14 @@ costs over a million rows.</p>
 
 <h2 id="totals-per-group">Totals per group</h2>
 
+{{builder "docs: the three statuses that took most"}}
 <pre data-lang="fenecql">get orders select status, count(*), sum(total) where year = 2026 group status
   order sum(total) desc limit 3
 </pre>
 
 <h2 id="bars-by-the-minute">Bars by the minute</h2>
 
+{{builder "docs: one-minute bars since a time"}}
 <pre data-lang="fenecql">get ticks select bucket(at, 1m) as bar, first(px by at) as open, max(px) as high,
   min(px) as low, last(px by at) as close, sum(qty) as volume
   where sym = $1 and at >= $2 group bar

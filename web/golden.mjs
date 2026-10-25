@@ -532,6 +532,65 @@ c('an insert returning takes field names', orders, ['toInsert', { a: 1 }, { retu
 c('upsert takes no limit', jobs, ['limit', 1], ['toUpsert', { id: 1 }, { a: 1 }]);
 c('a write still takes no offset', jobs, ['where', 'a', 1], ['order', 'id'], ['limit', 2], ['offset', 1], ['toUpdate', { a: 1 }]);
 
+// The FenecQL reference pages' examples, as each SDK's builder writes them:
+// site/builder_tabs.py renders a case's chain in every language for the
+// tabs of a page's example (`{{builder "docs: ..."}}`), the build holds the
+// case's statement, its parameters written in, to the page's, and each
+// SDK's tests run the rendered code. Each ends at an endpoint, as an app's
+// query does. A page's `$n` stands for any parameter the case binds.
+const vec = [0.9, 0.1, 0];
+const ords = ['from', 'orders'];
+const arts = ['from', 'articles'];
+const prods = ['from', 'products'];
+const bars = [
+  { $as: [{ $bucket: ['at', '1m'] }, 'bar'] }, { $as: [{ $first: ['px', 'at'] }, 'open'] },
+  { $as: [{ $expr: ['max(px)'] }, 'high'] }, { $as: [{ $expr: ['min(px)'] }, 'low'] },
+  { $as: [{ $last: ['px', 'at'] }, 'close'] }, { $as: [{ $expr: ['sum(qty)'] }, 'volume'] },
+];
+// fenecql-aggregates.html
+c('docs: aggregates over every order', ords, ['select', 'count(*)', 'sum(total)', 'avg(total)', 'min(at)', 'max(at)'], ['rows']);
+c('docs: aggregates of each status', ords, ['select', 'status', 'count(*)', 'avg(total)'], ['where', 'year', 2026], ['group', 'status'], ['rows']);
+c('docs: the ten customers who spent most', ords, ['select', 'customer', 'sum(total)'], ['group', 'customer'], ['order', 'sum(total)', 'desc'], ['limit', 10], ['rows']);
+c('docs: distinct users an hour and event', ['from', 'events'], ['select', { $as: [{ $bucket: ['at', '1h'] }, 'hour'] }, 'name', { $as: [{ $countDistinct: 'user' }, 'users'] }], ['group', 'hour', 'name'], ['rows']);
+c('docs: one-minute bars of a symbol', ['from', 'ticks'], ['select', ...bars], ['where', 'sym', 'S07'], ['group', 'bar'], ['rows']);
+c('docs: vwap of each symbol', ['from', 'ticks'], ['select', 'sym', { $as: [{ $expr: ['sum(px * qty) / sum(qty)'] }, 'vwap'] }], ['group', 'sym'], ['rows']);
+c('docs: totals of a json path', ['from', 'events'], ['select', 'props.plan', 'sum(props.v)'], ['group', 'props.plan'], ['rows']);
+c('docs: the three statuses that took most', ords, ['select', 'status', 'count(*)', 'sum(total)'], ['where', 'year', 2026], ['group', 'status'], ['order', 'sum(total)', 'desc'], ['limit', 3], ['rows']);
+c('docs: one-minute bars since a time', ['from', 'ticks'], ['select', ...bars], ['where', 'sym', 'S07'], ['where', 'at', '>=', '2026-05-03T09:00:00Z'], ['group', 'bar'], ['rows']);
+// fenecql-indexes.html
+c('docs: the newest articles', arts, ['order', 'published', 'desc'], ['limit', 20], ['rows']);
+c('docs: the newest articles since a day', arts, ['where', 'published', '>=', '2026-09-01'], ['order', 'published', 'desc'], ['limit', 20], ['rows']);
+c('docs: articles counted over a range of titles', arts, ['where', 'title', '>=', 'k'], ['where', 'title', '<', 'l'], ['count']);
+c('docs: the nearest articles since a day', arts, ['where', 'published', '>=', '2026-01-01'], ['near', 'embed', vec], ['limit', 10], ['rows']);
+// fenecql-lookup.html
+c('docs: products with their newest reviews', prods, ['limit', 20], ['lookup', 'reviews', { on: 'product_id', order: [['created', 'desc']], limit: 3 }], ['rows']);
+c('docs: shops, their orders and the orders\' lines', ['from', 'shops'], ['limit', 20], ['lookup', 'orders', { on: 'shop_id', limit: 3 }], ['lookup', 'lines', { on: 'order_id', limit: 5 }], ['rows']);
+c('docs: products with a five-star review', prods, ['limit', 20], ['lookup', 'reviews', { on: 'product_id', required: true, where: { stars: 5 } }], ['rows']);
+c('docs: products with a five-star review counted', prods, ['lookup', 'reviews', { on: 'product_id', required: true, where: { stars: 5 } }], ['count']);
+// fenecql-reading.html
+c('docs: articles counted since a year', arts, ['where', 'year', '>=', 2024], ['count']);
+// fenecql-search.html
+c('docs: articles matching words', arts, ['match', 'body', 'ownership'], ['limit', 10], ['rows']);
+c('docs: articles matching words since a year', arts, ['where', 'year', '>=', 2024], ['match', 'body', 'ownership'], ['limit', 10], ['rows']);
+c('docs: articles matching words reranked', arts, ['match', 'body', 'ownership'], ['rerank', 'embed', vec, { candidates: 500 }], ['limit', 10], ['rows']);
+c('docs: matches with their marks', arts, ['select', 'title'], ['highlight', 'body'], ['match', 'body', 'ownership'], ['limit', 10], ['rows']);
+c('docs: matches with their marks tagged', arts, ['select', 'title'], ['highlight', 'body', { pre: '<mark>', post: '</mark>' }], ['match', 'body', 'ownership'], ['limit', 10], ['rows']);
+c('docs: matches with a snippet', arts, ['select', 'title'], ['snippet', 'body', 20, { ellipsis: '…' }], ['match', 'body', 'ownership'], ['limit', 10], ['rows']);
+c('docs: matches with a snippet tagged', arts, ['select', 'title'], ['snippet', 'body', 20, { ellipsis: '…', pre: '<b>', post: '</b>' }], ['match', 'body', 'ownership'], ['limit', 10], ['rows']);
+c('docs: tents counted by price range', prods, ['where', 'category', 'tents'], ['limit', 24], ['facet', 'price', { ranges: [0, 2500, 5000, 10000, 25000], disjunctive: true }], ['rows']);
+// fenecql-vector.html
+c('docs: the nearest articles', arts, ['near', 'embed', vec], ['limit', 10], ['rows']);
+c('docs: the nearest articles since a year', arts, ['where', 'year', '>=', 2024], ['near', 'embed', vec, { ef: 200 }], ['limit', 10], ['rows']);
+c('docs: the nearest articles exactly', arts, ['near', 'embed', vec, { exact: true }], ['limit', 10], ['rows']);
+c('docs: the nearest articles filtered', arts, ['select', 'title', 'year'], ['where', 'year', '>=', 2024], ['where', 'tags', 'has', 'rust'], ['where', { $not: { title: { '~': 'draft' } } }], ['near', 'embed', vec, { ef: 128 }], ['limit', 10], ['rows']);
+// fenecql-writing.html
+c('docs: an article set by id', arts, ['where', 'id', 42], ['update', { year: 2025 }]);
+c('docs: an article\'s views counted', arts, ['where', 'id', 42], ['update', { views: { $inc: 1 } }]);
+c('docs: the articles before a year deleted', arts, ['where', 'year', '<', 2000], ['delete']);
+c('docs: a product that must be there at its price', prods, ['where', 'sku', 'tee'], ['where', 'price', 1200], ['where', 'stock', '>', 0], ['require', 1], ['rows']);
+c('docs: a coupon that must still be usable', ['from', 'coupons'], ['where', 'code', 'X1'], ['where', { $raw: ['uses < max_uses'] }], ['limit', 1], ['require', 1], ['rows']);
+c('docs: no hold that must be there', ['from', 'holds'], ['where', 'order_ref', 'o-17'], ['where', 'state', 'held'], ['require', 0], ['rows']);
+
 // ------------------------------------------------------------------ writing
 
 async function generate() {

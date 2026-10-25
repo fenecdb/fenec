@@ -225,6 +225,7 @@ over those sets takes 0.09 to 0.66 ms at the median.</p>
 <code>order … limit</code> fast. It always gives the same rows as reading
 every row would.</p>
 
+{{builder "docs: the newest articles" "docs: the newest articles since a day"}}
 <pre data-lang="fenecql">get articles order published desc limit 20
 get articles where published >= "2026-09-01" order published desc limit 20
 </pre>
@@ -237,6 +238,7 @@ get articles where published >= "2026-09-01" order published desc limit 20
 </ul>
 
 <details class="deep"><summary>When an ordered walk wins over the scan</summary>
+{{builder "docs: articles counted over a range of titles" "docs: the nearest articles since a day"}}
 <pre data-lang="fenecql">get articles where title >= "k" and title < "l" count
 get articles where published >= "2026-01-01" near embed $1 limit 10
 </pre>

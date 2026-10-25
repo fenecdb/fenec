@@ -43,7 +43,31 @@ builder again so the file cannot drift, and `make python-test`, `go-test`
 and `dotnet-test` run every case through their own builder, the
 endpoints' statements read off a recording transport. A builder change
 starts in `web/builder.js` and a case in `golden.mjs`, then the three
-follow, and the Swift, Kotlin and Dart builders with them. Go's object conditions are `Fields`/`Ops` and a document a
+follow, and the Swift, Kotlin and Dart builders with them. The FenecQL
+reference pages show an example's statement beside the same query in each
+builder, in tabs written from golden cases (`site/builder_tabs.py`, from
+`{{builder "case" ...}}` over the page's block): snippets written by hand
+in seven languages would drift from the builders as the golden file is
+there to stop, and a tab rendered from a case can be held to it. The build
+holds each case's statement to the page's -- the text, each parameter
+written in as FenecQL writes the value or a `$n` the page has there -- so
+the pages' statements stay as they were and only an example the builders
+make byte for byte gets tabs (`fuzzy` alone, `facet` before `limit` and
+`match` before `near` are FenecQL the builders write otherwise, and those
+blocks have none). Each language is proven its own way: the JavaScript
+and Python tabs run as the page shows them, against `connect` with a
+recording `fetch` and a `Client` whose `query` records
+(`builder_tabs.py --check`, CI's integrations job); the Go, .NET, Swift,
+Kotlin and Dart tabs are tests of those SDKs (`make docs-builder` writes
+`integrations/go/docs_builder_test.go` and its four siblings), run by
+their own jobs against each SDK's recording transport, and the check
+fails while a file is behind the pages, whitespace aside since `gofmt`
+and `dart format` lay them out. A tab's case ends at an endpoint (`rows`,
+`count`, `update` ...), since an app runs its query; the tab shows that
+call on `db` (and Go's `ctx`) and the statement it sends. When the
+renderer was written, every golden case it can render -- 222, those with
+a `$date` or a `$f32` value aside -- was rendered in all seven languages and
+run through each SDK, and each sent its case's text and parameters. Go's object conditions are `Fields`/`Ops` and a document a
 `D(...)`, names and values in turn, since a map has no order and the order
 is the text's; its options are functional, since a struct cannot tell
 `limit 0` from none. CI also builds the five packages as a release

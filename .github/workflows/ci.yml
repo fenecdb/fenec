@@ -247,6 +247,13 @@ jobs:
       - name: Builder golden file
         run: node web/golden.mjs --check
 
+      # The FenecQL pages' builder tabs: each JavaScript and Python tab run
+      # as the page shows it and held to the statement its golden case
+      # makes, and the Go, .NET, Swift, Kotlin and Dart tests of the tabs --
+      # which those SDKs' jobs run -- what the pages' tabs make.
+      - name: Builder tabs on the FenecQL pages
+        run: python3 site/builder_tabs.py --check
+
       # The Go and .NET SDKs against a primary, a replica of it and a node
       # of tenants their tests start, with the runner's Go and .NET; each
       # runs its builder over every case of the golden file.

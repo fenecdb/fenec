@@ -22,6 +22,8 @@ import subprocess
 import sys
 import urllib.parse
 
+import builder_tabs
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(ROOT)
 OUT = os.path.join(ROOT, "dist")
@@ -517,10 +519,15 @@ def filled(raw, page=None):
     the install lines, the image's tag and the sample output with it; the
     docs index's map of every page; the HTTP endpoint page's tabs of
     languages; and, for a page that was split (`page` is its NAV key), the
-    script that sends a reader to where a section went (`{{moved_script}}`).
-    Claims are checked against this text, as it is read."""
+    script that sends a reader to where a section went (`{{moved_script}}`);
+    and a FenecQL example's tabs of the same query in each SDK's builder
+    (`{{builder "case" ...}}` over the block, `builder_tabs.py`), each case
+    held to its statement. Claims are checked against this text, as it is
+    read."""
     if "{{language_tabs}}" in raw:
         raw = raw.replace("{{language_tabs}}", language_tabs())
+    if "{{builder" in raw:
+        raw = builder_tabs.expand(raw, f"site/content/{page}.html" if page else "a page")
     if page is not None and "{{moved" in raw:
         raw = (raw.replace("{{moved_script}}", MOVED_SCRIPT.replace("@@MAP@@", moved_map(page)))
                   .replace("{{moved}}", moved_map(page)))
