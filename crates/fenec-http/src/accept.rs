@@ -122,7 +122,7 @@ pub fn spawn(
 /// out whole in one write all the same; where it would not, it is let go
 /// of. The request is not read first -- what has not arrived cannot be
 /// waited for here, and the answer does not hang on it -- but what has
-/// arrived is read off after the answer, up to [`DRAIN`], non-blocking
+/// arrived is read off after the answer, up to 64 KiB (`DRAIN`), non-blocking
 /// too: closed with its request unread, a socket is reset rather than
 /// ended, on macOS and on Linux alike (probed), and a client reading to
 /// the end read `Connection reset by peer` after the answer. A request
@@ -180,7 +180,7 @@ pub fn no_thread(stream: TcpStream, answer: &Response, error: &io::Error, counte
 
 /// Spawns a test has fail ([`crate::Server::fail_spawns`]): the next `n`
 /// connections' threads are asked for a stack no address space holds
-/// ([`NO_STACK`]), so the system refuses each as it refuses a thread past
+/// (`NO_STACK`), so the system refuses each as it refuses a thread past
 /// its limit -- `pthread_create`'s EAGAIN -- and [`spawn`] fails where it
 /// would, its closure dropped as at the limit. Reaching the real limit
 /// would fail every other test's threads in the process. One relaxed load
