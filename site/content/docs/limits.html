@@ -20,7 +20,7 @@ behaviour worth knowing before it surprises you.</p>
     covers related rows (below).</li>
   <li><b>One writer per file.</b> Readers run beside it, and a
     <code>/batch</code> holds the writer while it runs. Scale out with a file
-    per tenant (<a href="/docs/sharding">Tenants and sharding</a>).</li>
+    per tenant (<a href="/docs/sharding-design#a-file-per-tenant">Sharding design</a>).</li>
   <li><b>Indexes live in memory.</b> The data stays in the mapped file; the
     indexes are restored or rebuilt on open (<a href="#memory-and-scale">Memory
     and scale</a>).</li>
@@ -222,7 +222,7 @@ container memory is a sensible start: it covers both this 60–75% ratio and
 
 <p>Past one machine the data is split by tenant, not by row: each tenant is a
 file of its own, nodes hold many, and a router forwards each request to the
-right one (<a href="/docs/sharding">Tenants and sharding</a>). The bound moves
+right one (<a href="/docs/sharding-design#why-tenants-and-not-hash-partitioning">Sharding design</a>). The bound moves
 from "the database fits one machine" to "each tenant does" — a single tenant
 larger than a node is still out of reach. A single file has
 <a href="/docs/replication">read replicas</a>, but a tenant node does not yet,

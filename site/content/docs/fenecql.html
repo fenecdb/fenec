@@ -3,21 +3,7 @@ title: FenecQL — fenecdb
 description: FenecQL, the query language of fenecdb: a tour from the first write to a lookup and a total, run in the shell, then the reference by family of statements and the full grammar.
 -->
 
-<script>
-(function(){
-  /* The reference this page once held is on pages of its own: a link to one
-     of its sections (docs/fenecql#facets) is sent where the section went.
-     Fragments never reach the server, so this is the only place to do it. */
-  var moved={{moved}};
-  function go(){
-    var h=location.hash.slice(1);
-    try{h=decodeURIComponent(h)}catch(e){}
-    if(h&&Object.prototype.hasOwnProperty.call(moved,h))location.replace(moved[h]);
-  }
-  go();
-  addEventListener('hashchange',go);
-})();
-</script>
+{{moved_script}}
 
 <h1>FenecQL</h1>
 <p class="kicker">The query language you use to create collections, write

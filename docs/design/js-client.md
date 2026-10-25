@@ -63,7 +63,7 @@ query one second each `RESTING`, not five each change. The second assumes
 a primary syncing at `--sync 250` or faster and links under about half a
 second: at `--sync 1000` and up every near run misses it and is answered
 home (`fallback` rising, the rows a round trip late), right but slower than
-reading home, which `sharding.html` says; not an option of `live`, since a
+reading home, which `sharding-read-replicas.html` says; not an option of `live`, since a
 deployment that slow reads home. Home's 504 -- the change lost in a
 failover -- sets back whichever position the run was sent after and asks
 near again after home's, home unmarked only where that fails too, since an

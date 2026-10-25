@@ -1,0 +1,316 @@
+<!--
+title: Sharding: tenants — fenecdb
+description: How to give a tenant its schema and a quota, move it to another node, archive a node's tenants and ask one question of all of them through the router.
+-->
+
+<h1>Working with tenants</h1>
+<p class="kicker">How to give a tenant its schema and a quota, move it to another node, archive a node's tenants and ask one question of all of them. Its calls to the router name it as <code>localhost:8090</code>, with the token <code>root</code>, as the <a href="sharding.html">tutorial</a> does.</p>
+
+<h2 id="schema">A tenant with its schema</h2>
+
+<p>A tenant is created empty. Applying its schema afterwards took the nodes'
+data token, which reaches every tenant on every node, so the app that
+creates tenants -- one an organisation signs up -- held it. Hand the schema
+to the router instead, and the app needs the router's token alone:</p>
+
+<pre data-lang="bash">curl -X PUT localhost:8090/_shard/tenants/acme -H 'Authorization: Bearer root' \
+     -d '{"schema":"create collection notes (owner text @hash, title text)"}'
+# {"tenant":"acme","node":"n1","schema":{"kind":"schema","applied":true,...}}
+</pre>
+
+<ul>
+  <li><b>Applied on the node</b> with the admin token the router holds for
+    it (<code>POST /_admin/tenants/&lt;t&gt;/schema</code>), as
+    <code>/_schema/apply</code> applies a description: one block, synced as
+    a write is.</li>
+  <li><b>With its schema or not at all:</b> a schema that does not read is
+    refused (400) before anything is placed, and one the node refuses takes
+    the tenant back off the node and out of the directory.</li>
+  <li><b>Under leases</b> it is applied once the node's lease names the
+    tenant, since the node takes no write before; a replica follows it as it
+    follows every write.</li>
+</ul>
+
+<h2 id="quotas">Quotas</h2>
+
+<p>Tenants share a node: its disk, its memory, its threads. A quota keeps one
+tenant from taking all of them. Set defaults on the node, and a tenant's own
+through the router, which sends it wherever the tenant goes.</p>
+
+<pre data-lang="bash"># every tenant on this node, unless its own quota says otherwise
+fenec-server --dir /data/n1 --admin-token a1 \
+    --tenant-max-bytes 1G --tenant-max-rows 1000000 \
+    --tenant-max-streams 50 --tenant-max-held 200 --tenant-max-requests 16 \
+    --tenant-writes-per-sec 500 --tenant-write-bytes-per-sec 8M
+
+# a tenant on a plan of its own: set as it is created ...
+curl -X PUT localhost:8090/_shard/tenants/acme -H 'Authorization: Bearer root' \
+     -d '{"schema":"create collection notes (title text)","quota":{"bytes":104857600,"rows":50000}}'
+
+# ... or changed later: the whole set, 0 for none, left out for the node's
+curl -X PUT localhost:8090/_shard/tenants/acme/quota -H 'Authorization: Bearer root' \
+     -d '{"bytes":1073741824,"rows":0,"writes":100}'
+
+# what it is held to, and what it uses
+curl localhost:8090/_shard/tenants/acme/quota -H 'Authorization: Bearer root'
+# {"tenant":"acme","open":true,"set":{"bytes":1073741824,"rows":0,"writes":100},
+#  "quota":{"bytes":1073741824,"rows":0,"streams":50,...},
+#  "usage":{"bytes":48211,"rows":312,"streams":1,"requests":0,"held":0}}</pre>
+
+<p>What each quota bounds, and what a write past one is answered, are in the <a href="sharding-reference.html#quota-bounds">reference</a>; why a quota bounds what it does, and what it costs, in the <a href="sharding-design.html#quota-design">design</a>.</p>
+
+<h2>Moving a tenant</h2>
+
+<p>Move a tenant to another node with one call. Reads keep working throughout;
+writes are asked to retry for the moment the copy takes.</p>
+
+<pre data-lang="bash">curl -X POST localhost:8090/_shard/tenants/acme/move -H 'Authorization: Bearer root' \
+     -d '{"to":"n2"}'
+# {"tenant":"acme","from":"n1","to":"n2","bytes":58685634,"ms":267,"source_removed":true}</pre>
+
+<ul>
+  <li><b>Writes during a move</b> get 503 with <code>Retry-After: 1</code>,
+    and <code>"retry_after": 1</code> in the body, which a replica's sync
+    waits out (<a href="sync.html#refusals-retries-and-offline">Sync</a>).</li>
+  <li><b>Subscribers reconnect</b> and, if they were caught up, carry on
+    without a reseed.</li>
+  <li><b>A failed move</b> puts everything back on the source.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<ol>
+  <li>The directory marks the tenant <code>moving</code>; it is still routed to
+    the source.</li>
+  <li>The source freezes it: writes in flight finish, new ones get
+    <b>503 with <code>Retry-After: 1</code></b>. Reads go on being served.</li>
+  <li>The image is copied from the source and installed on the target.</li>
+  <li>The directory points the tenant at the target, in one statement.</li>
+  <li>The source copy is deleted — once every <a href="sharding-failover.html#standby-router">standby
+    router</a> keeping up has been sent the new placement, a second at most,
+    so one that forwards from it sends the tenant's requests to the target
+    rather than to a node that no longer holds it. Its open subscriptions end with an
+    <code>error</code> event, and the client reconnects through the router to
+    the target. A client that had seen everything <b>resumes from its cursor
+    without a reseed</b>: the change sequence travels in the image and the
+    source was frozen, so nothing happened in between. One that was behind is
+    reseeded, as after any restart — the target has the sequence but not the
+    history before it.</li>
+</ol>
+
+<p>The router refuses nothing itself during a move, so there is no window in
+which the tenant is nowhere — only one in which writes are asked to retry. If a
+step before the flip fails, the source is thawed and the directory put back. A
+router that stops mid-move comes back with the tenant still served from the
+source and marked <code>moving</code>; moving it again replaces whatever copy the
+interrupted attempt left on the target, which is stale by definition, since the
+directory never pointed at it.</p>
+</details>
+
+<h2 id="archive">Archiving a node</h2>
+
+<p>Every tenant of a node is archived by one process over one connection to
+the node — not a connection, a thread and an open tenant each — an archive
+a tenant under a root, which restores a tenant or the whole node to a
+moment.</p>
+
+<pre data-lang="bash">fenec archive --tenants http://n1:8081 /backups/n1 --token "$REPL" --image-every 1h --keep 7d
+fenec verify  --tenants /backups/n1
+fenec restore --tenants /backups/n1 /data/n1 --to 2026-09-22T10:14:59Z</pre>
+
+<ul>
+  <li><b>Moved or deleted:</b> a tenant that leaves the node is no longer
+    followed and its archive is kept, noted gone, and noted back if it
+    returns; the target node's archiver takes it up from its image. A
+    restore of the node to a moment it was away leaves it out, as it does a
+    tenant deleted before.</li>
+  <li><b>Restored in place:</b> a tenant restored on its primary's node
+    keeps its lineage, and fails over as before once its copies have taken
+    the restored file (<a href="sharding-failover.html#automatic-failover">automatic
+    failover</a>).</li>
+  <li><b>Replicas and standbys</b> can be archived the same way: their
+    tenants' writes are the primary's, numbered alike, and a promotion goes
+    on in the same archive.</li>
+</ul>
+
+<p>The node needs <code>--replication-token</code>. What it costs and how
+the archive follows tenants made, closed, moved, restored and promoted:
+<a href="/docs/replication#node-archive">Archiving every tenant of a
+node</a>.</p>
+
+<h2 id="across-tenants">A query across tenants</h2>
+
+<p>An operator's question about every tenant — how many orders each took
+since yesterday, the twenty newest sign-ups of all of them — is one request
+to the router, which runs the read on each tenant and merges the answers as
+the request says.</p>
+
+<pre data-lang="bash"># each tenant's count, a row each with its tenant
+curl -X POST localhost:8090/_shard/query -H 'Authorization: Bearer root' \
+     -d '{"query":"get orders select count() as n where at >= $1","params":["2026-10-11T00:00:00Z"]}'
+# {"rows":[{"tenant":"acme","n":31},{"tenant":"globex","n":7}],"tenants":2,"answered":2,"failed":[],"ms":2}
+
+# the twenty newest of all of them: each tenant's twenty, merged
+curl -X POST localhost:8090/_shard/query -H 'Authorization: Bearer root' \
+     -d '{"query":"get users select email, created order created desc limit 20",
+          "merge":{"order":["created desc"],"limit":20}}'
+
+# counts added up by day, over the tenants whose names start with eu-
+curl -X POST localhost:8090/_shard/query -H 'Authorization: Bearer root' \
+     -d '{"query":"get orders select bucket(at, 1d) as day, count() as n group day",
+          "merge":{"sum":["n"],"group":["day"]},"prefix":"eu-"}'
+
+# the first twenty names of all of them in Turkish's order, a field
+# declared `name text collate tr nocase`
+curl -X POST localhost:8090/_shard/query -H 'Authorization: Bearer root' \
+     -d '{"query":"get people select name order name limit 20",
+          "merge":{"order":[{"column":"name","collate":"tr","nocase":true}],"limit":20}}'
+</pre>
+
+<ul>
+  <li><b>The router's token alone.</b> A user's token, bound to its tenant,
+    and the nodes' data token are refused (401).</li>
+  <li><b>Reads only.</b> A statement that writes is refused on every node
+    (403) and writes nothing.</li>
+  <li><b>Never cut.</b> A tenant that fails or times out fails the query,
+    named; <code>"partial": true</code> answers the others' rows with the
+    failures listed. The rows and bytes gathered are bounded, and a query
+    past either is refused (413).</li>
+  <li><b>Each answer is its tenant's own.</b> Tenants are read at different
+    moments: there is no one moment across them.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>Tenants are the isolation boundary, and this crosses it, so it is a
+<code>/_shard/</code> endpoint behind the router's <code>--token</code>. A
+JSON Web Token is refused there as any token other than the router's is:
+the router holds no keys, and a token bound to one tenant must not reach
+the others through it. The router asks each tenant through its node's
+<code>POST /_admin/tenants/&lt;t&gt;/query</code> with the node's admin
+token, which it holds already: a token that can take a tenant's whole
+image (<code>GET /_admin/tenants/&lt;t&gt;/file</code>) learns nothing more
+by reading it, where the nodes' data token, which nothing else here needs,
+would reach every tenant and write. The node refuses a statement that
+writes before it runs, and runs the rest in read-only mode besides.</p>
+
+<p>The router still parses no FenecQL. The statement and its parameters go
+to every node as they came, and what is done with the rows is said in the
+request, never read out of the query:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Member</th><th>Does</th></tr></thead>
+<tbody>
+<tr><td><code>query</code>, <code>params</code></td><td>the statement each tenant runs, as <code>/query</code> takes it</td></tr>
+<tr><td><code>tenants</code> or <code>prefix</code></td><td>the tenants named, or those whose names start so; every tenant in the directory without either. A name the directory does not hold is refused (404), nothing asked</td></tr>
+<tr><td><code>merge</code></td><td>none: the rows one after another, tenants in name order, each with its tenant's name first; <code>{"order": [..], "limit": n}</code>; <code>{"sum": [..], "min": [..], "max": [..], "group": [..]}</code> (below)</td></tr>
+<tr><td><code>column</code></td><td>the name of the tenant's column, <code>tenant</code> by default</td></tr>
+<tr><td><code>partial</code></td><td>answer the rows of the tenants that answered, the failures listed beside them</td></tr>
+<tr><td><code>timeout_ms</code></td><td>the query's one timeout, under the router's <code>--fanout-timeout</code> (30 s)</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Three merges, each exact from the tenants' answers alone:</p>
+
+<ul>
+  <li><b>One after another</b>, the default: every row, its tenant
+    named.</li>
+  <li><b>An order</b>: a k-way merge by the named columns, each
+    <code>asc</code> or <code>desc</code>, of rows each tenant gives in that
+    order. With each tenant's own <code>order ... limit 20</code>, the first
+    twenty of the merge are the first twenty of all of them. The router
+    checks each tenant's rows come in the order, and a tenant whose do not
+    — its statement orders otherwise — fails, never merged wrong. Values
+    compare as the engine compares them, text by its bytes; a timestamp
+    travels as ISO text, which leaves its milliseconds out where they are
+    0, so a text that is one compares as its time. Ties go in tenant name
+    order. A key whose text is not ordered by its bytes says how it is
+    (below).</li>
+  <li><b>A fold</b>: <code>sum</code>, <code>min</code> and
+    <code>max</code> of the named columns, by the <code>group</code>
+    columns, groups in order. These are the aggregates that combine across
+    tenants: a count is a sum of counts. An average of averages is not an
+    average, so there is none: sum its sum and its count. Every column of a
+    row must be grouped by or folded, or the tenant fails: a column the
+    merge would drop is an answer cut. A sum of whole numbers past 64 bits
+    is refused, as the engine refuses one. A <code>min</code>,
+    <code>max</code> or <code>group</code> column may be an object naming
+    its text order as an order's key is: a tenant's <code>min</code> over a
+    collated field is the collation's least, so the least of those is too,
+    and a <code>nocase</code> group is one for every text folding to it,
+    under the first tenant's text.</li>
+</ul>
+
+<p>A column whose text the tenants compare otherwise than by its bytes is
+an object in place of its name: <code>{"column": "name", "collate": "tr",
+"nocase": true, "desc": true}</code> where <code>"name desc"</code> would
+be. The router reads no schema, so what the field declares —
+<code>collate tr</code> or <code>und</code>, <code>nocase</code> — or what
+the statement's <code>order name collate tr</code> names is said again
+here, and the column compares by the engine's own rule: the collation over
+the case folds, the texts that fold to one tied, and a text read as text
+even where it looks like a timestamp. <code>"nocase": true</code> folds as
+a field in the column's collation does, Turkish's under <code>tr</code>
+(<code>I</code> the capital of <code>ı</code>) and Unicode's otherwise;
+where the statement's <code>collate</code> names another than the field's
+own, <code>"nocase"</code> names the field's, as <code>"nocase":
+"und"</code> for a plain <code>nocase</code> field ordered <code>collate
+tr</code>. A collation other than <code>tr</code> or <code>und</code> is
+refused (400), named, and <code>desc</code> is an order's alone. Not told,
+the router compares bytes: the tenants whose rows come in another order
+fail, and a <code>min</code> or <code>max</code> is the bytes' least or
+greatest of the tenants' own.</p>
+
+<p>A tenant that fails — its node unreachable, its call past the timeout,
+an answer that does not fit the merge, or one the node refused — is named
+with its node, the status and why. Without <code>"partial": true</code>
+the query fails with every failure named; the first stops the asking, and
+the answer says how many tenants were not asked. Its status is the
+tenants' own where they all failed alike — a statement every node refused
+is 400 or 403 — and 502 otherwise. A tenant moved while the query runs is
+asked again on the node the directory names now; one deleted meanwhile is
+a failure. The tenants come from the directory as the query begins: one
+created after that is not in it.</p>
+
+<p>The rows gathered from the tenants together are bounded by
+<code>--fanout-max-rows</code> (100 000) and the bytes of their answers by
+<code>--fanout-max-bytes</code> (64 MiB), counted as the answers arrive: a
+query past either is refused (413), its partial rows or not, and the
+asking stops. The calls go out over the router's connections to the nodes,
+<code>--fanout-concurrency</code> (16) at once, the tenants taken node by
+node in turn, and each tenant's answer is read for the merge on the thread
+that fetched it, beside the calls still out.</p>
+
+<p>Each tenant's answer is one statement's, as <code>/query</code>'s is.
+Tenants are separate databases read at different moments, so two answers
+are of no one moment, and a write landing in one while the query runs may
+or may not be in its answer. A read that opens a tenant opens it on its
+node, which closes it again once idle.</p>
+
+<p>A query across tenants is a span of the router's trace, a span a node
+under it, and each tenant's read on its node under that node's span, all
+with the request's id; the router counts them in
+<code>fenec_router_fanouts_total</code> and two more (<a
+href="monitoring.html#router">Monitoring</a>), no label naming a tenant.
+Each is a line of the router's audit log; the nodes' reads for it are not,
+as a read is not.</p>
+
+<p>Over 100 tenants of 200 rows on three nodes, on one machine
+(<code>make shard-bench ARGS=fanout</code>):</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">a count, summed</th><th class="n">the 20 newest, merged</th><th class="n">the 20 first names, <code>collate tr nocase</code></th></tr></thead>
+<tbody>
+<tr><td><code>POST /_shard/query</code></td><td class="n">1.15–1.23 ms</td><td class="n">1.35–1.39 ms</td><td class="n">1.33–1.48 ms</td></tr>
+<tr><td>each tenant through the router, in turn</td><td class="n">4.28–5.16 ms</td><td class="n">5.11–5.45 ms</td><td class="n">4.34–5.62 ms</td></tr>
+<tr><td>each tenant through the router, 16 at once</td><td class="n">1.92–1.98 ms</td><td class="n">1.86–2.17 ms</td><td class="n">1.90–2.21 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>p50 over 300 rounds in three runs, the names' in six beside other
+work on the machine; the client asking 16 at once merges nothing. A merge
+in a collation over case folds costs what one by a timestamp does. A
+request forwarded to one tenant costs what it did.</p>
+</details>

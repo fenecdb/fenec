@@ -1085,7 +1085,7 @@ installs by its checksum.
   `site/content/docs/`; README's feature table and the links beside it; the
   home page (`site/content/index.html`) and the docs index when a visitor
   would pick fenecdb for the feature; and the SDK lists (`languages.html`,
-  `mobile.html`, `sharding.html`'s SDK paragraph, `integrations.html`'s)
+  `mobile.html`, `sharding-read-replicas.html`'s SDK paragraph, `integrations.html`'s)
   when an SDK changes. A section added or changed is found by its words
   alone until the site's search vector cache has its vector: after sections
   change, commit the next `site` deploy's `search-embeddings` artifact as

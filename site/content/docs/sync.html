@@ -264,7 +264,7 @@ server back up is not met by every client at once; a stream that cannot
 reconnect waits the same way, and starts the count again once it opens.</p>
 
 <p><b>A tenant's quota.</b> A tenant node holds each tenant to its quotas
-(<a href="sharding.html#quotas">Quotas</a>), and names the one that refused
+(<a href="sharding-reference.html#quota-bounds">Quotas</a>), and names the one that refused
 a request in its body, which the replica reads. A <code>507</code> of
 <code>bytes</code> or <code>rows</code> is a refusal: waiting makes no room,
 deleting does, and a write that only deletes always lands -- held, the
@@ -288,7 +288,7 @@ server's word: the network says nothing of a tenant's quota.</p>
 <p><b>A move or a failover.</b> A node answers a write to a tenant it is
 moving, or no longer holds, <code>503</code> with
 <code>"retry_after": 1</code> beside its <code>Retry-After</code>
-(<a href="sharding.html#moving-a-tenant">Moving a tenant</a>); a standby
+(<a href="sharding-tenants.html#moving-a-tenant">Moving a tenant</a>); a standby
 router whose directory has not arrived answers a stream so too. The write is
 kept and goes again through the router after that second where it is longer
 than the backoff, as after a quota's <code>429</code>: the node's word for

@@ -151,7 +151,7 @@ curl -H 'Fenec-After: 1042' -X POST http://replica:8080/query \
   <li><b>A read marked <code>Fenec-Read: replica</code> names where it
     read:</b> the answer carries the copy's <code>Fenec-Seq</code> and
     <code>Fenec-History</code>, so a read sent after it never reads older
-    (<a href="sharding.html#read-replicas">Read replicas</a>). A read nobody
+    (<a href="sharding-read-replicas.html#read-replicas">Read replicas</a>). A read nobody
     marked names nothing.</li>
   <li><b>The Python client</b> keeps the number for you:
     <code>client.seq</code>, sent with <code>query(..., after=...)</code>.</li>
@@ -371,7 +371,7 @@ moment inside cannot — and exits 1 when no restore can be made.</p>
 
 <h2 id="node-archive">Archiving every tenant of a node</h2>
 
-<p>A node of tenants (<a href="/docs/sharding"><code>fenec-server --dir</code></a>)
+<p>A node of tenants (<a href="/docs/sharding-reference#the-node-fenec-server-dir"><code>fenec-server --dir</code></a>)
 is archived by one process over one connection: an archive a tenant under a
 root, each the archive above, which <code>fenec restore</code>,
 <code>verify</code> and <code>prune</code> read as they read any.</p>
@@ -669,7 +669,7 @@ feeding and how far each has been sent.</p>
   <li><b>No automatic failover of a single file.</b> Promotion is by hand,
     and so is keeping the old primary from taking writes. A router's tenants
     can have one: nodes that take its lease stop writing when they lose it,
-    and are failed over after (<a href="/docs/sharding#automatic-failover">Automatic
+    and are failed over after (<a href="/docs/sharding-failover#automatic-failover">Automatic
     failover</a>).</li>
   <li><b>No TLS.</b> The stream is plain HTTP, like every other listener
     here: across an open network, a tunnel carries it.</li>

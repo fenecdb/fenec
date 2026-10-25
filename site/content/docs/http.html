@@ -520,7 +520,7 @@ href="/docs/queues#wait">Waiting for a job</a>).</p>
 <p>Send <code>Fenec-Read: replica</code> with a request that only reads, and
 a router standing in a region where the tenant has a read replica answers it
 there rather than from the tenant's home (<a
-href="sharding.html#read-replicas">Read replicas</a>); with
+href="sharding-read-replicas.html#read-replicas">Read replicas</a>); with
 <code>Fenec-After</code> and <code>Fenec-History</code>, as an answer from home
 named them, it is answered from nothing older than that change of that
 history (<a href="replication.html#read-your-writes">Reading your own
@@ -612,8 +612,11 @@ HTTP/1.1 500 Internal Server Error
 {"error":"the write landed on this node, but by the time it was answered ...","outcome":"unknown","seq":4182,"history":"2-6d1f0c2a9b3e4471"}</pre>
 
 <p>A quota is a tenant node's (<code>fenec-server --dir</code>): what each
-bounds, how it is set and why the statuses are these is under
-<a href="sharding.html#quotas">Tenants and sharding</a>. 507 is the storage
+bounds is under <a href="sharding-reference.html#quota-bounds">Sharding:
+reference</a>, how it is set under
+<a href="sharding-tenants.html#quotas">Sharding: tenants</a> and why the statuses
+are these under <a href="sharding-design.html#quota-design">Sharding:
+design</a>. 507 is the storage
 the request needs and the tenant has not got — the request is fine, and a
 smaller one may fit, so not 413, which is about the body; 429 is a rate or
 a share the tenant comes back within.</p>
@@ -633,7 +636,7 @@ the rows matching your filter, then each change to them as it happens.</p>
     <code>--http-max-streams</code>, 64 by default, a database's -- on a
     tenant node each tenant's own -- and each one of
     <code>--max-connections</code> too, which a node's tenants share
-    (<a href="sharding.html#quotas">a tenant's share</a>).</li>
+    (<a href="sharding-reference.html#quota-bounds">a tenant's share</a>).</li>
   <li><b>A row reaching its <code>@ttl</code></b> is told as a deletion at
     its time, as a write would be, not when the sweep deletes it a minute
     and its grace later.</li>
@@ -752,7 +755,7 @@ fenec-server however many viewers it has.</p>
 change of its history (<code>Fenec-After</code>) judges it as home does, but
 only up to where it stands: behind home it answers 304 to a write home holds,
 so <code>FenecHttp.live</code> polls home on a client reading near (<a
-href="sharding.html#read-replicas">Read replicas</a>).</p>
+href="sharding-read-replicas.html#read-replicas">Read replicas</a>).</p>
 </details>
 
 <h2 id="changes">Change data capture</h2>
@@ -895,7 +898,7 @@ of it on an open network.</p>
 <table>
 <tbody>
 <tr><td><code>--http-token &lt;value&gt;</code></td><td>every request needs <code>Authorization: Bearer &lt;value&gt;</code>, compared in constant time</td></tr>
-<tr><td><code>--http-cors &lt;origin&gt;</code></td><td>sets <code>Access-Control-Allow-Origin</code>; without it no CORS header is sent at all. A browser&rsquo;s preflight (<code>OPTIONS</code>) from that origin, or any with <code>*</code>, is answered 204 before a token is asked for -- the browser sends none with it -- on a single database and under <code>/t/&lt;tenant&gt;/</code>. Every answer exposes <code>Fenec-Seq</code>, <code>X-Request-Id</code> and <code>Retry-After</code> and lets <code>Idempotency-Key</code> in. Through <code>fenec-shard</code>, give the router the flag: it answers the preflight itself and puts its headers on its own answers and in place of the node's (<a href="/docs/sharding#cors">Tenants and sharding</a>)</td></tr>
+<tr><td><code>--http-cors &lt;origin&gt;</code></td><td>sets <code>Access-Control-Allow-Origin</code>; without it no CORS header is sent at all. A browser&rsquo;s preflight (<code>OPTIONS</code>) from that origin, or any with <code>*</code>, is answered 204 before a token is asked for -- the browser sends none with it -- on a single database and under <code>/t/&lt;tenant&gt;/</code>. Every answer exposes <code>Fenec-Seq</code>, <code>X-Request-Id</code> and <code>Retry-After</code> and lets <code>Idempotency-Key</code> in. Through <code>fenec-shard</code>, give the router the flag: it answers the preflight itself and puts its headers on its own answers and in place of the node's (<a href="/docs/sharding-reference#cors">Tenants and sharding</a>)</td></tr>
 <tr><td><code>--http-read-only</code></td><td>write endpoints return 403; <code>fenec-server</code>'s own path is unaffected</td></tr>
 <tr><td>a replica</td><td>every write returns 403, whatever the flags: its writes come from its primary</td></tr>
 <tr><td>non-loopback address</td><td>refuses to bind without a token, unless <code>--insecure</code> is given</td></tr>
@@ -1265,7 +1268,7 @@ messages   read,insert  where room in (get members select room where user = $jwt
     <code>&lt;t&gt;</code> (a text, or a list holding it), and is refused
     with 403 under every other tenant's prefix; one naming no tenant is
     refused there unless the node runs with
-    <code>--jwt-unbound-tenants</code> (<a href="/docs/sharding#tokens">Tokens</a>).</li>
+    <code>--jwt-unbound-tenants</code> (<a href="/docs/sharding-reference#tokens">Tokens</a>).</li>
 </ul>
 
 <p>The server's own <code>--http-token</code> keeps full access alongside.</p>

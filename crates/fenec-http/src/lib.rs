@@ -1782,7 +1782,7 @@ fn admitted(cfg: &Config, req: &Request) -> bool {
 /// The header a client marks a request it knows only reads with
 /// (`Fenec-Read: replica`): a router may answer it from a tenant's read
 /// replica near it rather than from its home region (`fenec-shard`'s read
-/// replicas, `site/content/docs/sharding.html#read-replicas`), and every
+/// replicas, `site/content/docs/sharding-read-replicas.html#read-replicas`), and every
 /// server runs it read-only.
 pub const READ_HEADER: &str = "fenec-read";
 

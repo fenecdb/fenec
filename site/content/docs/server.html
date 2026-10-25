@@ -52,8 +52,10 @@ every write with 403. The flags, promotion and what a failover loses are on <a
 href="/docs/replication">Replication</a>. With <code>--dir &lt;path&gt;</code>
 instead of <code>--file</code> it serves a directory of tenant files, one per
 tenant under <code>/t/&lt;tenant&gt;/</code>; that mode, its
-<code>--admin-token</code> and <code>--idle-close</code>, and the router in
-front of it are on <a href="/docs/sharding">Tenants and sharding</a>.</p>
+<code>--admin-token</code> and <code>--idle-close</code> are on <a
+href="/docs/sharding-reference#the-node-fenec-server-dir">Sharding
+reference</a>, and the router in front of it on <a
+href="/docs/sharding">Tenants and sharding</a>.</p>
 </details>
 
 <h2 id="flags">Flags</h2>
@@ -63,7 +65,7 @@ front of it are on <a href="/docs/sharding">Tenants and sharding</a>.</p>
 <thead><tr><th>Flag</th><th>What it does</th></tr></thead>
 <tbody>
 <tr><td><code>-f, --file &lt;path&gt;</code></td><td>The database file. In memory without it. The server holds <code>&lt;path&gt;.lock</code> while it runs, so a second process over the file — another server, <code>fenec mcp --file</code>, an app through the native library — is refused rather than let corrupt it.</td></tr>
-<tr><td><code>--dir &lt;path&gt;</code></td><td>One file per tenant in this directory (<a href="/docs/sharding">Tenants and sharding</a>).</td></tr>
+<tr><td><code>--dir &lt;path&gt;</code></td><td>One file per tenant in this directory (<a href="/docs/sharding-reference#the-node-fenec-server-dir">Sharding reference</a>).</td></tr>
 <tr><td><code>--http &lt;address&gt;</code></td><td>Where to listen. Default <code>127.0.0.1:8080</code>.</td></tr>
 <tr><td><code>--http-token &lt;value&gt;</code></td><td>Requires <code>Authorization: Bearer &lt;value&gt;</code>. Also read from <code>FENEC_HTTP_TOKEN</code>, since <code>argv</code> shows up in <code>ps</code>.</td></tr>
 <tr><td><code>--jwt-secret</code>, <code>--jwt-secret-file</code>, <code>--jwt-keys</code>, <code>--jwt-require-exp</code>, <code>--jwt-max-age</code>, <code>--jwt-tenant-claim</code>, <code>--jwt-unbound-tenants</code>, <code>--policy</code></td><td>Tokens held to rules: which collections, which rows (<a href="#security">Security</a>).</td></tr>
@@ -76,7 +78,7 @@ front of it are on <a href="/docs/sharding">Tenants and sharding</a>.</p>
 <tr><td><code>--max-connections</code>, <code>--idle-timeout</code>, <code>--max-memory</code></td><td><a href="#limits">Limits</a>.</td></tr>
 <tr><td><code>--http-cors</code>, <code>--http-read-only</code>, <code>--http-max-streams</code>, <code>--http-keepalive</code>, <code>--changes</code>, <code>--idempotency-ttl</code></td><td>The HTTP endpoint's options (<a href="/docs/http">HTTP endpoint</a>).</td></tr>
 <tr><td><code>--replication-token</code>, <code>--replica-of</code>, <code>--promote</code>, <code>--replication-buffer</code>, <code>--cdc</code></td><td><a href="/docs/replication">Replication</a> and <a href="/docs/microservices">change data capture</a>.</td></tr>
-<tr><td><code>--admin-token</code>, <code>--idle-close</code>, <code>--lease</code></td><td>A tenant node's (<a href="/docs/sharding">Tenants and sharding</a>). The admin token is also read from <code>FENEC_ADMIN_TOKEN</code>.</td></tr>
+<tr><td><code>--admin-token</code>, <code>--idle-close</code>, <code>--lease</code></td><td>A tenant node's (<a href="/docs/sharding-reference#the-node-fenec-server-dir">Sharding: reference</a>). The admin token is also read from <code>FENEC_ADMIN_TOKEN</code>.</td></tr>
 <tr><td><code>--follow &lt;postgres://...&gt;</code>, <code>--follow-*</code></td><td>Mirrors a PostgreSQL table into the file and serves it (<a href="import.html#serving">Import</a>).</td></tr>
 <tr><td><code>--metrics</code>, <code>--slow-ms</code>, <code>--audit</code>, <code>--auth-delay</code></td><td><a href="/docs/monitoring">Monitoring</a> and the audit log.</td></tr>
 <tr><td><code>--otlp-endpoint</code>, <code>--otlp-header</code>, <code>--trace-sample</code></td><td>OpenTelemetry traces to a collector; off unless an endpoint is given (<a href="/docs/monitoring#tracing">Tracing</a>).</td></tr>
@@ -158,7 +160,7 @@ would be good for ever (<code>--jwt-require-exp off</code> takes it), and
 <code>--jwt-max-age &lt;s&gt;</code> refuses one whose <code>exp</code> lies
 further ahead than that. On a <code>--dir</code> node a token reaches only
 the tenant its <code>tenant</code> claim names
-(<a href="/docs/sharding#tokens">Tokens</a>). Pass the secret with <code>--jwt-secret-file</code> or
+(<a href="/docs/sharding-reference#tokens">Tokens</a>). Pass the secret with <code>--jwt-secret-file</code> or
 <code>FENEC_JWT_SECRET</code> — <code>argv</code> shows up in <code>ps</code>
 output.</p>
 
@@ -439,7 +441,7 @@ counted apart as well, under <code>--http-max-streams</code>, a database's
 own: on a tenant node each tenant's, where <code>--max-connections</code> is
 what all of them share, and each tenant's streams and held writes take a
 quarter of it at most unless its quota says otherwise
-(<a href="sharding.html#quotas">quotas</a>).</p>
+(<a href="sharding-reference.html#quota-bounds">quotas</a>).</p>
 
 <p><code>--max-memory</code> puts a ceiling on the data footprint. Above it,
 requests that <b>grow</b> the data are refused with 507, while reads,
@@ -531,7 +533,7 @@ ghcr.io/fenecdb/fenec-server --help</code>.</p>
 systemd unit for a server of every role — a tenant node, a region's router,
 the global router, an archiver — with its tokens in an environment file,
 the alert rules and the operator's runbook (<a
-href="sharding.html#deploying">Deploying it</a>).</p>
+href="sharding-reference.html#deploying">Deploying it</a>).</p>
 
 <p>Two containers loading the same file and writing it corrupt it. On
 Kubernetes that means a <code>StatefulSet</code> rather than a

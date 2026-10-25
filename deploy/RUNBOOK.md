@@ -2,7 +2,7 @@
 
 The operator's runbook for a self-hosted, multi-region fenecdb: what runs
 where, the order it comes up in, and what to do when something breaks. The
-design behind each step is in [Tenants and sharding](https://fenecdb.com/docs/sharding);
+design behind each step is in [Sharding design](https://fenecdb.com/docs/sharding-design);
 this page is the procedures, and the files beside it are the kit:
 
 | File | What it is |
@@ -244,7 +244,7 @@ with none. Past it the client is answered 502, the request perhaps run.
   read, a keyed write and a request the node cannot have run go to the
   tenant's new primary, any other write is a 502 saying it may have run,
   and a subscription ends for its client to open again
-  (`sharding.html#in-flight`). With `make drill`'s lease of
+  (`sharding-design.html#in-flight`). With `make drill`'s lease of
   2 s the killed node's writers write again just after its failover, where
   they waited for the timeout's 4 s before. What is left to the timeout is
   what no failover ends: a node gone whose tenants have no copy, or whose

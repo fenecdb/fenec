@@ -44,6 +44,11 @@ test('the index holds every page', () => {
     'docs/fenecql-search', 'docs/fenecql-vector', 'docs/server', 'docs/redis', 'docs/benchmarks', 'docs/vs-sqlite']) {
     assert.ok(pages.has(p), `no section of ${JSON.stringify(p)}`);
   }
+  // docs/sharding was one page and is a tutorial and seven others now.
+  for (const p of ['sharding', 'sharding-tenants', 'sharding-failover', 'sharding-regions', 'sharding-entry',
+    'sharding-read-replicas', 'sharding-reference', 'sharding-design']) {
+    assert.ok(pages.has(`docs/${p}`), `no section of docs/${p}`);
+  }
 });
 
 test('a known query finds its page first', () => {
@@ -51,7 +56,7 @@ test('a known query finds its page first', () => {
   assert.match(first('insert if absent'), /^docs\/(redis|fenecql(-writing)?)(#|$)/);
   assert.equal(first('facet'), 'docs/fenecql-search#facets');
   assert.equal(first('highlight snippet'), 'docs/fenecql-search#highlights');
-  assert.match(first('replica failover'), /^docs\/(replication|sharding)(#|$)/);
+  assert.match(first('replica failover'), /^docs\/(replication|sharding(-failover)?)(#|$)/);
 });
 
 test('a word being typed finds the words it begins', () => {
