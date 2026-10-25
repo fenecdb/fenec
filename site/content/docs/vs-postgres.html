@@ -117,7 +117,7 @@ and is alpha software.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What PostgreSQL does that fenecdb does not</summary>
 <p>What fenecdb gives up for its size is listed in <a
 href="limits.html">Limits</a>: no SQL dialect (<a href="sql.html">its everyday spellings</a> aside) and a join only on a key (a query reads one
 collection and attaches related rows with <code>lookup</code>), one writer
@@ -196,7 +196,7 @@ client program with the same index settings.</p>
     <a href="benchmarks-vector.html#scale">Benchmarks</a>.</li>
 </ul>
 
-<details class="deep"><summary>Method and details</summary>
+<details class="deep"><summary>Method, and what was not measured</summary>
 <p>YCSB is <code>make ycsb</code>'s, every cell of it in <a
 href="benchmarks-ycsb.html#ycsb">Everyday reads and writes</a> with its method:
 each cell 30 s after a 5 s warm-up, the systems in turns, PostgreSQL with
@@ -287,7 +287,7 @@ LIMIT 10;
   limit 10
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How a join, a transaction and row-level security carry over</summary>
 <p>A join becomes <code>lookup</code>, which attaches each row's related
 rows, or <code>in (get …)</code>, which filters by another collection's
 rows (<a href="fenecql-lookup.html#the-lookup-clause">The lookup clause</a>,

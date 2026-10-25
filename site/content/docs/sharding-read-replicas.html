@@ -63,7 +63,7 @@ first, whatever the tenant's home, and its router answers it from the read
 replica there; every other request goes to the home the entry has
 learned.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Placing, routing and failing over a read replica</summary>
 <p><b>Placing one.</b> <code>PUT
 /_shard/tenants/&lt;t&gt;/read-replicas/&lt;region&gt;</code> makes the tenant
 on the node of that region holding the fewest tenants and copies — never a

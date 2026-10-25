@@ -34,7 +34,7 @@ curl -H "Authorization: Bearer $SCRAPE" http://127.0.0.1:9464/_metrics
     systems</a>.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Which token a scrape needs</summary>
 <p>With <code>--http</code> the HTTP listener serves <code>/_metrics</code>
 as well, and a <code>--dir</code> node serves it there. The path carries an
 underscore, as <code>/_admin</code> and <code>/_replication</code> do: a
@@ -85,7 +85,7 @@ are reported as gauges.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What a statement's count includes</summary>
 <p>A statement is timed from its arrival to its answer: the wait for the lock
 is in it, and under <code>--sync always</code> the wait for the disk, since
 that is the latency a client sees. A statement is a request, and
@@ -124,7 +124,7 @@ FENEC_JWT_SECRET=$(openssl rand -hex 32) \
     the same rows: <a href="/docs/grafana">Grafana</a>.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>The dashboard's panels and alert expressions</summary>
 <p><code>monitoring/</code> in the repository holds a Grafana dashboard
 (<code>grafana/fenecdb.json</code>), a Prometheus configuration and a compose
 file that runs fenec-server with both, the dashboard already loaded. The
@@ -159,7 +159,7 @@ longer, with what it ran, as a JSON line on stderr.</p>
 
 <pre data-lang="json">{"at":"2026-10-05T09:30:12.310Z","event":"slow","level":"warn","proto":"http","peer":"10.0.0.7:53112","request_id":"9f2c41d07ab35e18","duration_ms":312.408,"kind":"read","failed":false,"statement":"POST /query {\"query\":\"get people select name order name collate tr\"}"}</pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What a slow-statement line holds</summary>
 <p>The log line uses the same timing the histogram has. It is the audit
 log's shape — <code>at</code>, <code>event</code>, <code>level</code>, the
 peer and the <a href="#request-id">request id</a> — with the duration in
@@ -187,7 +187,7 @@ one line — with call counts, times, rows and failures, at
 curl -X DELETE -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/_stats/statements
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How statements are counted by shape</summary>
 <p>Every statement is also counted by its shape — its text with each literal
 and parameter written <code>$1</code>, <code>$2</code>… and a list of literals
 alone, a vector's components, as one — so the same statement run with other
@@ -223,7 +223,7 @@ not logged.</p>
     shape.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>The audit log's events and the refusal wait</summary>
 <pre data-lang="json">{"at":"2026-10-01T09:30:12.310Z","event":"schema","level":"info","proto":"http","peer":"10.0.0.7:53112","request_id":"5d0e7c2a91f4b366","statement":"create collection notes (title text)","failed":false}
 {"at":"2026-10-01T09:32:05.117Z","event":"refused","level":"warn","proto":"http","peer":"198.51.100.4:40031","request_id":"b81f03c6d2e94a57","method":"GET","path":"/notes"}
 {"at":"2026-10-01T09:40:00.550Z","event":"admin","level":"info","proto":"http","peer":"10.0.0.2:61200","request_id":"deploy-7","method":"POST","path":"/_shard/tenants/acme/move","http_status":200}</pre>
@@ -349,7 +349,7 @@ tenant moves. No label names a tenant.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What the router counts</summary>
 <p><code>fenec-shard</code> serves <code>/_metrics</code> on its own listener,
 behind its <code>--token</code> as <code>/_shard/</code> is: a scrape names the
 nodes. It counts what it answered and what the nodes took over it; what a
@@ -396,7 +396,7 @@ sent.</p>
 # X-Request-Id: checkout-7f3a
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How a request id is kept or made</summary>
 <p>An id a client sends is kept when it is printable ASCII of at most 128
 bytes; any other is replaced, as a header or a log line could not carry it
 whole. A made one is 16 hex characters. <code>fenec-shard</code> takes the
@@ -452,7 +452,7 @@ OTEL_SERVICE_NAME=orders-db fenec-server --file data.fenec \
 </table>
 </div>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>The span's attributes and how spans are sent</summary>
 <p>The server span carries OpenTelemetry's names where one fits:
 <code>http.request.method</code>, <code>http.route</code> (a template:
 <code>/t/{tenant}/{collection}/near</code>), <code>url.path</code>,
@@ -522,7 +522,7 @@ last second's spans as it shuts down.</p>
 <p>Counting is close to free: a few nanoseconds a statement, and counting
 one by its shape takes a fraction of the time parsing it does.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What counting and tracing cost, measured</summary>
 <p>Counting a statement is a handful of relaxed atomic adds, into counters a
 thread each: 6.7 ns a statement with eight threads counting at once. Into one
 shared set of counters the same eight cost 720 ns each, the cache line moving

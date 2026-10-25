@@ -94,7 +94,7 @@ create index on docs (meta.source.rank) @sorted
     <code>text</code> field still refuses an object.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How objects keep their keys and numbers, and what paths cost</summary>
 <p>An object's keys are kept sorted and unique: a key given twice — in
 FenecQL, in a JSON body, in a parameter — refuses the write rather than
 keep one of them, since which one a reader keeps differs from reader to
@@ -217,7 +217,7 @@ put events {name: "logout", t: 1758285296000}        -- epoch ms
 get events where t >= "2026-01-01" and t < now()
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Why timestamp is a type of its own</summary>
 <p><code>timestamp</code> holds UTC epoch milliseconds as an
 <code>i64</code>. Writes accept both text and numbers; a text literal in a
 comparison is parsed.</p>
@@ -265,7 +265,7 @@ get people where name &gt; $1 order name limit 20   -- the page after $1
     first needed.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How collate und and tr order text, and what they cost and add to the module</summary>
 <p>Text is ordered by its bytes unless a key says otherwise, and the bytes are
 wrong in every language: every capitalised word comes before every lowercase
 one, an accented letter lands after <code>z</code>, and every script past
@@ -435,7 +435,7 @@ get users select name order name limit 20       -- in Turkish order, case aside
     refuses when two of its values would become one.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How the case fold is made and held</summary>
 <p>The fold is Unicode's full case folding, the <code>C</code> and
 <code>F</code> mappings of CaseFolding.txt, which Python's
 <code>str.casefold()</code> is too, and it is held to that at every code
@@ -546,7 +546,7 @@ alter collection orders rename field total to amount
     <code>set</code> it from the old one, and drop the old one.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What a field change does to stored documents</summary>
 <p>A document is its values one after another in field order, so what a
 change costs is what it does to that order. A field added goes last: a
 document written before it ends before the field's place, and reads
@@ -592,7 +592,7 @@ compact articles
 
 <p><code>compact</code> drops deleted data and rewrites the file.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What compact leaves in place</summary>
 <p><code>compact</code> drops the dead records and rewrites the file. The
 indexes stand — the documents are the same ones, and every index is keyed by
 id — except a vector graph holding tombstones, which is rebuilt: nothing else

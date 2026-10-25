@@ -78,7 +78,7 @@ get articles match body $1 rerank embed $2 candidates 500 limit 10
     href="#hybrid">hybrid search</a>.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How match filters, and what rerank is for</summary>
 <p><code>match</code> ranks by BM25 over a <code>@text</code> index and adds a
 <code>_score</code> column. Like <code>near</code> it decides the ordering, so
 it combines with neither <code>order</code> nor <code>near</code> — unless
@@ -130,7 +130,7 @@ get products match title $1 fuzzy 1 limit 10           -- one edit at most
     found</b>: <code>databse</code> marks <code>database</code>.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How an edit is counted, and the BEIR results</summary>
 <p>An edit is a letter added, dropped, changed, or two letters next to
 each other swapped — Damerau's distance in its restricted form, as Lucene,
 Elasticsearch and Meilisearch count it: the four are what Damerau found
@@ -202,7 +202,7 @@ get articles match body $1 near embed $2 fuse k 60 candidates 50 limit 10
   <li><b>It needs an <code>@hnsw</code> index</b> for the vector side.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How fuse adds ranks, and the BEIR results</summary>
 <p><code>fuse</code> lets <code>match</code> and <code>near</code> rank the
 same query together. Each side takes its own first <code>candidates</code> —
 20 unless given, never fewer than <code>limit + offset</code> — with the
@@ -258,7 +258,7 @@ get articles select title, snippet(body, 20, $2, $3, $4) match body $1 limit 10
     mark, and is refused.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How marks are found, and what they cost</summary>
 <p>A row's text is read again at query time by the tokenizer of the
 <code>@text</code> index the <code>match</code> searched — the same splitting,
 the same folding (<code>İstanbul</code>, <code>ISTANBUL</code> and
@@ -335,7 +335,7 @@ get products facet meta.origin top 5 limit 0
     facets, and the bare list of rows when it does not.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Which rows a facet counts, and the cost</summary>
 <p>The rows counted are the rows the query selects before
 <code>offset</code> and <code>limit</code>: those the <code>where</code>
 keeps, and with <code>match</code>, those holding a word of the query
@@ -412,7 +412,7 @@ searches a range and the lengths of the chunks between, under a filter its
 entries walked against the filter's rows — and anything else reads the field
 of every row (<code>12.5</code> against an <code>int</code> field is read).</p>
 
-<details class="deep"><summary>Measured</summary>
+<details class="deep"><summary>Ranges and facets, measured on 100 000 rows</summary>
 <p>Over 100 000 rows (<code>make search-bench</code>, an M1 Air): six ranges
 of a <code>@sorted</code> price over every row 0.004 ms against 4.7 ms read
 from every row; under a filter keeping 3%, 0.15 against 0.19 ms; keeping

@@ -61,7 +61,7 @@ docker compose -f monitoring/docker-compose.yml down -v
     through the <a href="/docs/languages">Go SDK</a>.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What the compose file starts and provisions</summary>
 <p>The compose file starts fenec-server with a <code>--policy</code>, a
 one-shot <code>seed</code> container (Node, running
 <code>monitoring/seed/seed.mjs</code> with no install: Node strips the
@@ -152,7 +152,7 @@ beside it, never in its text.</p>
     labels, so a group by time and symbol is a series a symbol.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How the editor binds parameters and types columns</summary>
 <p>The editor colours FenecQL by the docs' own rules (the same file as
 fenec studio's editor), completes <code>$__from</code> and the dashboard's
 variables, and under <b>Explain</b> shows the statement as the backend binds
@@ -393,7 +393,7 @@ ticks           read                   for grafana
     parameter and the candles show no data.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How the token's rule and expiry work</summary>
 <p>A rule's filter narrows the rows further — <code>events read where site
 = $jwt.site for grafana</code> — and is ANDed into every statement the token
 sends, so a Grafana per customer sees its own rows

@@ -1283,7 +1283,8 @@ tbody tr:last-child td { border-bottom: 0; }
 /* ================================================================ docs, plain
    A page reads top-down as a guide: a line of what, a short example, the
    few things worth knowing. The measurements, internals and edge cases are
-   kept, folded under "Details", for whoever wants them. */
+   kept, each in a fold whose summary says what is inside, for whoever
+   wants them. */
 
 .doc { font-size: 16.5px; line-height: 1.7; }
 .doc p, .doc ul, .doc ol { max-width: 40.3827em; } /* 62ch */

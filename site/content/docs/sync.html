@@ -34,7 +34,7 @@ await db.from('tasks').insert({ title: 'new', status: 'open' });
 <p><b>The replica loads <code>fenec.wasm</code></b>, the full module,
 unless given another, so its <code>near</code> walks a graph.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What sync opens, and where a query binds</summary>
 <p>A copy on the client, changes streaming from the server, optimistic
 writes. In fenecdb that is not a library — it is an endpoint and a transport,
 because the same engine already runs on both sides.</p>
@@ -79,7 +79,7 @@ const db = await sync({
     <code>connect(url, { schema, migrations, migrate: true })</code>.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How the schema is compared</summary>
 <p>The comparison is the server's engine (<code>POST
 /_schema/plan?mode=follow</code>), the same that checks a page's own
 database at an open, so the two say the same things in the same words. A
@@ -102,7 +102,7 @@ in Dart (<a href="mobile.html#sync">Sync with a server</a>).</p>
 <p>The server sends the current state of each row that changed, not a log of
 every write. That is what a replica needs; it is not an audit log.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Why the stream is a clock, not a log</summary>
 <p>The classic route is a transaction log: every write is an event and the
 subscriber replays them. fenecdb sends the current state of what changed
 instead — the stream is a <i>clock</i>, not a record. That is right for a
@@ -116,7 +116,7 @@ server applies. It cannot be "the latest 100": <code>order</code>,
 <code>limit</code>, <code>offset</code> and <code>count</code> are
 refused.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Why a shape refuses order, limit and offset</summary>
 <p>The whole database is in memory and the WASM32 address space is 4 GB, so a
 client cannot pull an entire collection. A subscription is a subset and the
 filter is applied on the server.</p>
@@ -167,7 +167,7 @@ await p;                                               // the server has it
     server 2 up, and both replicas come to its sum.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How an optimistic write is applied and undone</summary>
 <p>A write is three steps and the order matters: first gather what undoes the
 local change, then apply it locally, then queue it for the server. If the
 server refuses, the local side rolls back fully — no network needed, the undo
@@ -238,7 +238,7 @@ const db = await sync({
 await db.pushed();                                 // every write answered
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Offline, reload, backoff, quota and failover</summary>
 <p><b>Once, by the key.</b> A write whose answer was lost -- the request
 reached the server, the response never came back -- is sent again under the
 <code>Idempotency-Key</code> it was first sent with, and the server answers it
@@ -310,7 +310,7 @@ the local copy takes under a millisecond.</p>
 <a href="javascript.html#state">State in the page</a>. Moving from one to
 the other leaves the code that reads unchanged.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Why live queries re-run instead of updating</summary>
 <p>There is no incremental maintenance and none is needed. The local side is an
 indexed database, so re-running the query from scratch is already under a
 millisecond — the differential dataflow that a <code>Map</code>-backed
@@ -346,7 +346,7 @@ is put back too.</p>
 });
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How a batch lands, and rolls back on both sides</summary>
 <p>The batch is one block on the server: its statements run in order under a
 single write lock, and their writes land together, as one record, or not at
 all. The gain is one round trip instead of N, no other writer slipping in
@@ -368,7 +368,7 @@ changes to the others and sends every tab's writes, one queue for all.</p>
     <code>navigator.locks</code>, as in Node, it is off already.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How tabs elect a leader</summary>
 <p>Every tab has its own wasm instance. If each opened its own subscription
 there would be N copies and N connections, so a single <b>leader</b> is elected
 with <code>navigator.locks</code>; the others receive the same batches over
@@ -393,7 +393,7 @@ away too long, the server sends it a fresh copy instead.</p>
 <pre data-lang="bash">--changes &lt;n&gt;    entries in the ring (default 4096, 24 bytes per entry)
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How far behind a client may fall</summary>
 <p>A client returns with <code>?since=&lt;cursor&gt;</code> and asks for no
 seed. If the cursor has fallen behind the ring, the server reseeds by itself
 rather than silently sending incomplete events.</p>
@@ -428,7 +428,7 @@ it is reseeded.</p>
 <p>The server's change ring is about 96 KB at the default size, and
 subscriptions do not poll.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What the change ring costs</summary>
 <p>At the default <code>--changes 4096</code> the ring is about 96 KB and costs
 one push per entry on the write path. Subscriptions do not poll — see
 <a href="http-reference.html#subscriptions">the HTTP endpoint</a> for why — and are
@@ -454,7 +454,7 @@ expect.</p>
     server its own. Send it to the server itself (<code>db.remote</code>).</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What a shape does not guarantee</summary>
 <ul>
   <li><b>A shape alone is not a security boundary.</b> Under the server's own
     token, a changed id that does not match the shape is sent as a deletion:

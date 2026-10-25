@@ -13,7 +13,7 @@ services follow its writes as events.</p>
 that no other service can read. A token then decides which collections and
 rows each caller may touch.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How a tenant keeps a service apart</summary>
 <p>Each service keeps its own data and tells the others what changed.
 fenecdb gives a service a database of its own on a shared node, a token that
 reaches only that, and the writes on its disk as a stream of events — which
@@ -45,7 +45,7 @@ rows are announced together.</p>
 curl -X POST http://127.0.0.1:8080/_changes/consumers/billing
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Why the collection is its own outbox</summary>
 <p>An outbox table exists because a service must change its data and
 announce the change together, or not at all. A fenecdb
 <code>/batch</code> is one record on disk, so the rows it
@@ -77,7 +77,7 @@ Pipe the lines into Kafka with any tool that writes to a topic.</p>
   | kcat -P -b broker:9092 -t orders
 </pre>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How the relay hands writes on</summary>
 <p><code>python -m fenecdb.relay</code> reads a consumer's writes and hands
 them on — to standard output, one JSON object a line, or to a webhook —
 and moves the cursor only once they are out. Kafka takes them through any
@@ -94,7 +94,7 @@ tool that writes lines to a topic, as above; a webhook:</p>
 handler safe to run twice; a consumer that falls too far behind starts over
 from a fresh read.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>The delivery guarantees</summary>
 <ul>
   <li><b>At least once.</b> A consumer that crashes between reading and
   committing reads those writes again. Key what you do by
@@ -131,7 +131,7 @@ from a fresh read.</p>
 <p>It is not a message broker. To keep events for a long time or share them
 with many teams, relay them into one.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What it leaves to a broker</summary>
 <p>A consumer reads one database's writes; there are no topics,
 partitions or retention of their own, and a server keeps its writes in
 memory up to the buffer. For fan-out to many teams, a long history or

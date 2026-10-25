@@ -45,7 +45,7 @@ added, dropped or renamed with
 and nested objects are a <a href="/docs/fenecql-schema#json"><code>json</code>
 field</a>.</p>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Relations, one-way replication and type gaps</summary>
 <p>These are consequences of the design, hard-coded ceilings, and behaviours
 it is cheaper to read about than to discover. The few that are planned say
 so.</p>
@@ -158,7 +158,7 @@ usually the vectors.</p>
     memory.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What a file costs to hold, measured</summary>
 <p><b>The documents stay in the file and the indexes are in memory.</b> The
 file is mapped (<a href="concepts.html#the-file-is-mapped">The file is
 mapped</a>), so a document is read from the pages the operating system holds
@@ -244,7 +244,7 @@ time at the next open, never data.</p>
     <code>compact</code>, slowing <code>near</code> a little.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Graphs, compaction, batches, ordered indexes and buffered writes</summary>
 <ul>
   <li><b>The graph is derived data and is written only during
     <code>snapshot</code>, <code>compact</code> and <code>checkpoint</code></b>
@@ -356,7 +356,7 @@ what you might expect.</p>
   <li><b><code>put</code> does not check that a vector is finite.</b></li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>Edge cases of sparse near, filters, order and collation</summary>
 <ul>
   <li><b><code>near</code> over a <code>sparse&lt;N&gt;</code> field ranks
     only the documents sharing a dimension with the query</b>, by dot product
@@ -473,7 +473,7 @@ encryption of its own.</p>
   <li><b>Too many connections are refused,</b> not queued.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>The server's limits on TLS, transactions and connections</summary>
 <ul>
   <li><b>No TLS.</b> A token travels in the clear on an open network.
     Listening on a non-loopback address with no token is refused without
@@ -513,7 +513,7 @@ href="http-reference.html">HTTP reference</a>; this is what it leaves out.</p>
     WebSockets.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>The HTTP listener's limits on bodies, batches and streams</summary>
 <ul>
   <li><b>Not a separate process.</b> It opens as a second listener via
     <code>fenec-server --http</code>; there is no standalone binary, because two
@@ -574,7 +574,7 @@ SQLite or PostgreSQL, and can follow a PostgreSQL table as it changes.</p>
     an integer key.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>What import does not read or follow</summary>
 <ul>
   <li>One table becomes one collection. Multi-table migration is out of
     scope; a <code>JOIN</code> on a key reads as a <code>lookup</code>
