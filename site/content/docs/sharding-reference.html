@@ -202,6 +202,7 @@ it.</p>
 <tr><td><code>--global-directory &lt;path&gt;</code></td><td>The region's router's copy of the global directory. Default: the <code>--directory</code> file with <code>.global</code> before <code>.fenec</code>.</td></tr>
 <tr><td><code>--near &lt;region&gt;</code></td><td>The region this router stands in: a read its client marks (<code>Fenec-Read: replica</code>) of a tenant with a read replica there goes to it, every other request home. A region's router (<code>--region</code>) is near its region already (<a href="sharding-read-replicas.html#read-replicas">Read replicas</a>).</td></tr>
 <tr><td><code>--replica-timeout &lt;ms&gt;</code></td><td>How long a read replica has to answer such a read, past the wait its <code>Fenec-After</code> asks for; one that does not is let be for 5 s, its region's reads going home. Default <code>2000</code>.</td></tr>
+<tr><td><code>-V, --version</code></td><td>Prints <code>fenec-shard &lt;version&gt;</code> on stdout and exits 0, before the directory is opened or the address bound. Releases up to 0.1.12 have no such flag: the first line of <code>--help</code>, on stderr, names theirs.</td></tr>
 </tbody>
 </table>
 </div>

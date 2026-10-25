@@ -261,6 +261,9 @@ usage: fenec-server [options]
 
       --ping                ask the server at --http for GET /_health and
                             exit: 0 = up, 1 = not. For health checks
+  -V, --version             print `fenec-server <version>` on stdout and
+                            exit 0, before the database is opened or a port
+                            bound
 
 A token or key set empty in the environment is unset; one given empty as a
 flag is refused at the start.
@@ -713,6 +716,14 @@ fn main() {
             }
             "--help" | "-h" => {
                 fenec_http::log!("fenec-server {}\n\n{USAGE}", fenec_core::VERSION);
+                return;
+            }
+            // Read where `--help` is, a flag wherever one stands (never a
+            // flag's value), and on stdout, where a package's check and a
+            // script read it: the file is opened and the port bound only
+            // once every argument has been read.
+            "--version" | "-V" => {
+                println!("fenec-server {}", env!("CARGO_PKG_VERSION"));
                 return;
             }
             other => fail(&format!("unknown option: {other}\n\n{USAGE}")),

@@ -15,8 +15,32 @@
 #
 # FENEC_BINARY_VERSION is the version the binaries say they are, when that is
 # not VERSION: a test that names a release's tarballs for another version.
+#
+# The binaries of 0.1.13 and later are asked `fenec --version` and
+# `fenec-server --version`, each held to `<name> <version>` on stdout; those
+# of a release before it, which have no such flag, name their version on the
+# first line of `fenec-server --help` alone. Which is decided by the
+# binaries' version, not the package's: CI checks the latest release, which
+# may be one from before the flag. tools/homebrew-formula.py cuts over at the
+# same release (VERSION_FLAG).
 
 set -eu
+
+# at_least X.Y.Z[-pre] A.B.C: whether the first, any pre-release part left
+# out, is A.B.C or later, compared number by number (0.1.9 is before 0.1.13).
+at_least() {
+    have=${1%%-*}
+    want=$2
+    for _ in 1 2 3; do
+        h=${have%%.*}
+        w=${want%%.*}
+        [ "$h" -gt "$w" ] && return 0
+        [ "$h" -lt "$w" ] && return 1
+        have=${have#*.}
+        want=${want#*.}
+    done
+    return 0
+}
 
 [ $# -eq 3 ] || { sed -n '2,/^$/s/^# \{0,1\}//p' "$0" >&2; exit 2; }
 version=${1#v}
@@ -32,10 +56,13 @@ pkgversion=$(printf '%s\n' "$version" | sed 's/-/~/')
 base=${version%%-*}
 deb=fenecdb_${version}-1_$arch.deb
 rpm=fenecdb-$version-1.$rpmarch.rpm
+binary_version=${FENEC_BINARY_VERSION:-$version}
+if at_least "$binary_version" 0.1.13; then version_flag=yes; else version_flag=no; fi
 
 # What each container's shell knows: assertions that print what they found,
-# and the run both packages must pass once installed. `fenec-server --help`
-# names the version on its first line; the shell is run on a script, in memory.
+# and the run both packages must pass once installed. Each binary names its
+# version on stdout under --version, or, before 0.1.13, fenec-server on the
+# first line of --help; the shell is run on a script, in memory.
 lib=$(
     cat <<'EOF'
 set -eu
@@ -47,8 +74,16 @@ gone() { [ ! -e "$2" ] || fails "$1: $2 is still there"; }
 run_it() {
     isexec "installed fenec" /usr/bin/fenec
     isexec "installed fenec-server" /usr/bin/fenec-server
-    first=$(/usr/bin/fenec-server --help 2>&1 | head -n 1) || true
-    eq "fenec-server --help, first line" "$first" "fenec-server ${BINARY_VERSION}"
+    if [ "$VERSION_FLAG" = yes ]; then
+        # stdout alone: what a script reads from it.
+        for b in fenec fenec-server; do
+            first=$("/usr/bin/$b" --version) || fails "$b --version exited with an error, printing [$first]"
+            eq "$b --version" "$first" "$b ${BINARY_VERSION}"
+        done
+    else
+        first=$(/usr/bin/fenec-server --help 2>&1 | head -n 1) || true
+        eq "fenec-server --help, first line" "$first" "fenec-server ${BINARY_VERSION}"
+    fi
     out=$(printf 'create collection t (n int)\nput t {id: 1, n: 7}\nget t\n' | /usr/bin/fenec 2>&1) ||
         fails "fenec exited with an error, saying [$out]"
     printf '%s\n' "$out" | grep -q '^1 *7$' || fails "fenec answered [$out], wanted a row 1 7"
@@ -111,7 +146,8 @@ in_container() {
     echo "== $2 in $1 ($arch)"
     docker run --rm --platform "linux/$arch" -v "$dir:/pkg:ro" \
         -e "FILE=$2" -e "VERSION=$version" -e "BASE=$base" -e "PKGVERSION=$pkgversion" \
-        -e "BINARY_VERSION=${FENEC_BINARY_VERSION:-$version}" -e "ARCH=$arch" -e "RPMARCH=$rpmarch" \
+        -e "BINARY_VERSION=$binary_version" -e "VERSION_FLAG=$version_flag" \
+        -e "ARCH=$arch" -e "RPMARCH=$rpmarch" \
         "$1" /bin/sh -c "$lib
 $3"
 }

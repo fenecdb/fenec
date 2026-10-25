@@ -87,6 +87,7 @@ href="/docs/sharding">Tenants and sharding</a>.</p>
 <tr><td><code>--mcp</code>, <code>--mcp-write</code>, <code>--mcp-memory</code>, <code>--mcp-max-rows</code>, <code>--mcp-max-bytes</code>, <code>--mcp-calls-per-sec</code></td><td>MCP for agents at <code>POST /_mcp</code>, each tool held to the request's token; off unless given (<a href="/docs/mcp">Agents and MCP</a>).</td></tr>
 <tr><td><code>--insecure</code></td><td>Allows a non-loopback address without a token.</td></tr>
 <tr><td><code>--ping</code></td><td>Asks the server whether it is up and exits (<a href="#limits">health checks</a>).</td></tr>
+<tr><td><code>-V, --version</code></td><td>Prints <code>fenec-server &lt;version&gt;</code> on stdout and exits 0, before the file is opened or a port bound. Releases up to 0.1.12 have no such flag: the first line of <code>--help</code>, on stderr, names theirs.</td></tr>
 </tbody>
 </table>
 </div>
@@ -99,7 +100,7 @@ href="/docs/sharding">Tenants and sharding</a>.</p>
 <table>
 <thead><tr><th>Code</th><th>When</th></tr></thead>
 <tbody>
-<tr><td><code>0</code></td><td>It stopped as asked: a signal, or the end of stdin under <code>--exit-on-stdin-close</code>, after the final sync. A signal that comes before the server has opened its file ends it by the system's default action instead, with no code of its own. <code>--ping</code>: a server answers.</td></tr>
+<tr><td><code>0</code></td><td>It stopped as asked: a signal, or the end of stdin under <code>--exit-on-stdin-close</code>, after the final sync. A signal that comes before the server has opened its file ends it by the system's default action instead, with no code of its own. <code>--ping</code>: a server answers. <code>--version</code> and <code>--help</code>: printed.</td></tr>
 <tr><td><code>1</code></td><td>A server over a file or in memory could not start: its file could not be opened (another process holds it, or it cannot be read), <code>--follow</code>'s guard could not be put on it, a replica's file was started without <code>--replica-of</code> or <code>--promote</code>, its history could not be settled (a promotion's fork, or its sync, failed), or its HTTP port could not be had. Or <code>--follow</code>'s mirror stopped, before the server served or after, or once serving its listener failed — after the final sync and with no checkpoint. <code>--ping</code>: none answers.</td></tr>
 <tr><td><code>2</code></td><td>A flag or its value was refused, before anything was opened: an open address with no token among them. Also a node's directory that could not be used, a node's HTTP port or <code>--metrics</code>' that could not be had, and a thread the start could not make (after the final sync, with no checkpoint).</td></tr>
 </tbody>

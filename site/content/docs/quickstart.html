@@ -413,7 +413,14 @@ fenec&gt; .quit</pre>
 <pre data-lang="bash">./fenec notes.fenec                          # interactive
 ./fenec notes.fenec -c 'get notes limit 5'
 echo 'get notes' | ./fenec notes.fenec
-./fenec notes.fenec &lt; seed.fenecql           # a script</pre>
+./fenec notes.fenec &lt; seed.fenecql           # a script
+./fenec --version                            # fenec &lt;version&gt;, and nothing opened</pre>
+
+<p><code>--version</code>, or <code>-V</code>, prints the shell's version on
+stdout and exits 0 without opening the file; <code>./fenec version</code>,
+with no dashes, opens a file named <code>version</code>, as any other word
+does. Releases up to 0.1.12 have no <code>--version</code>: the first line
+an interactive session prints names theirs.</p>
 
 <p>Inside the shell: <code>.help</code> <code>.tables</code> <code>.stats</code>
 <code>.functions</code> <code>.save &lt;path&gt;</code> <code>.checkpoint</code>

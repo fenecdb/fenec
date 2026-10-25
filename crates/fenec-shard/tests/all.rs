@@ -17,3 +17,4 @@ mod router;
 mod standby;
 mod tokens;
 mod upstream;
+mod version;
