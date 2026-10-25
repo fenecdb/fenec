@@ -217,12 +217,14 @@ fn a_flag_given_empty_or_a_nested_claim_is_refused_at_the_start() {
     let policy = policy.to_str().unwrap();
     let keyed = ["--jwt-secret", SECRET, "--policy", policy];
     // `--jwt-audience "$AUD"` with AUD unset: a server told "" would take
-    // no token, one told nothing every one.
+    // no token, one told nothing every one; a tenant claim named "" is
+    // held by no token, which --jwt-unbound-tenants took for every tenant.
     for flag in [
         "--jwt-issuer",
         "--jwt-audience",
         "--jwt-client",
         "--jwt-role-claim",
+        "--jwt-tenant-claim",
     ] {
         let mut args = keyed.to_vec();
         args.extend([flag, ""]);
@@ -232,7 +234,7 @@ fn a_flag_given_empty_or_a_nested_claim_is_refused_at_the_start() {
         }
     }
     // A path into a nested object: what a user may edit of themselves sits
-    // one letter from what only the app may.
+    // a word from what only the app may.
     let nested = dir.join("nested.txt");
     std::fs::write(
         &nested,
@@ -244,4 +246,119 @@ fn a_flag_given_empty_or_a_nested_claim_is_refused_at_the_start() {
         Ok(s) => panic!("a nested claim was taken, the server on port {}", s.port),
         Err(log) => assert!(log.contains("top-level claims alone"), "{log}"),
     }
+}
+
+/// A flag holding a JWT to something, given where no key verifies one, is
+/// refused: taken and ignored, a server told `--jwt-audience` and no keys
+/// looked held to it.
+#[test]
+fn a_jwt_flag_without_keys_is_refused_at_the_start() {
+    let file = tmp("providers", "unkeyed.fenec");
+    let file = file.to_str().unwrap();
+    for flags in [
+        &["--jwt-audience", "notes-api"][..],
+        &["--jwt-issuer", "https://idp.example/"],
+        &["--jwt-require-exp", "off"],
+        &["--jwt-unbound-tenants"],
+        &["--jwt-role-claim", "groups"],
+    ] {
+        let mut args = vec!["--file", file];
+        args.extend_from_slice(flags);
+        match try_start(&args) {
+            Ok(s) => panic!("{flags:?} was taken with no keys, port {}", s.port),
+            Err(log) => assert!(
+                log.contains(&format!("{} holds JSON Web Tokens", flags[0]))
+                    && log.contains("no --jwt-secret or --jwt-keys"),
+                "{flags:?}: {log}"
+            ),
+        }
+    }
+}
+
+/// `--jwt-keys` with no `--jwt-issuer` says at the start that it takes any
+/// token the keys sign: Firebase's keys sign every project's.
+#[test]
+fn keys_with_no_issuer_are_warned_of() {
+    let dir = tmp("providers", "keys");
+    std::fs::create_dir_all(&dir).unwrap();
+    let keys = dir.join("jwks.json");
+    let k = b64url_encode(SECRET.as_bytes());
+    std::fs::write(&keys, format!(r#"{{"keys":[{{"kty":"oct","k":"{k}"}}]}}"#)).unwrap();
+    let policy = dir.join("policy.txt");
+    std::fs::write(&policy, POLICY).unwrap();
+    let base = [
+        "--jwt-keys",
+        keys.to_str().unwrap(),
+        "--policy",
+        policy.to_str().unwrap(),
+    ];
+    let warned = "warning: --jwt-keys without --jwt-issuer";
+    let s = start(&base);
+    let log = s.log.lock().unwrap().clone();
+    assert!(log.contains(warned), "{log}");
+    drop(s);
+    let mut args = base.to_vec();
+    args.extend(["--jwt-issuer", "https://idp.example/"]);
+    let s = start(&args);
+    let log = s.log.lock().unwrap().clone();
+    assert!(!log.contains(warned), "{log}");
+}
+
+/// The audit line of a token refused for whom it was issued names the
+/// check, never the token's value.
+#[test]
+fn a_refusal_for_another_audience_is_audited_by_its_check() {
+    let dir = tmp("providers", "audited");
+    std::fs::create_dir_all(&dir).unwrap();
+    let audit = dir.join("audit.log");
+    let s = serve(
+        "audited-server",
+        &[
+            "--jwt-issuer",
+            "https://idp.example/",
+            "--jwt-audience",
+            "notes-api",
+            "--audit",
+            audit.to_str().unwrap(),
+        ],
+    );
+    let other = token(r#"{"sub":"alice","iss":"https://idp.example/","aud":"billing-api"}"#);
+    assert_eq!(ask(&s, &other, "get notes").0, 401);
+    // The line is written before the answer, which waits on nothing.
+    let text = std::fs::read_to_string(&audit).unwrap();
+    let line = text
+        .lines()
+        .find(|l| l.contains(r#""event":"refused""#))
+        .unwrap_or_else(|| panic!("no refusal: {text}"));
+    assert!(
+        line.contains(r#""reason":"the token names no audience (aud) this server takes""#),
+        "{line}"
+    );
+    assert!(
+        !line.contains("billing") && !line.contains("alice"),
+        "{line}"
+    );
+}
+
+/// Under `--jwt-max-age` below an hour, `--mint-token` stamps that age: an
+/// hour's was a token the same server refused.
+#[test]
+fn a_minted_token_lives_no_longer_than_the_max_age() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_fenec-server"))
+        .args([
+            "--jwt-secret",
+            SECRET,
+            "--jwt-max-age",
+            "600",
+            "--mint-token",
+            r#"{"sub":"alice"}"#,
+        ])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    let minted = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    let s = serve("max-age", &["--jwt-max-age", "600"]);
+    let (status, body) = ask(&s, &minted, "get notes");
+    assert_eq!(status, 200, "{body}");
 }

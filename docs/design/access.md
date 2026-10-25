@@ -352,17 +352,25 @@ an identity provider's keys sign every token it issues, and the recipes for
 Clerk, Auth0, Supabase Auth, Cognito and Cloudflare Access found each
 signing for more than one app under one set of keys -- a Cloudflare Access
 team's keys sign every application's token, a Cognito pool's every app
-client's, an Auth0 tenant's every API's and every application's ID tokens
--- so a token a user was given for another app read this database under
-its policy. The policy could pin it (`'<tag>' in $jwt.aud` in every rule),
-which a rule forgotten, or a new one, left open, and nothing pinned the
-issuer. Told issuers, `iss` must be one of them; told audiences, `aud`, a
-text or a list (RFC 7519 allows both), must hold one; told clients, `azp`
-must be one of them or, where the token names no `azp`, `client_id`.
-Cognito's access tokens carry the app client's id in `client_id` and no
-`aud`, so `--jwt-audience` alone would refuse them; Auth0's, Keycloak's and
-Clerk's name the party in `azp` (Clerk's session tokens have no `aud`, and
-`azp` is the page's origin). A token naming both is judged by `azp`, the
+client's, an Auth0 tenant's every API's and every application's ID tokens,
+and Firebase's every project's there is -- so a token a user was given for
+another app read this database under its policy. The policy could pin it
+(`'<tag>' in $jwt.aud` in every rule), which a rule forgotten, or a new
+one, left open, and nothing pinned the issuer. Told issuers, `iss` must be
+one of them; told audiences, `aud`, a text or a list (RFC 7519 allows
+both), must hold one; told clients, `azp` must be one of them or, where the
+token names no `azp`, `client_id`. The two lists are independent, not
+pairs: any issuer told with any audience told, which a policy whose
+providers must each keep to their own audience pins in its rules
+(`$jwt.iss = ... and '...' in $jwt.aud`); pairs in the flags were one more
+syntax for the rare server trusting two providers. Cognito's access tokens
+carry the app client's id in `client_id` and no `aud` unless the app asked
+for one bound to a resource server, whose identifier `aud` then holds, so
+`--jwt-audience <client id>` alone would refuse them; its ID tokens carry
+the client's id in `aud`. Auth0's, Keycloak's and Clerk's name the party in
+`azp` (Clerk's session tokens have no `aud`; `azp` is the page's origin,
+left out where the request carried no `Origin`, and such a token is
+refused under `--jwt-client`). A token naming both is judged by `azp`, the
 party it was issued to: the order is the claims', not a match on either.
 Okta's `cid` and other names stay a rule's (`$jwt.cid = "..."`), which
 applies to no token lacking the claim; a fourth spelling in the flag was
@@ -382,36 +390,76 @@ lib.rs's `authenticate` -- `/query`, REST, `/batch`, a subscription, MCP,
 token, forwarding `Authorization` to the node that does. A refusal is 401
 naming the check (`NO_ISSUER`, `NO_AUDIENCE`, `NO_CLIENT`), never the
 value the token holds, which its sender knows and a log or proxy between
-need not. Told none, a server asks three `is_empty`s of a token's first
-check and takes what it took; told some, the first check scans the
-token's claims once more beside its signature's 2.9 us (HS256) or 38
-(RS256), and a kept token, every request after a client's first, pays
-nothing. `--mint-token` stamps the first issuer, audience and client told
-on claims naming none, as it stamps `exp`, or the server refused what it
-minted.
+need not; `authenticate` hands the same text to the audit log
+(`audit::refusal`, let go by `audit::request` as the next request begins),
+whose `refused` line names it as `reason`, and a refused token clears no
+wait (`audit::verified` is called only on a scope). Told none, a server
+asks three `is_empty`s of a token's first check and takes what it took;
+told some, the first check scans the token's claims once more beside its
+signature's 2.9 us (HS256) or 38 (RS256), and a kept token, every request
+after a client's first, pays nothing. `--mint-token` stamps the first
+issuer, audience and client told on claims naming none, as it stamps
+`exp`, and an `exp` no further ahead than `--jwt-max-age` (an hour's was
+refused by the server minting it): it mints no token it would refuse.
+
+Where the flags are needed and where they are not enough, the docs say by
+issuer, and the server says one: `--jwt-keys` with no `--jwt-issuer` is a
+warning on stderr at the start, not a refusal, since keys of the app's own
+sign for it alone. Firebase is the case it is for: Google signs every
+Firebase project's ID tokens with one set of keys, and a server keyed with
+them and told no issuer took a token minted in anyone's project, its claims
+whatever that project's owner wrote. Issuers that let whoever asks name the
+audience -- Google's identity tokens (`gcloud auth print-identity-token
+--audiences`, any account), GitHub Actions' (`core.getIDToken(audience)`,
+any workflow on GitHub), a cluster's projected service account tokens (the
+pod spec names it) -- are where the issuer and the audience say only that
+some account of that issuer asked for a token for this database: the rules
+pin whose (`sub`, `azp`, `repository`). Every `--jwt-*` flag but the keys'
+is refused where no `--jwt-secret` or `--jwt-keys` is given: taken and
+ignored, a server told `--jwt-audience` with no keys looked held to it.
 
 `for <role>` reads the claim `--jwt-role-claim` names (`Demands::role_claim`,
 `role` unless told), a text or a list holding the role as `role` was, so a
 server told nothing reads roles as before; told another, `role` is a claim
-like any other there. Cognito puts groups in `cognito:groups`, Auth0 a
-namespaced URL. A policy names such a claim in double quotes
-(`$jwt."cognito:groups"`, `$jwt."https://example.com/roles"`,
-`claim_name`), a `.`, `:` or `/` inside part of the name; `$jwt.<name>`
-takes letters, digits and `_` as it did. A path into a nested object
-(`$jwt.app_metadata.role`) is refused at startup rather than read:
-Supabase and Auth0 keep what a user edits of themselves (`user_metadata`)
-beside what only the app may (`app_metadata`), one word apart in a rule, and
-a path into the wrong one is a user granting themselves rows; a claim at the
-top of the token is one the provider was told to sign there. Before this a
-path parsed as `$1.role`, a FenecQL error naming nothing of the cause. A
-quoted name holds no `\`: a token's member names are read unescaped, and a
-policy that could escape one would be read two ways. `tests/providers.rs`
-in fenec-http (every route, a refused token's 401 holding the check and not
+like any other there, and `/_whoami` answers the roles the server read
+(`roles`, from the claim and the configured name a `Scope` holds by two
+reference counts, read only there), which the studio shows where it showed
+the token's own `role`. A rule's role is the word after its last `for`
+standing alone (`role_of`), or a name in double quotes (`for "Account
+Admin"`): cut at the letters `for` wherever they stood, `for
+platform-admins` lost its role's own and `for information-security` was
+refused at startup, which provider group names made likelier. Cognito puts
+groups in `cognito:groups`, Auth0 a namespaced URL. A policy names such a
+claim in double quotes (`$jwt."cognito:groups"`,
+`$jwt."https://example.com/roles"`, `claim_name`), a `.`, `:`, `/` or `#`
+inside part of the name: comments are cut at the first `#` outside quotes
+(`uncommented`), where the first `#` anywhere cut `$jwt."https://example.com/#user"`
+and a filter's `'#general'`. `$jwt.<name>` takes letters, digits and `_` as
+it did, and one running into `-` or `:` (`$jwt.x-hasura-user-id`) is
+refused saying to quote it: it parsed as the claim `x` minus fields, a
+filter no one wrote. A path into a nested object (`$jwt.app_metadata.role`)
+is refused at startup rather than read: Supabase and Auth0 keep what a
+user edits of themselves (`user_metadata`) beside what only the app may
+(`app_metadata`), one word apart in a rule, and a path into the wrong one
+is a user granting themselves rows; a claim at the top of the token is one
+the provider was told to sign there. Before this a path parsed as
+`$1.role`, a FenecQL error naming nothing of the cause. A quoted name holds
+no `\`: a token's member names are read unescaped, and a policy that could
+escape one would be read two ways. A tenant claim named `""` is refused at
+the start, and a library's `Demands` holding one binds every token to no
+tenant: read as a claim no token holds, it left every token unbound, which
+`--jwt-unbound-tenants` took for every tenant. `tests/providers.rs` in
+fenec-http (every route, a refused token's 401 holding the check and not
 the value, `aud` as a text and a list, a client by `azp` or `client_id`, a
 role from a URL-named list, quoted claims in read and write rules, and the
-same server told nothing taking every token) and in fenec-server (the flags
-on the binary, `--mint-token`, the flags given empty and a nested claim
-refused at the start) fail without it.
+same server told nothing taking every token), `access.rs`'s tests (near
+spellings of an issuer or audience, a duplicated member, roles holding
+`for`, a `#` in quotes, `-` and `:`, the roles `/_whoami` names, a minted
+token's age), `tests/audit.rs` (a signed token for another audience clears
+no wait, on a node's every route) and fenec-server's `tests/providers.rs`
+(the flags on the binary, `--mint-token`, the flags given empty or without
+keys, the warning, a refusal's audit line and a nested claim refused at
+the start) fail without it.
 
 ## Empty tokens
 

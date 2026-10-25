@@ -200,6 +200,12 @@ fn refusals_wait_and_schema_changes_and_refusals_are_logged() {
         assert!(matches!(field("peer"), Some(Value::Text(p)) if p.starts_with("127.0.0.1:")));
     }
     assert!(lines[0].contains(r#""path":"/_schema""#), "{}", lines[0]);
+    // A refusal names the check that failed, in the server's words.
+    assert!(
+        lines[0].contains(r#""reason":"invalid or missing token""#),
+        "{}",
+        lines[0]
+    );
     assert!(lines[3].contains(r#""statement":"create collection notes (title text)""#));
     assert!(lines[5].contains(r#""statement":"drop collection notes""#));
     assert!(!text.contains("a secret title"), "no write, no literal");
@@ -402,4 +408,88 @@ fn a_tenant_node_starts_a_count_again_on_a_token_it_verified_alone() {
     );
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&bare_dir);
+}
+
+/// A token a key signed, for another audience or issuer, is a refusal
+/// like a guessed one -- it waits, and it starts no count again -- on a
+/// tenant node's routes too: `/t/<t>/query`, REST, `/_changes`,
+/// `/_whoami`, a held write (`Fenec-Wait`) and a read waiting for a write
+/// (`Fenec-After`). Only a token for this server starts the count again.
+#[test]
+fn a_signed_token_for_another_audience_clears_no_wait() {
+    use fenec_http::access::Demands;
+    let _turn = turn();
+    let dir = scratch("whom");
+    let tenants = Arc::new(Tenants::new(&dir).unwrap());
+    tenants.create("acme").unwrap();
+    let access = Arc::new(
+        Access::new(SECRET, "notes  read,write  where owner = $jwt.sub\n")
+            .unwrap()
+            .demanding(Demands {
+                issuers: vec!["https://idp.example/".into()],
+                audiences: vec!["notes-api".into()],
+                unbound_tenants: true,
+                ..Demands::default()
+            }),
+    );
+    let port = serve(Server::with_tenants(
+        tenants,
+        Config {
+            addr: "127.0.0.1:0".into(),
+            token: Some("data".into()),
+            access: Some(Arc::clone(&access)),
+            ..Config::default()
+        },
+    ));
+    let data = "Authorization: Bearer data\r\n";
+    let create = r#"{"query":"create collection notes (owner text, title text)"}"#;
+    assert_eq!(ask(port, "POST", "/t/acme/query", data, create).0, 200);
+
+    // Signed by the key, issued for another app of the same provider:
+    // minted with its own `iss` and `aud`, which `mint` keeps.
+    let other = access
+        .mint(r#"{"sub":"vera","tenant":"acme","iss":"https://idp.example/","aud":"billing-api"}"#)
+        .unwrap();
+    let foreign = access
+        .mint(r#"{"sub":"vera","tenant":"acme","iss":"https://evil.example/","aud":"notes-api"}"#)
+        .unwrap();
+    let mine = access.mint(r#"{"sub":"vera","tenant":"acme"}"#).unwrap();
+    let get = r#"{"query":"get notes"}"#;
+    let set = r#"{"query":"set notes {title: \"x\"} where owner = \"vera\" require 1"}"#;
+    for t in [&other, &foreign] {
+        let auth = format!("Authorization: Bearer {t}\r\n");
+        let held = format!("{auth}Fenec-Wait: 30000\r\n");
+        let after = format!("{auth}Fenec-After: 99\r\nFenec-Wait: 30000\r\n");
+        // Each token's count from nothing: six refusals stay below the
+        // ceiling (`MOST`), so each one grows it.
+        audit::succeeded(LOCAL);
+        let mut want = would_wait(LOCAL);
+        for (method, target, headers, body) in [
+            ("POST", "/t/acme/query", auth.as_str(), get),
+            ("GET", "/t/acme/notes", auth.as_str(), ""),
+            ("GET", "/t/acme/_changes", auth.as_str(), ""),
+            ("GET", "/t/acme/_whoami", auth.as_str(), ""),
+            ("POST", "/t/acme/query", held.as_str(), set),
+            ("GET", "/t/acme/notes", after.as_str(), ""),
+        ] {
+            let (got, out) = ask(port, method, target, headers, body);
+            assert_eq!(got, 401, "{method} {target}: {out}");
+            assert!(
+                out.contains("this server takes")
+                    && !out.contains("billing")
+                    && !out.contains("evil"),
+                "{method} {target}: {out}"
+            );
+            // Counted as a refusal: the wait grew, and was not started
+            // again by a token the key signed.
+            assert!(
+                would_wait(LOCAL) > want,
+                "{method} {target}: a signed token for another app cleared the wait"
+            );
+            want = would_wait(LOCAL);
+        }
+    }
+    let auth = format!("Authorization: Bearer {mine}\r\n");
+    verify(port, &[("POST", "/t/acme/query", &auth, get, 200)]);
+    let _ = std::fs::remove_dir_all(&dir);
 }

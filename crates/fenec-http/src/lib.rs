@@ -447,7 +447,12 @@ fn authenticate(cfg: &Config, req: &Request) -> std::result::Result<Who, Respons
     let given = req
         .header("authorization")
         .and_then(|v| v.strip_prefix("Bearer "));
-    let refuse = |why: &str| Response::error(401, why).header("WWW-Authenticate", "Bearer");
+    // The audit line names the check that failed -- one of the server's own
+    // texts, never a value of the token.
+    let refuse = |why: &'static str| {
+        audit::refusal(why);
+        Response::error(401, why).header("WWW-Authenticate", "Bearer")
+    };
     if let (Some(token), Some(given)) = (&cfg.token, given) {
         if constant_eq(given.as_bytes(), token.as_bytes()) {
             audit::verified();

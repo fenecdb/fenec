@@ -69,8 +69,19 @@ These are deliberate, and README explains each one:
 - **Without `--jwt-issuer` and `--jwt-audience`, every token the keys sign
   is taken.** An identity provider's keys sign tokens for every app of its
   tenant, pool or team; told an issuer and an audience (or `--jwt-client`),
-  the server refuses the tokens issued for another (401). Leaving them out
-  where the keys sign for more than one app is the operator's call.
+  the server refuses the tokens issued for another (401). With `--jwt-keys`
+  and no `--jwt-issuer` the server says so on stderr as it starts. Leaving
+  them out where the keys sign for more than one app is the operator's
+  call -- but not with Firebase, whose keys sign every project's tokens:
+  there, without both, anyone's project mints tokens this server takes,
+  claims and all.
+- **Issuer and audience are not enough where the caller names the
+  audience.** Google's identity tokens (`https://accounts.google.com`),
+  GitHub Actions' and a Kubernetes cluster's projected tokens carry
+  whatever audience whoever asked for them named: any account of the
+  issuer can have one for this server. There the policy's rules must pin
+  whose token it is (`sub`, `azp`, `repository`); the flags say only which
+  issuer and which audience.
 - **A score is of the rows the request may read.** A scoped token's
   `match` takes BM25's statistics over the rows its filter selects, so its
   scores say nothing of rows it cannot read; the server's own token scores

@@ -225,14 +225,17 @@ not logged.</p>
 
 <details class="deep"><summary>The audit log's events and the refusal wait</summary>
 <pre data-lang="json">{"at":"2026-10-01T09:30:12.310Z","event":"schema","level":"info","proto":"http","peer":"10.0.0.7:53112","request_id":"5d0e7c2a91f4b366","statement":"create collection notes (title text)","failed":false}
-{"at":"2026-10-01T09:32:05.117Z","event":"refused","level":"warn","proto":"http","peer":"198.51.100.4:40031","request_id":"b81f03c6d2e94a57","method":"GET","path":"/notes"}
+{"at":"2026-10-01T09:32:05.117Z","event":"refused","level":"warn","proto":"http","peer":"198.51.100.4:40031","request_id":"b81f03c6d2e94a57","method":"GET","path":"/notes","reason":"the token has expired"}
 {"at":"2026-10-01T09:40:00.550Z","event":"admin","level":"info","proto":"http","peer":"10.0.0.2:61200","request_id":"deploy-7","method":"POST","path":"/_shard/tenants/acme/move","http_status":200}</pre>
 
 <p><code>--audit &lt;path&gt;</code> appends one JSON line for each of these
 events:</p>
 
 <ul>
-  <li><b>An HTTP request refused for its token</b> (401).</li>
+  <li><b>An HTTP request refused for its token</b> (401), its
+    <code>reason</code> the check that failed as the 401 says it -- an
+    expired token, another issuer or audience -- never a value the token
+    holds.</li>
   <li><b>A statement that changes the schema</b>:
     <code>create</code>, <code>drop</code>, <code>alter</code> or
     <code>compact</code>. The statement is
