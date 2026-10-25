@@ -1,5 +1,6 @@
 # Written by tools/homebrew-formula.py in fenecdb/fenecdb from release v0.1.11's
-# SHA256SUMS: the release workflow rewrites it, so a change by hand is lost.
+# SHA256SUMS, not by hand: `--check` writes it again from the same release and
+# compares, and `--verify` holds its sums to the release's files.
 class Fenecdb < Formula
   desc "Embedded database with its own query language, FenecQL"
   homepage "https://fenecdb.com"

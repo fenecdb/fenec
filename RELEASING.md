@@ -42,7 +42,14 @@ nothing reaches a registry before the notes have had a read.
    the same commit: a Go module in a subdirectory is fetched by a tag that
    names it, so that tag is the Go SDK's release (`go get
    github.com/fenecdb/fenecdb/integrations/go@vX.Y.Z`), and there is no
-   registry to publish to.
+   registry to publish to. A release built again, by the tag or by a
+   dispatch, replaces the assets of a draft; a published release's are never
+   replaced, and it only gets the files it has no asset of, with a warning
+   that its `SHA256SUMS` does not list them. The Homebrew formula, `install.sh`
+   and the packages name the release's files by checksum, and a rebuild is
+   not byte for byte the first build: a replaced tarball would fail every
+   `brew install` and every sum already taken. To change what a published
+   release holds, release a new version.
 4. Read the draft, then publish it: `gh release edit vX.Y.Z --draft=false`.
    `packages.yml` builds the three packages again, installs them where a user
    would and uses them (`integrations/packages.sh`), and only then publishes
@@ -63,7 +70,10 @@ nothing reaches a registry before the notes have had a read.
    (`tools/homebrew-formula.py --verify`) and pushes it to
    `fenecdb/homebrew-tap`: here, after the publish, because the formula
    names the release's download URLs and a draft's are not public. It
-   skips with a notice where the secret is not set, and for a pre-release.
+   skips with a notice where the secret is not set, for a draft or a
+   pre-release, and for a version older than the tap's formula (the tap is
+   never moved back, whichever release is dispatched or published late), and
+   one run pushes at a time.
    The `.deb` and `.rpm` need no step of their own: step 3 built them, and
    publishing the draft is what makes them downloadable.
 
@@ -199,11 +209,13 @@ and a new login goes into the same secret.
 **Homebrew.** `brew install fenecdb/tap/fenecdb` reads the repository
 `fenecdb/homebrew-tap`: Homebrew drops the `homebrew-` from the name, and
 the formula is `Formula/fenecdb.rb` on the default branch, `main`. The
-repository is public. Once:
+repository is public, and `brew install fenecdb/tap/fenecdb` works today: it
+installs 0.1.11, from the formula and README below, which were copied in by
+hand so that the first install need not wait for a release's job. Once, and
+if the tap is ever made again:
 
 1. Make it, empty, and copy in the formula and the README as they are in
-   `packaging/homebrew/` (the first release's job would write both, but the
-   first `brew install` need not wait for it):
+   `packaging/homebrew/`:
 
        mkdir -p Formula
        cp packaging/homebrew/Formula/fenecdb.rb Formula/
@@ -211,23 +223,39 @@ repository is public. Once:
 
    The copy in the repository is the formula of the release it names
    (0.1.11), as `tools/homebrew-formula.py` writes it; CI holds it to that
-   (`--check`), and the release job never edits it. The tap's is rewritten
-   at each release.
+   (`--check`, which needs the repository to be `fenecdb/fenecdb`, and
+   `--verify`, which downloads the release's four tarballs and holds the
+   sums to them), and the release job never edits it. The tap's is
+   rewritten at each release.
 2. Make a fine-grained personal access token (*Settings*, *Developer
    settings*, *Fine-grained tokens*): resource owner `fenecdb`, repository
    access *Only select repositories*, `fenecdb/homebrew-tap` alone,
    permission *Contents: Read and write* (Metadata, read-only, comes with
    it) and nothing else. It expires within a year at most: note the date, as
-   a job with an expired token fails rather than skipping. Then:
+   a job with an expired token fails rather than skipping.
+3. Keep it as a secret of the `homebrew` environment, not of the repository,
+   and let that environment be used only by runs of `main` and of `v*` tags,
+   so that a branch's workflow (or a pull request's) cannot ask for it. By
+   hand, as the owner (the same is *Settings*, *Environments*, *homebrew*):
 
-       gh secret set HOMEBREW_TAP_TOKEN -R fenecdb/fenecdb
+       gh api -X PUT repos/fenecdb/fenecdb/environments/homebrew \
+         -F 'deployment_branch_policy[protected_branches]=false' \
+         -F 'deployment_branch_policy[custom_branch_policies]=true'
+       gh api -X POST repos/fenecdb/fenecdb/environments/homebrew/deployment-branch-policies -f name=main -f type=branch
+       gh api -X POST repos/fenecdb/fenecdb/environments/homebrew/deployment-branch-policies -f name='v*' -f type=tag
+       gh secret set HOMEBREW_TAP_TOKEN --env homebrew -R fenecdb/fenecdb
+       gh secret delete HOMEBREW_TAP_TOKEN -R fenecdb/fenecdb    # a repository secret of that name, if there is one
 
-   The job reads it in an environment variable and hands it to git through
-   `GIT_CONFIG_*`, never in a URL or a command line.
-3. A release published before the secret was set gets its formula from a
+   The job runs under that environment and reads the secret from it, in an
+   environment variable (an environment's secret wins over a repository's of
+   the same name; deleting the repository's is what keeps any other workflow
+   from reading the token), and hands it to git through `GIT_CONFIG_*`, never
+   in a URL or a command line.
+4. A release published before the secret was set gets its formula from a
    dispatch, which runs the whole workflow (the registries pass over what
-   they already hold): `gh workflow run packages.yml -f tag=vX.Y.Z`. Or by
-   hand, from a clone of this repository and the tap:
+   they already hold): `gh workflow run packages.yml -f tag=vX.Y.Z`. A tag
+   older than the formula in the tap is left out. Or by hand, from a clone of
+   this repository and the tap:
 
        gh release download vX.Y.Z -R fenecdb/fenecdb -p SHA256SUMS
        python3 tools/homebrew-formula.py --version X.Y.Z --sums SHA256SUMS -o ../homebrew-tap/Formula/fenecdb.rb
@@ -246,14 +274,16 @@ from the latest release before it merges. There is no apt or yum repository:
 the packages are files on the release.
 
 **install.sh.** Nothing to set up: `site/install.sh` is built into the site
-(`site/build.py` checks that it is one function called on its last line) and
+(`site/build.py` checks that nothing before `main`, called on its last line,
+is more than `set -eu`, comments, assignments and function definitions) and
 deployed with it, so a change reaches `https://fenecdb.com/install.sh` when
 it merges, not when a release is made. It finds the latest release itself.
 `sh site/test_install.sh` runs it against a release of its own on localhost.
 
 **GitHub.** The environments `pypi`, `npm`, `nuget`, `maven`, `pub` and `homebrew` are made the first
 time the workflow runs. A required reviewer on them makes a publish wait for a second
-yes.
+yes. `homebrew` is the one that holds a secret of its own, and is limited to
+`main` and `v*` tags (the Homebrew section above).
 
 **After the first publish.** The docs install what a registry holds: PyPI's
 `fenecdb` since 0.1.5 (`pip install "fenecdb[langchain]"`). Until

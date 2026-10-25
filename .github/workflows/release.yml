@@ -230,12 +230,14 @@ jobs:
   # The checkout is this workflow's own commit -- the tag's, when a tag was
   # pushed -- and not the tag a dispatch names: the tarballs are the
   # artifacts and the version is the tag's name, so what is needed from the
-  # tree is the packaging files, which a tag from before them (a dispatch to
-  # build v0.1.11 again) does not have.
+  # tree is the packaging files, which a tag from before them (a dispatch for
+  # an older tag whose release is still a draft) does not have.
   linux-packages:
     name: .deb and .rpm (${{ matrix.arch }})
     needs: binaries
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -246,6 +248,8 @@ jobs:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@v8
         with:
@@ -397,9 +401,29 @@ jobs:
           # Re-running a release has to work -- a tag gets moved, or a job is
           # retried after a runner failure -- and `gh release create` refuses
           # when one already exists, so an existing release is updated in
-          # place instead.
+          # place instead: a draft's assets are replaced.
+          #
+          # A published release's are not. The tarballs and SHA256SUMS are
+          # what the Homebrew formula, install.sh and the packages name by
+          # checksum, and a rebuild is not byte for byte the first build: a
+          # replaced tarball would fail every `brew install` and every
+          # checksum already taken from the old SHA256SUMS. So a published
+          # release only gets the files it has no asset of.
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" dist/* --clobber
+            if [ "$(gh release view "$tag" --json isDraft -q .isDraft)" = true ]; then
+              gh release upload "$tag" dist/* --clobber
+            else
+              have=$(gh release view "$tag" --json assets -q '.assets[].name')
+              for f in dist/*; do
+                name=$(basename "$f")
+                if printf '%s\n' "$have" | grep -qxF "$name"; then
+                  echo "$name is on the published release already: left as it is"
+                else
+                  gh release upload "$tag" "$f"
+                  echo "::warning::$name was missing from the published release $tag and was added; the release's SHA256SUMS is not rewritten and does not list it"
+                fi
+              done
+            fi
           else
             gh release create "$tag" dist/* \
               --draft \

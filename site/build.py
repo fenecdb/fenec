@@ -1537,17 +1537,37 @@ def install_script():
     """dist/install.sh: the installer `curl -fsSL https://fenecdb.com/install.sh
     | sh` fetches, as the repository has it. It is a file of its own and not
     a page, so nothing here rewrites it; what is held is the property that
-    makes piping it to a shell safe -- the body is one function, called on the
-    last line, so a download cut short stops before anything runs."""
+    makes piping it to a shell safe -- everything outside a function is
+    `set -eu`, a comment or an assignment, and the one thing that runs is
+    `main "$@"` on the last line, so a download cut short stops before
+    anything runs."""
     src = os.path.join(ROOT, "install.sh")
     text = open(src, encoding="utf-8").read()
-    lines = [l for l in text.splitlines() if l.strip()]
+    lines = text.splitlines()
     if not lines or lines[0] != "#!/bin/sh":
         raise SystemExit("  site/install.sh must start with #!/bin/sh")
-    if lines[-1] != 'main "$@"':
-        raise SystemExit("  site/install.sh must end by calling main, its one function")
+    if [l for l in lines if l.strip()][-1] != 'main "$@"':
+        raise SystemExit("  site/install.sh must end by calling main")
     if text.count('main "$@"') != 1 or re.search(r"\beval\b", text):
         raise SystemExit("  site/install.sh calls main once and evals nothing")
+    # A function runs from its `name() {` at the margin to the `}` at the
+    # margin (a heredoc in one has its text at the margin and no `}`). Outside
+    # one, a command before main would run on a download cut short at it.
+    inside = False
+    for n, line in enumerate(lines, 1):
+        if inside:
+            inside = line != "}"
+        elif not line.strip() or line.startswith("#") or line == "set -eu" or line == 'main "$@"':
+            continue
+        elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\(\) \{", line):
+            inside = True
+        elif not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=[^ ;&|<>()$`\\\"']*", line):
+            raise SystemExit(
+                f"  site/install.sh:{n}: outside a function, only set -eu, comments and "
+                f"plain assignments come before main: {line!r}"
+            )
+    if inside:
+        raise SystemExit("  site/install.sh ends inside a function")
     shutil.copy(src, os.path.join(OUT, "install.sh"))
 
 

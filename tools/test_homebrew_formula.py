@@ -72,7 +72,7 @@ class Render(unittest.TestCase):
         self.assertIn("x86_64-apple-darwin", str(e.exception))
 
     def test_a_pre_release_is_not_offered(self):
-        for version in ("1.2.3-rc1", "1.2", "1.2.3.4", "main"):
+        for version in ("1.2.3-rc1", "1.2", "1.2.3.4", "main", "1.2.3\n", "1.2.3 ", "v1.2.3\n"):
             with self.assertRaises(SystemExit, msg=version):
                 formula.render(version, formula.parse_sums(sums(version)))
 
@@ -86,15 +86,37 @@ class Render(unittest.TestCase):
 
 
 class Check(unittest.TestCase):
-    def run_check(self, text):
+    def run_check(self, text, *more):
         with tempfile.NamedTemporaryFile("w", suffix=".rb", delete=False) as f:
             f.write(text)
         try:
             return subprocess.run(
-                [sys.executable, SCRIPT, "--check", f.name], capture_output=True, text=True
+                [sys.executable, SCRIPT, *more, "--check", f.name], capture_output=True, text=True
             )
         finally:
             os.unlink(f.name)
+
+    def test_another_repository_does_not_pass_however_consistent(self):
+        # A header, four urls and four sums that all agree with each other, for
+        # a repository that is not this one.
+        zeros = formula.parse_sums(sums("1.2.3").replace("1" * 64, "0" * 64))
+        text = formula.render("1.2.3", zeros, "evil/fork")
+        done = self.run_check(text)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("evil/fork", done.stderr)
+        # It is held to the repository it is told is its own.
+        self.assertEqual(self.run_check(text, "--repo", "evil/fork").returncode, 0)
+
+    def test_a_formula_that_names_no_repository_does_not_pass(self):
+        text = formula.render("1.2.3", formula.parse_sums(sums("1.2.3")))
+        done = self.run_check(text.replace("Written by tools/homebrew-formula.py in", "Written in"))
+        self.assertNotEqual(done.returncode, 0)
+
+    def test_a_url_of_another_repository_is_not_verified(self):
+        text = formula.render("1.2.3", formula.parse_sums(sums("1.2.3")), "evil/fork")
+        with self.assertRaises(SystemExit) as e:
+            formula.verify(text)
+        self.assertIn("not a release of fenecdb/fenecdb", str(e.exception))
 
     def test_what_it_wrote_passes(self):
         text = formula.render("1.2.3", formula.parse_sums(sums("1.2.3")))

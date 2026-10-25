@@ -411,33 +411,54 @@ jobs:
   # formula is written from the release's own SHA256SUMS
   # (tools/homebrew-formula.py), held to what the public URLs serve, and
   # pushed to the tap's main. That takes HOMEBREW_TAP_TOKEN, a fine-grained
-  # token with Contents read and write on the tap and nothing else; without it
-  # the job says so and stops, and the registries go on. A token that is set
-  # and does not work fails the job, since a tap that silently stays a release
-  # behind is the failure nobody sees. A pre-release is not offered.
+  # token with Contents read and write on the tap and nothing else, kept as a
+  # secret of the `homebrew` environment and not of the repository, which
+  # that environment limits to runs of main and of v* tags (RELEASING.md);
+  # without it the job says so and stops, and the registries go on. A token
+  # that is set and does not work fails the job, since a tap that silently
+  # stays a release behind is the failure nobody sees. A pre-release or a
+  # draft is not offered, and neither is a release older than the formula the
+  # tap holds: a dispatch for an old tag, or two releases published close
+  # together and run out of order, must not move the tap back. One run pushes
+  # at a time.
   homebrew:
     name: Homebrew tap
     runs-on: ubuntu-latest
+    concurrency:
+      group: homebrew-tap
+      cancel-in-progress: false
     environment:
       name: homebrew
       url: https://github.com/fenecdb/homebrew-tap
     steps:
-      - name: Look for the token
+      - name: Look for the token, and for a release to offer
         id: go
         env:
+          GH_TOKEN: ${{ github.token }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+          EVENT_PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
           set -eu
           if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
             echo "::notice::HOMEBREW_TAP_TOKEN is not set: the Homebrew tap is not updated (RELEASING.md, 'Once: the registries' side')"
             echo "set=false" >> "$GITHUB_OUTPUT"
-          elif ! printf '%s' "${RELEASE_TAG#v}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::notice::$RELEASE_TAG is a pre-release: the Homebrew tap offers releases only"
-            echo "set=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "set=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          if ! printf '%s' "${RELEASE_TAG#v}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::notice::$RELEASE_TAG is not a release version: the Homebrew tap offers releases only"
+            echo "set=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The release says what it is: the event carries it, and a dispatch
+          # asks.
+          state=$(gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --json isDraft,isPrerelease -q '"\(.isDraft) \(.isPrerelease)"')
+          if [ "$EVENT_PRERELEASE" = true ] || [ "$state" != "false false" ]; then
+            echo "::notice::$RELEASE_TAG is a draft or a pre-release: the Homebrew tap offers published releases only"
+            echo "set=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "set=true" >> "$GITHUB_OUTPUT"
 
       # This workflow's own commit, not the tag's: the formula is written from
       # the release's SHA256SUMS, and a tag from before the script has none.
@@ -459,8 +480,8 @@ jobs:
           python3 tools/homebrew-formula.py --version "${RELEASE_TAG#v}" --sums "$RUNNER_TEMP/release/SHA256SUMS" \
             --repo "$GITHUB_REPOSITORY" -o "$formula"
           cat "$formula"
-          python3 tools/homebrew-formula.py --check "$formula"
-          python3 tools/homebrew-formula.py --verify "$formula"
+          python3 tools/homebrew-formula.py --repo "$GITHUB_REPOSITORY" --check "$formula"
+          python3 tools/homebrew-formula.py --repo "$GITHUB_REPOSITORY" --verify "$formula"
 
       # The token reaches git in its environment: in no URL, no argument and no
       # .git/config, and masked in its encoded form too.
@@ -483,6 +504,18 @@ jobs:
           # one `master`: the tap's is main.
           git rev-parse -q --verify HEAD >/dev/null || git checkout -q -B main
           branch=$(git symbolic-ref --short HEAD)
+          # Never backwards: a tap that holds a later release than this one is
+          # left as it is (this run is a dispatch for an old tag, or a release
+          # published before a later one finished). Nothing in the tap yet, or
+          # the same version, goes on.
+          version=${RELEASE_TAG#v}
+          current=$(sed -n 's#^ *url "https://github.com/[^/]*/[^/]*/releases/download/v\([0-9][0-9.]*\)/.*#\1#p' Formula/fenecdb.rb 2>/dev/null | head -n 1)
+          if [ -n "$current" ] && [ "$current" != "$version" ] &&
+            [ "$(printf '%s\n%s\n' "$current" "$version" | sort -V | tail -n 1)" = "$current" ]; then
+            echo "::warning::the tap holds fenecdb $current, later than $version: it is not moved back"
+            echo "the tap holds fenecdb $current, later than $version: left as it is" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           mkdir -p Formula
           cp "$RUNNER_TEMP/tap-files/Formula/fenecdb.rb" Formula/fenecdb.rb
           cp "$GITHUB_WORKSPACE/packaging/homebrew/README.md" README.md

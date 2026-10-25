@@ -85,7 +85,8 @@ detect_target() {
     esac
 }
 
-# fetch URL FILE
+# fetch URL FILE. Over https each tool is held to https and TLS 1.2 or later,
+# and a certificate it cannot check is a failure, never a download.
 fetch() {
     case $downloader in
         curl)
@@ -94,8 +95,56 @@ fetch() {
                 *) curl -fsSL --retry 3 -o "$2" "$1" ;;
             esac
             ;;
-        wget) wget -q -O "$2" "$1" ;;
+        gnu-wget)
+            case $1 in
+                https://*) wget -q --https-only --secure-protocol=TLSv1_2 -O "$2" "$1" ;;
+                *) wget -q -O "$2" "$1" ;;
+            esac
+            ;;
+        busybox-wget)
+            # Its own stderr is read: a build that does not check the server's
+            # certificate says so on every connection, and what it fetched is
+            # then not to be trusted with a tarball.
+            fetched=$(wget -q -O "$2" "$1" 2>&1) || {
+                [ -z "$fetched" ] || printf '%s\n' "$fetched" >&2
+                return 1
+            }
+            case $fetched in
+                *"certificate validation not implemented"*)
+                    rm -f "$2"
+                    err "this wget does not check TLS certificates: install curl and run this again"
+                    return 1
+                    ;;
+            esac
+            ;;
     esac
+}
+
+# Which downloader, before anything is downloaded: curl, else a wget that
+# checks certificates. BusyBox's does only where it hands the connection to
+# ssl_client (Alpine's does); upstream's own TLS checks nothing, and a
+# tarball and the sum it is held to would both come over a connection anyone
+# on the path could answer.
+choose_downloader() {
+    if command -v curl >/dev/null 2>&1; then
+        downloader=curl
+    elif command -v wget >/dev/null 2>&1; then
+        case $(wget --help 2>&1 | head -n 1) in
+            *BusyBox*)
+                command -v ssl_client >/dev/null 2>&1 ||
+                    die "the wget here is BusyBox's, which does not check TLS certificates: install curl and run this again"
+                downloader=busybox-wget
+                ;;
+            *)
+                case $(wget --version 2>&1 | head -n 1) in
+                    "GNU Wget"*) downloader=gnu-wget ;;
+                    *) die "the wget here is not one this knows to check TLS certificates: install curl and run this again" ;;
+                esac
+                ;;
+        esac
+    else
+        die "needs curl or wget to download the release"
+    fi
 }
 
 sha256_of() {
@@ -126,9 +175,16 @@ main() {
 
     base=${FENEC_BASE_URL:-https://github.com/fenecdb/fenecdb/releases}
     base=${base%/}
+    # https, or http to this machine for a test: the host is read up to its
+    # port, and a user or password (an `@`) is refused, since
+    # http://localhost:x@example.com is a request to example.com.
     case $base in
-        https://* | http://localhost[:/]* | http://127.0.0.1[:/]* | http://localhost | http://127.0.0.1) ;;
-        *) die "FENEC_BASE_URL must be https (http only for localhost): $base" ;;
+        *@* | *[[:space:]]*) die "FENEC_BASE_URL holds a user, a password or a space: $base" ;;
+        https://?*) ;;
+        *)
+            printf '%s\n' "$base" | grep -Eq '^http://(localhost|127\.0\.0\.1)(:[0-9]+)?(/|$)' ||
+                die "FENEC_BASE_URL must be https (http only for localhost): $base"
+            ;;
     esac
 
     if [ -n "${FENEC_INSTALL:-}" ]; then
@@ -138,16 +194,16 @@ main() {
     else
         die "HOME is not set: say where to install with FENEC_INSTALL"
     fi
+    # The directory is told back as a PATH line, which a relative one would
+    # not be good for from any other directory.
+    case $home in
+        /*) ;;
+        *) home=$(pwd)/${home#./} ;;
+    esac
     bindir=${home%/}/bin
 
     # What it will need, before it downloads anything.
-    if command -v curl >/dev/null 2>&1; then
-        downloader=curl
-    elif command -v wget >/dev/null 2>&1; then
-        downloader=wget
-    else
-        die "needs curl or wget to download the release"
-    fi
+    choose_downloader
     if command -v sha256sum >/dev/null 2>&1; then
         hasher=sha256sum
     elif command -v shasum >/dev/null 2>&1; then
@@ -155,7 +211,7 @@ main() {
     else
         die "needs sha256sum or shasum to check the download"
     fi
-    for tool in tar awk sed mktemp uname; do
+    for tool in tar gzip awk sed grep head mktemp uname; do
         command -v "$tool" >/dev/null 2>&1 || die "needs '$tool'"
     done
 
@@ -213,9 +269,11 @@ main() {
         # Written beside and renamed over: a running server's file is not
         # overwritten in place ("Text file busy"), and a failure part of the
         # way leaves the old one whole.
-        cp "$src/$b" "$bindir/.$b.new.$$" || die "could not write to $bindir"
-        chmod 755 "$bindir/.$b.new.$$"
-        mv -f "$bindir/.$b.new.$$" "$bindir/$b"
+        staged=$bindir/.$b.new.$$
+        if ! { cp "$src/$b" "$staged" && chmod 755 "$staged" && mv -f "$staged" "$bindir/$b"; }; then
+            rm -f "$staged"
+            die "could not write $bindir/$b"
+        fi
     done
 
     say ""

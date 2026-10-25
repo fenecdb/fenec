@@ -148,7 +148,8 @@ fenec-http {{version}} listening on: http://127.0.0.1:8080  [token]</pre>
 directory) with no <code>sudo</code>, and edits no shell file: it says how to
 put the directory on your <code>PATH</code> and leaves that to you. It
 downloads the latest release (<code>FENEC_VERSION={{version}}</code> names a
-release) from GitHub over https and checks the tarball against the release's
+release) from GitHub over https, with <code>curl</code> or a <code>wget</code>
+that checks certificates, and checks the tarball against the release's
 <code>SHA256SUMS</code> before it unpacks anything. That sum comes from the
 same release as the file, so it catches a damaged or cut-short download, not
 a release someone replaced. For macOS and Linux on arm64 and x86_64. To read
@@ -157,9 +158,9 @@ it before it runs: <code>curl -fsSL https://fenecdb.com/install.sh | less</code>
 </div>
 
 <div class="lang" data-name=".deb and .rpm">
-<pre data-lang="bash" data-label="Debian, Ubuntu">curl -LO https://github.com/fenecdb/fenecdb/releases/download/v{{version}}/fenecdb_{{version}}-1_amd64.deb   # arm64 on an ARM machine
+<pre data-lang="bash" data-label="Debian, Ubuntu">curl -fLO https://github.com/fenecdb/fenecdb/releases/download/v{{version}}/fenecdb_{{version}}-1_amd64.deb   # arm64 on an ARM machine
 sudo apt install ./fenecdb_{{version}}-1_amd64.deb</pre>
-<pre data-lang="bash" data-label="Fedora, RHEL">curl -LO https://github.com/fenecdb/fenecdb/releases/download/v{{version}}/fenecdb-{{version}}-1.x86_64.rpm   # aarch64 on an ARM machine
+<pre data-lang="bash" data-label="Fedora, RHEL">curl -fLO https://github.com/fenecdb/fenecdb/releases/download/v{{version}}/fenecdb-{{version}}-1.x86_64.rpm   # aarch64 on an ARM machine
 sudo dnf install ./fenecdb-{{version}}-1.x86_64.rpm</pre>
 <pre data-lang="bash" data-label="run">FENEC_HTTP_TOKEN=secret fenec-server --file data.fenec</pre>
 <p>Each release carries a package for amd64 and one for arm64, with its

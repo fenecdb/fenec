@@ -9,9 +9,12 @@ The formula installs `fenec` and `fenec-server` from the release's tarballs
 (`fenec-vX.Y.Z-<target>.tar.gz`, release.yml) and names each one's SHA-256,
 read from the release's own `SHA256SUMS`. The release job (packages.yml,
 `homebrew`) and a maintainer by hand both come through here, so the formula
-in the tap is never typed: a hand-edited copy is what `--check` refuses, and
-`--verify` downloads what each `url` names and holds it to its `sha256`, which
-is what a user's `brew install` will do.
+in the tap is never typed. Two checks hold a copy, and neither is enough
+alone. `--check` writes the formula again from the version and sums it holds,
+for this repository, and fails on any difference: it finds a hand edit of the
+text or of the repository, not a sum edited to another value. `--verify`
+downloads what each `url` names and holds it to its `sha256`, which is what a
+user's `brew install` does, and finds that sum.
 
 Standard library only, like the rest of tools/.
 """
@@ -36,11 +39,12 @@ TARGETS = [
 
 # Only a release proper: a pre-release's tarballs are fine to download, but a
 # tap's `brew upgrade` would hand it to everyone.
-STABLE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+STABLE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")  # matched whole: `$` would let a newline through
 
 TEMPLATE = """\
 # Written by tools/homebrew-formula.py in {repo} from release v{version}'s
-# SHA256SUMS: the release workflow rewrites it, so a change by hand is lost.
+# SHA256SUMS, not by hand: `--check` writes it again from the same release and
+# compares, and `--verify` holds its sums to the release's files.
 class Fenecdb < Formula
   desc "Embedded database with its own query language, FenecQL"
   homepage "https://fenecdb.com"
@@ -87,7 +91,7 @@ def tarball(version, target):
 
 def render(version, sums, repo=REPO):
     version = version.removeprefix("v")
-    if not STABLE.match(version):
+    if not STABLE.fullmatch(version):
         raise SystemExit(
             f"{version!r} is not a release version (X.Y.Z): a pre-release is "
             "not offered through Homebrew"
@@ -122,16 +126,22 @@ def read_formula(text):
     if len(versions) != 1:
         raise SystemExit(f"the formula names several versions: {sorted(versions)}")
     repo = re.search(r"Written by tools/homebrew-formula.py in (\S+) from", text)
-    return versions.pop(), {name: sha for _, name, sha in pairs}, repo.group(1) if repo else REPO
+    if not repo:
+        raise SystemExit("the formula's first lines do not say which repository it was written for")
+    return versions.pop(), {name: sha for _, name, sha in pairs}, repo.group(1)
 
 
-def verify(text):
-    """Download every url the formula names and hold it to its sha256."""
+def verify(text, repo=REPO):
+    """Download every url the formula names and hold it to its sha256. The
+    urls must be the repository's own releases: a sum that matches a file
+    somewhere else proves nothing about the release."""
     pairs = re.findall(r'url "(https://[^"]+\.tar\.gz)"\n\s+sha256 "([0-9a-f]{64})"', text)
     if len(pairs) != len(TARGETS):
         raise SystemExit(f"expected {len(TARGETS)} url and sha256 pairs, found {len(pairs)}")
     bad = 0
     for url, want in pairs:
+        if not url.startswith(f"https://github.com/{repo}/releases/download/"):
+            raise SystemExit(f"{url} is not a release of {repo}")
         digest = hashlib.sha256()
         with urllib.request.urlopen(url, timeout=120) as response:
             while chunk := response.read(1 << 20):
@@ -151,19 +161,24 @@ def main():
     p.add_argument("--sums", help="the release's SHA256SUMS ('-' for stdin)")
     p.add_argument("-o", "--output", default="-", help="the formula to write (default: stdout)")
     p.add_argument("--repo", default=REPO, help=f"owner/name of the release's repository (default {REPO})")
-    p.add_argument("--check", metavar="FORMULA", help="fail unless FORMULA is what this script writes from the sums it holds")
+    p.add_argument("--check", metavar="FORMULA", help="fail unless FORMULA is what this script writes, for --repo, from the version and sums it holds")
     p.add_argument("--verify", metavar="FORMULA", help="download each url FORMULA names and fail unless it has the sha256 the formula says")
     args = p.parse_args()
 
     if args.verify:
         with open(args.verify, encoding="utf-8") as f:
-            verify(f.read())
+            verify(f.read(), args.repo)
         return
 
     if args.check:
         with open(args.check, encoding="utf-8") as f:
             have = f.read()
         version, sums, repo = read_formula(have)
+        # The file names its repository twice over (its header and every url),
+        # and they would agree for any repository: the one it must be is this
+        # script's, or the one --repo says.
+        if repo != args.repo:
+            raise SystemExit(f"{args.check} is written for {repo}, not {args.repo}")
         want = render(version, sums, repo)
         if have != want:
             sys.stdout.writelines(
