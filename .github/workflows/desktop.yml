@@ -110,8 +110,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: macos-latest-desktop-cargo-v2-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: macos-latest-desktop-cargo-v2-
+          key: macos-latest-desktop-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: macos-latest-desktop-cargo-
 
       # The build tool (Hutch, its Bun, the Electrobun runtime) goes into this
       # directory, not the home one (scripts/electrobun.mjs), 130 to 210 MB
@@ -121,7 +121,7 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: integrations/studio-desktop/.hutch-home
-          key: desktop-hutch-v2-${{ hashFiles('integrations/studio-desktop/package-lock.json', 'integrations/studio-desktop/hutch.config.ts', 'integrations/studio-desktop/hutch-pin.json') }}
+          key: desktop-hutch-${{ hashFiles('integrations/studio-desktop/package-lock.json', 'integrations/studio-desktop/hutch.config.ts', 'integrations/studio-desktop/hutch-pin.json') }}
 
       # The saved servers' tokens go to the Keychain, which the checks
       # exercise: a keychain of their own, unlocked, the default.

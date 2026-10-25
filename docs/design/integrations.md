@@ -140,8 +140,16 @@ server in a file and stopped the strays at the next launch (SIGTERM, a wait,
 SIGKILL, what survived kept): it went when this passed, and with it the file,
 since no release of the app ever had a server that needed it. The write end must
 stay in the app alone: `checks/orphan.mjs` opens two files one after the other,
-kills the app, and needs both servers to end and both files to be free (a
-descriptor not marked close-on-exec would have the second hold the first's pipe).
+reads the descriptor tables (lsof) to see that each server's stdin is written to
+by the app's processes alone, with a control that starts a process holding
+another's write end and requires the same reading to find it, then kills the app
+and needs both servers to end and both files to be free (a descriptor not marked
+close-on-exec would have the second hold the first's pipe). Both ending after the
+kill is no proof of that, since the second ends when its own stdin does and lets
+the first's go; the first version stopped the second server (SIGSTOP) and required
+the first to end meanwhile, and on a hosted macOS runner a stopped process made
+`ps` hang, which hung the runner's own cleanup and with it the job (it never
+finished, its timeouts included), three times in a row.
 The exit codes (server.html: 0 stopped as asked, 1 could not start, 2 a flag
 refused) are the notices': a held lock is "open in another program", 2 is "out of
 step", the rest "could not open", and `get-server.sh` refuses a server without

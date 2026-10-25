@@ -49,7 +49,8 @@ export function sh(cmd) {
 
 /** Every process on the machine: {pid, ppid, rss (KB), command}. */
 export function procs() {
-  return execSync('ps -axww -o pid=,ppid=,rss=,command=', { maxBuffer: 1 << 26 })
+  // A bound: a `ps` that hangs would otherwise hang the check, and a hosted runner's own cleanup with it.
+  return execSync('ps -axww -o pid=,ppid=,rss=,command=', { maxBuffer: 1 << 26, timeout: 30000 })
     .toString()
     .split('\n')
     .map((l) => /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/.exec(l))

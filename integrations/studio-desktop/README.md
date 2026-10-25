@@ -136,7 +136,7 @@ digests, and the script says which hashes a mismatch is.
    | `warmup` | the first launch of a build (below) |
    | `files` | open, edit through the studio's own form, a second open only shows the window, close stops the server with exit 0, reopen has the edit (also at once, while the first server is still stopping); a file another program holds is a message and **Try again** works once it lets go; a missing file, a folder, a file that is not a database and an empty one are said before any server is started, and nothing is written beside them; a quit right after a close waits for that server, and it ends with exit 0 |
    | `server-dies` | `kill -9` the server under a window: a message, the window closed, **Open again** works |
-   | `orphan` | the app killed with two files open, one opened after the other, **the second stopped (SIGSTOP) first**: the first ends by itself, the end of its stdin, while the second cannot run, so nothing of the second's holds the first's pipe; the second, let go, ends in its turn, and both files are free for another program |
+   | `orphan` | the app killed with two files open, one opened after the other: **the descriptor tables (lsof), read while the app is alive, say the write end of each server's stdin is the app's alone** (a control starts a process that does hold another's and requires the reading to find it), then both servers end by themselves (the end of their stdin) and both files are free for another program. A process is not stopped: on a hosted macOS runner a SIGSTOPped server made `ps` hang, and the job with it |
    | `sandbox` | the session is `window.fenecHost`, frozen, in the page's own world, and in no storage; the studio has no sign-in form and no Sign out; only the event bridge in a studio window, no navigating off its origin; **a non-web address is dropped by the app** (the page asked, and nothing reached the system) and the first web link is handed to the browser, which the rate limit of one in three seconds does not explain |
    | `pages` | the launcher, the new-database window and a notice window cannot be navigated anywhere else (a web page, a file, another of the app's pages): without the rule, the launcher goes to example.com |
    | `storage` | what a window keeps (the studio's history, theme) is its own, **read from a second window on the same origin** (`store-window`, a test hook): a window in another store does not see a file window's, one in the same store does (the control); two saved servers on one address do not share it; a saved server's survives its window; **a removed connection's store, opened again under its id, is empty**, whether or not a window was open on it |
@@ -334,8 +334,9 @@ Nothing is noted on disk and nothing is stopped at the next launch: an earlier
 app's registry and reaper are gone, since no release of this app ever held a
 server that would need them. The write end must stay in the app alone: a child
 that inherited it would keep the server's stdin open after the app was gone
-(`checks/orphan.mjs` opens two files one after the other, kills the app, and
-needs both to end and both files to be free). A quit waits for every server, one
+(`checks/orphan.mjs` opens two files one after the other, reads the descriptor
+tables with lsof to see that each server's stdin is written to by the app alone,
+kills the app, and needs both to end and both files to be free). A quit waits for every server, one
 being started and one whose window closed a moment ago included.
 
 ## What a failure looks like
