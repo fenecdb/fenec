@@ -161,8 +161,17 @@ export function mount(host, ctx) {
   area.addEventListener('keydown', keys);
   params.addEventListener('keydown', keys);
 
+  // Whether the caret is where the person put it -- by typing, a click or
+  // a key -- since the text was last set from script. A collection picked
+  // goes in at the caret only then: set from script (an example opened),
+  // the caret sat at the end, and each pick ran onto the text before it,
+  // `limit 10ordersevents`.
+  let placed = false;
+  for (const ev of ['input', 'pointerup', 'keydown']) area.addEventListener(ev, () => (placed = true));
+
   const set = (text) => {
     area.value = text;
+    placed = false;
     redraw();
   };
 
@@ -536,14 +545,22 @@ export function mount(host, ctx) {
   fill(out, h('p', { class: 'ed-said' }, 'Run a statement to see its answer here: its rows, its JSON and, for a get, the plan.'));
 
   return {
-    /** A collection picked: its name typed at the caret, or a first statement over it. */
+    /** A collection picked: its name typed at the caret the person put, or a first statement over it. */
     open(name, { picked } = {}) {
       if (picked && name && writable(name)) {
-        if (!area.value.trim()) set(`get ${name} limit 100`);
+        // An empty editor, or one holding the first statement a pick put
+        // there and nothing since, takes a first statement over this one.
+        if (!area.value.trim() || (!placed && /^get \S+ limit 100$/.test(area.value))) set(`get ${name} limit 100`);
+        else if (!placed) ctx.say(`Click in the query where ${name} should go, then pick it again.`);
         else {
           area.focus();
+          // A word apart from what stands either side of it.
+          const [from, to] = [area.selectionStart, area.selectionEnd];
+          const before = area.value[from - 1] ?? '';
+          const after = area.value[to] ?? '';
+          const word = `${before && !/[\s([{,]/.test(before) ? ' ' : ''}${name}${after && !/[\s)\]},;]/.test(after) ? ' ' : ''}`;
           // Typed as a person types, so undo takes it back.
-          if (!document.execCommand?.('insertText', false, name)) area.setRangeText(name, area.selectionStart, area.selectionEnd, 'end');
+          if (!document.execCommand?.('insertText', false, word)) area.setRangeText(word, from, to, 'end');
           redraw();
         }
       }
