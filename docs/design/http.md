@@ -514,8 +514,8 @@ the answer -- each fail with its part taken out.
 
 In ABBA turns against main at loads of 1.95-2.97, the machine moving
 between two modes run by run on either build: `make requests-bench`, three
-quartets, a row by id 0.022 ms p50 against 0.0235 (0.022-0.025 either way)
-and eight clients 146.1k a second against 136.2k (133.7-147.3k and
+quartets, a row by id 0.022 ms p50 against 0.0235 (0.022-0.025 and
+0.020-0.025) and eight clients 146.1k a second against 136.2k (133.7-147.3k and
 133.3-148.7k), a put 0.023 ms either way and 128.3k against 123.1k
 (118.2-130.9k and 119.3-128.5k); `make shard-bench ARGS=latency`, four
 quartets, the router's added p50 27.7 us against 27.75 (20.5-28.7 and
