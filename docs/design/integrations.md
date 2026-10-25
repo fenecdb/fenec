@@ -110,11 +110,15 @@ from a case can be held to it.
 - **A placeholder over no block writes its FenecQL tab.** languages.html's
   tour of the builder has no statement of its own in the prose, so
   `{{builder ...}}` alone on its line makes the FenecQL tab of the cases:
-  each statement with its parameters written in, broken before a clause
-  where it passes 72 characters and before every `lookup` level. A
-  parameter text holding a character FenecQL's strings cannot write (a C0
-  control, U+0085, U+2028, U+2029: FenecQL has no `\u` escape) fails the
-  build. The tour replaced two tables of the seven builders' spellings side
+  each statement with its parameters written in as FenecQL writes them (an
+  object's key bare where it is a name, quoted otherwise), broken before a
+  clause where it passes 72 characters, never before the first, and before
+  every `lookup` level. FenecQL's strings escape `\n`, `\t`, `\r` and `\0`
+  and have no `\u`, so a parameter text holding any other C0 control,
+  U+0085, U+2028 or U+2029 fails the build: the block is the page's to
+  write. `selftest` holds the refusal, the escapes, the quoted keys and the
+  lines. The tour's collections are a block of their own above it, since
+  its `if absent` passes over a row only where `slug` is `@unique`. The tour replaced two tables of the seven builders' spellings side
   by side, a call a cell: cut off on the right at a phone's width, written
   by hand and run by nothing.
 - **Each language is proven its own way.** The JavaScript and Python tabs

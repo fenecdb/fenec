@@ -153,10 +153,23 @@ def literal(v):
     if isinstance(v, (int, float)):
         return _num(v)
     if isinstance(v, str):
-        return quoted(v, '"')
+        return _text(v)
     if isinstance(v, list):
         return "[" + ", ".join(literal(x) for x in v) + "]"
-    return "{" + ", ".join(f"{k}: {literal(x)}" for k, x in v.items()) + "}"
+    return "{" + ", ".join(f"{_key(k)}: {literal(x)}" for k, x in v.items()) + "}"
+
+
+def _text(s):
+    """A text as FenecQL writes it: between double quotes, a backslash and a
+    quote escaped, and FENECQL_ESCAPES's four as their escapes."""
+    return '"' + "".join("\\" + ch if ch in '\\"' else FENECQL_ESCAPES.get(ch, ch) for ch in s) + '"'
+
+
+def _key(k):
+    """An object's key as FenecQL writes it: a name bare, anything else --
+    `a-b`, `1x`, a word FenecQL reads as a value -- quoted."""
+    bare = k.isidentifier() and k.lower() not in ("true", "false", "null")
+    return k if bare else _text(k)
 
 
 def _num(v):
@@ -207,6 +220,13 @@ class Call:
 # controls (`\r` among them), U+0085, U+2028 and U+2029, which some
 # lexers take for a line's end -- C# refuses U+2028 in a string literal.
 ESCAPED = frozenset(range(0x20)) | {0x85, 0x2028, 0x2029}
+
+# FenecQL's own escapes in a string (fenec-ql's lexer): after a backslash a
+# character is itself, but for these four. It has no `\u`, so the rest of
+# ESCAPED has no spelling a page could show, and `written` refuses a value
+# holding one.
+FENECQL_ESCAPES = {"\n": "\\n", "\t": "\\t", "\r": "\\r", "\0": "\\0"}
+UNWRITABLE = ESCAPED - {ord(ch) for ch in FENECQL_ESCAPES}
 
 
 def quoted(s, q, also="", u="\\u%04x"):
@@ -1354,10 +1374,11 @@ def written(c):
             out.append(p)
             continue
         v = c["params"][int(p[1:]) - 1]
-        if any(ord(ch) in ESCAPED for s in _texts(v) for ch in s):
+        if any(ord(ch) in UNWRITABLE for s in _texts(v) for ch in s):
             # FenecQL's strings take no `\u` escape: such a value is a page's
             # own block to write.
-            raise SystemExit(f"builder tabs: case {c['name']!r} binds a text FenecQL cannot write in")
+            raise SystemExit(f"builder tabs: case {c['name']!r} binds a text FenecQL cannot write in "
+                             "(a C0 control but \\n, \\t, \\r and \\0, U+0085, U+2028 or U+2029)")
         out.append(literal(v))
     text = "".join(out)
     if len(text) <= WIDTH:
@@ -1380,8 +1401,10 @@ def written(c):
             cuts.append(i)
         i += 1
     parts = [text[a:b] for a, b in zip(cuts, cuts[1:] + [len(text)])]
-    lines = [parts[0]]
-    for p in parts[1:]:
+    # The first clause stays on the statement's line: `get docs` alone
+    # reads as a statement of its own.
+    lines = ["".join(parts[:2])]
+    for p in parts[2:]:
         if p.startswith(" lookup ") or len(lines[-1]) + len(p) > WIDTH:
             lines.append("  " + p[1:])
         else:
@@ -1854,8 +1877,37 @@ def tokens(text, ext):
     return [t for k, t in enumerate(out) if not (t == "," and k + 1 < len(out) and out[k + 1] in (")", "]", "}"))]
 
 
+def _written_selftest():
+    """`written` held to what it is for: values in as FenecQL writes them, a
+    long statement's lines, and a text it cannot write refused."""
+    def w(text, *params):
+        return written({"name": "selftest", "text": text, "params": list(params)})
+
+    assert w("put d {a: $1}", {"a-b": 1, "ok": 2, "null": 3, "año": 4}) \
+        == 'put d {a: {"a-b": 1, ok: 2, "null": 3, año: 4}}', "a key that is no name is quoted"
+    assert w("get d where t = $1", 'q"b\\s\n\t\r\0') == 'get d where t = "q\\"b\\\\s\\n\\t\\r\\0"', \
+        "FenecQL's own escapes"
+    for ch in ("\x01", "\x1f", "\x85", " ", " "):
+        try:
+            w("get d where t = $1", "a" + ch)
+        except SystemExit:
+            continue
+        raise AssertionError(f"written wrote U+{ord(ch):04X}, which FenecQL's strings cannot")
+    one = ("get docs where year >= $1 and (lang = $2 or tags has $3) order title collate tr asc limit $4 "
+           "lookup comments on doc_id limit $5")
+    lines = w(one, 2024, "x order y", "rust", 20, 3)
+    assert lines == ('get docs where year >= 2024 and (lang = "x order y" or tags has "rust")\n'
+                     "  order title collate tr asc limit 20\n"
+                     "  lookup comments on doc_id limit 3"), f"a long statement's lines:\n{lines}"
+    assert statements(lines) == ['get docs where year >= 2024 and (lang = "x order y" or tags has "rust") '
+                                 "order title collate tr asc limit 20 lookup comments on doc_id limit 3"], \
+        "its lines read back as the one statement"
+    assert w("get d where a = $1 limit $2", "short", 5) == 'get d where a = "short" limit 5', "a short one stays one line"
+
+
 def selftest():
     """The comparison and the comment cutter held to what they are for."""
+    _written_selftest()
     assert tokens('f("pub lished")', ".go") != tokens('f("published")', ".go"), "a string's space"
     assert tokens("f( a ,\n  b, )", ".dart") == tokens("f(a, b)", ".dart"), "a formatter's comma and spaces"
     assert tokens("// the site's\nx('a b')", ".kt") != tokens("// the site's\nx('ab')", ".kt"), "a comment's quote"

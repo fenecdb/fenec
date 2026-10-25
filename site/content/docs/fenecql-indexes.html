@@ -334,7 +334,7 @@ get posts where owner = $1 and created >= $2 count          -- counted off the i
     parent's children as a run of it, walked in the level's order where
     that is the index's next parts:
     <a href="fenecql-lookup.html#a-key-over-several-fields"><code>lookup lines on (org, order)
-    = (org, id) order line limit 5</code></a>.</li>
+    = (org, id) order line asc limit 5</code></a>.</li>
   <li><b>Up to 8 fields</b> of <code>bool</code>, <code>int</code>,
     <code>float</code>, <code>timestamp</code>, <code>text</code> (in its
     collation) or <code>json</code>, a path into one among them

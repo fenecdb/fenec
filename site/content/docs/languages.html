@@ -504,13 +504,21 @@ the same chain, to the byte, and refuse the same mistakes with the same
 message. Python's builder starts with <code>collection</code>, since
 <code>from</code> is a keyword there.</p>
 
-<p>A short tour, the same in every tab: a page of documents, filtered by a
-comparison and an <code>or</code>, in Turkish order, each with its first
-three comments; a search that forgives a misspelt word; one document and a
-count; then the writes — an insert, an insert passed over where its slug is
-held, a counter moved and a delete by a filter. <code>db</code> is the
-client each language's section above connects, and Go's <code>ctx</code> a
-context; the FenecQL tab is what each chain sends.</p>
+<p>A short tour, the same in every tab, over two collections:</p>
+
+<pre data-lang="fenecql">create collection docs (slug text @unique, title text @text, year int,
+  lang text, tags [text], views int)
+create collection comments (doc_id int @hash, body text)
+</pre>
+
+<p>A page of documents, filtered by a comparison and an <code>or</code>, in
+Turkish order, each with its first three comments; a search that forgives a
+misspelt word; one document and a count; then the writes — an insert, an
+insert passed over because its slug is held (<code>slug</code> is
+<code>@unique</code>), a counter moved and a delete by a filter.
+<code>db</code> is the client each language's section above connects, and
+Go's <code>ctx</code> a context. The FenecQL tab is what each chain writes;
+the block under the tabs is what it sends, its parameters apart.</p>
 
 {{builder "docs: a page of documents with their comments" "docs: documents matching a misspelt word" "docs: the document of a slug" "docs: documents counted since a year" "docs: a document inserted" "docs: a document inserted unless its slug is held" "docs: a document's views counted" "docs: the documents before a year deleted"}}
 
@@ -531,6 +539,14 @@ a value worked out over the row with <code>inc</code> and <code>expr</code>
 insert <code>if absent</code>.
 A query is immutable, so a base query can be kept and branched from.</p>
 
+<p>Rows come back as each language holds a document, and three builders
+also decode them into a type of the app's: Go's
+<code>fenecdb.RowsAs[T](ctx, q)</code>, .NET's <code>RowsAsync&lt;T&gt;()</code>
+and Swift's <code>rows(as: T.self)</code>. Go's endpoints take the
+<code>ctx</code> that bounds the request, .NET's are <code>…Async</code>,
+and Kotlin's suspend, with <code>rowsBlocking()</code> and
+<code>countBlocking()</code> for code outside a coroutine.</p>
+
 <details class="deep"><summary>How one golden file holds every builder</summary>
 <p><code>integrations/builder-golden.json</code> is the contract: each case a
 chain of steps (<code>{op, args}</code>, the JavaScript builder's names) and
@@ -550,13 +566,6 @@ language (<a href="fenecql-search.html#the-text-clause">Text search</a> has
 some): the JavaScript and Python tabs run as the page shows them, and each
 other language's tests hold a copy of its tabs' code, so a tab is code that
 sends the statement beside it.</p>
-<p>Rows come back as each language holds a document, and three builders
-also decode them into a type of the app's: Go's
-<code>fenecdb.RowsAs[T](ctx, q)</code>, .NET's <code>RowsAsync&lt;T&gt;()</code>
-and Swift's <code>rows(as: T.self)</code>. Go's endpoints take the
-<code>ctx</code> that bounds the request, .NET's are <code>…Async</code>,
-and Kotlin's suspend, with <code>rowsBlocking()</code> and
-<code>countBlocking()</code> for code outside a coroutine.</p>
 <p>What a language has no word for is written its own way: Go's object
 conditions are <code>Fields</code> and <code>Ops</code>, names and values
 in turn, since a Go map has no order and the order is the text's; a Go
