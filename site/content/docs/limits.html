@@ -244,7 +244,7 @@ time at the next open, never data.</p>
     <code>compact</code>, slowing <code>near</code> a little.</li>
 </ul>
 
-<details class="deep"><summary>When the graph is written, and what compact rebuilds</summary>
+<details class="deep"><summary>Graphs, compaction, batches, ordered indexes and buffered writes</summary>
 <ul>
   <li><b>The graph is derived data and is written only during
     <code>snapshot</code>, <code>compact</code> and <code>checkpoint</code></b>
@@ -356,7 +356,7 @@ what you might expect.</p>
   <li><b><code>put</code> does not check that a vector is finite.</b></li>
 </ul>
 
-<details class="deep"><summary>Query edge cases: sparse near, filters, order, collation</summary>
+<details class="deep"><summary>Edge cases of sparse near, filters, order and collation</summary>
 <ul>
   <li><b><code>near</code> over a <code>sparse&lt;N&gt;</code> field ranks
     only the documents sharing a dimension with the query</b>, by dot product
@@ -473,7 +473,7 @@ encryption of its own.</p>
   <li><b>Too many connections are refused,</b> not queued.</li>
 </ul>
 
-<details class="deep"><summary>The server's limits: TLS, transactions, connections</summary>
+<details class="deep"><summary>The server's limits on TLS, transactions and connections</summary>
 <ul>
   <li><b>No TLS.</b> A token travels in the clear on an open network.
     Listening on a non-loopback address with no token is refused without
@@ -513,7 +513,7 @@ href="http-reference.html">HTTP reference</a>; this is what it leaves out.</p>
     WebSockets.</li>
 </ul>
 
-<details class="deep"><summary>The HTTP listener's limits: bodies, batches, streams</summary>
+<details class="deep"><summary>The HTTP listener's limits on bodies, batches and streams</summary>
 <ul>
   <li><b>Not a separate process.</b> It opens as a second listener via
     <code>fenec-server --http</code>; there is no standalone binary, because two

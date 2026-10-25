@@ -1321,21 +1321,65 @@ def check_router_flags():
                for f in listed if f not in flags])
 
 
+# What a fold's summary may not be: a bare word that says nothing of what is inside.
+FOLD_BARE = {"details", "detail", "method", "methods", "method and details", "measured", "more", "notes"}
+# A number in a summary as a page writes one: digits in groups of three and a
+# decimal part, and not the end of a name (f32, int8, wasm32).
+FOLD_NUMBER = re.compile(r"(?<![\w.,])\d+(?: \d{3})*(?:[.,]\d+)?(?!\w)")
+
+
 def check_fold_labels():
-    """The folds (`<details class="deep">`) whose summary only says "Details":
-    a reader cannot tell what such a line hides, so each says what is inside."""
+    """The folds (`<details class="deep">`) whose summary does not say what is
+    inside, one line for each, since a reader cannot tell what "Details" hides.
+    A fold's first child is a plain `<summary>` of a few words: not a bare
+    "Details", "Method" or "Measured", nor "Details: ..."; with no ";" or ":"
+    (a phrase, not a list); and a number in it is one the fold itself holds,
+    since no claim holds a label's figures to a measurement."""
     problems = []
     for dirpath, _, files in os.walk(os.path.join(ROOT, "content")):
         for name in sorted(files):
             if not name.endswith(".html"):
                 continue
             path = os.path.join(dirpath, name)
+            rel = os.path.relpath(path, ROOT)
             text = open(path, encoding="utf-8").read()
-            for m in re.finditer(r"<summary>\s*(?:Method and )?details\s*</summary>", text, re.I):
-                line = text.count("\n", 0, m.start()) + 1
-                said = re.sub(r"</?summary>", "", m.group(0)).strip()
-                problems.append(f"{os.path.relpath(path, ROOT)}:{line}: a fold's summary says only "
-                                f"{said!r}, not what is inside")
+            for m in re.finditer(r"<details\b([^>]*)>", text):
+                if not re.search(r"""\bclass\s*=\s*["'][^"']*\bdeep\b""", m.group(1)):
+                    continue
+                where = f"{rel}:{text.count(chr(10), 0, m.start()) + 1}"
+                end, depth = m.end(), 1
+                while depth:
+                    tag = re.compile(r"<(/?)details\b").search(text, end)
+                    if tag is None:
+                        break
+                    depth += -1 if tag.group(1) else 1
+                    end = tag.end()
+                summary = re.match(r"\s*<summary(\b[^>]*)>(.*?)</summary>", text[m.end():], re.S)
+                if summary is None:
+                    problems.append(f"{where}: a fold's first child is no <summary>, so it names nothing")
+                    continue
+                if summary.group(1).strip():
+                    problems.append(f"{where}: the <summary> has attributes; a fold's label is its bare text")
+                    continue
+                if "<" in summary.group(2):
+                    problems.append(f"{where}: the <summary> holds tags; its label is plain text")
+                    continue
+                label = re.sub(r"\s+", " ", html.unescape(summary.group(2))).strip()
+                said = label.lower().rstrip(" .")
+                if not label:
+                    problems.append(f"{where}: the <summary> is empty, so the fold names nothing")
+                elif said in FOLD_BARE or re.match(r"(?:method and )?details?\s*[:\-–—]", said):
+                    problems.append(f"{where}: {label!r} does not say what is inside; name it, as in "
+                                    f"'How the lock is taken'")
+                elif ";" in label or ":" in label:
+                    problems.append(f"{where}: {label!r} has a ';' or ':'; write a phrase, not a list")
+                else:
+                    body = text[m.end() + summary.end():end]  # what the fold holds, not its label
+                    held = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", body)))
+                    for number in FOLD_NUMBER.findall(label):
+                        if not re.search(r"(?<![\w.,])" + re.escape(number) + r"(?!\w|[.,]\d)", held):
+                            problems.append(f"{where}: {label!r} has {number}, which the fold never says; "
+                                            f"a figure in a label is one the fold holds")
     return problems
 
 
@@ -2133,7 +2177,14 @@ def build():
 
     print(f"built {len(pages)} pages -> {os.path.relpath(OUT, REPO)}")
 
-    problems = check_claims() + check_router_flags() + check_fold_labels()
+    labels = check_fold_labels()
+    if labels:
+        print("\n  a fold's summary has to say what is inside it (site/README.md, Conventions):")
+        for p in labels:
+            print(f"    {p}")
+        raise SystemExit("\n  refusing to build: name the folds above")
+
+    problems = check_claims() + check_router_flags()
     if problems:
         print("\n  the docs disagree with what was just built:")
         for p in problems:

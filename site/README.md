@@ -334,9 +334,14 @@ map: the map is for the addresses outside it.
   site has to be too, or it stops being trustworthy.
 - What a page keeps for whoever wants it (a measurement, an internal, an edge
   case) goes in `<details class="deep"><summary>…</summary>`, and the summary
-  says what is inside, in a few words: "Why 8 MiB segments", "How the lock is
-  taken", "Method, and where the load time goes". A bare "Details" is refused
-  by the build (`check_fold_labels`), since a reader cannot tell what it hides.
+  says what is inside, in a few words: "How the lock is taken", "Why there is
+  no buffer pool", "Method, and where the load time goes". A fold that is a
+  method starts "Method, and ...". A label is a phrase, with no `;` or `:`, and
+  no filler ("in detail", "in full"); a figure in one is a figure the fold
+  holds. The build (`check_fold_labels`) refuses a bare "Details", "Method" or
+  "Measured", "Details: ...", a summary with attributes or tags, a `;` or `:`,
+  and a number the fold never says, since a reader cannot tell what such a line
+  hides and no claim holds a label's figures to a measurement.
 
 ## The mark
 

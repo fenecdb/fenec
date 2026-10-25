@@ -77,7 +77,7 @@ curl https://db.example.com/t/acme/query -H "Authorization: Bearer $TOKEN" \
     routers send them.</li>
 </ul>
 
-<details class="deep"><summary>How the entry finds a home, and what it costs</summary>
+<details class="deep"><summary>How the entry finds a home, what it passes on, and what it costs</summary>
 <p><b>Where a tenant lives.</b> Nothing remote is asked on the way: a
 request carries <code>Fenec-Home: 1</code>, and the router that forwards it
 to the tenant's node answers with <code>Fenec-Home: &lt;region&gt;</code>, the

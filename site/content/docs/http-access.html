@@ -31,7 +31,7 @@ of it on an open network.</p>
 </table>
 </div>
 
-<details class="deep"><summary>TLS, unfiltered writes, body limits and the shape caveat</summary>
+<details class="deep"><summary>TLS, unfiltered writes, body limits and what a shape leaks</summary>
 <p>There is no TLS, the same rule as <code>fenec-server</code>: on an open network
 it needs a TLS terminator in front. A <code>PATCH</code> or <code>DELETE</code>
 without a filter is refused, and covering a whole collection needs a separate
@@ -114,7 +114,7 @@ sign-up and sessions owned by the app, a tenant per organisation behind
 boards and search under each person's token, with its threat model and the
 attacks its tests try.</p>
 
-<details class="deep"><summary>Every rule of a scoped token, in full</summary>
+<details class="deep"><summary>Every rule of a scoped token</summary>
 <p><code>--http-token</code> is everything or nothing. With
 <code>--jwt-secret</code> the endpoint also takes HS256 JSON Web Tokens, each
 held to the rules of a <code>--policy</code> file, collection by collection and

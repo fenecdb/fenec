@@ -200,7 +200,7 @@ audit log</a>).</p>
 </table>
 </div>
 
-<details class="deep"><summary>What each --sync policy costs</summary>
+<details class="deep"><summary>What each --sync policy costs, and how the server shuts down</summary>
 <p>Writes accumulate in a 1 MB buffer. Under <code>always</code> every write
 waits for an <code>fsync</code>, about 3.7 ms on macOS for a write alone, and
 writes arriving together share one; <code>250</code> costs next to nothing;
@@ -489,7 +489,7 @@ other monitoring systems</a>.</p>
     file is dropped.</li>
 </ul>
 
-<details class="deep"><summary>How the image is built; memory and restarts</summary>
+<details class="deep"><summary>How the image is built, and what sets its memory and restart cost</summary>
 <p>The <code>Dockerfile</code> is two-stage: a static musl build copied into
 <code>scratch</code>. There are no dependencies and the binary runs its own
 health check (<code>--ping</code>), so the runtime image holds nothing but the

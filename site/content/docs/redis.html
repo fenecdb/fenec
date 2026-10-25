@@ -340,7 +340,7 @@ del locks where name = "nightly" and owner = "w1"                  -- → 1: rel
     taken again 2.67.</li>
 </ul>
 
-<details class="deep"><summary>How the lock behaves: if absent, ttl and fencing</summary>
+<details class="deep"><summary>How if absent and the ttl behave as a lock</summary>
 <p><code>if absent</code> passes over a document whose <code>@unique</code>
 value or <code>id</code> a live row holds, and counts what it wrote: Redis's
 <code>SET NX</code>. <code>insert</code> refuses the same document with a

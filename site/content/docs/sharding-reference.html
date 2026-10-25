@@ -30,7 +30,7 @@ curl -X POST 127.0.0.1:8081/t/acme/query -d '{"query": "get notes limit 5"}'
     node</a>).</li>
 </ul>
 
-<details class="deep"><summary>How a --dir node opens, closes and shuts down tenants</summary>
+<details class="deep"><summary>How a --dir node opens, closes and shuts down tenants, and its /_admin/ routes</summary>
 <p><code>--dir</code> serves a directory of <code>&lt;tenant&gt;.fenec</code>
 files instead of one file. It is still one process per directory — the
 single-writer rule is per file, and one process owning all of them is what keeps
@@ -107,7 +107,7 @@ under <code>/_shard/</code>.</p>
     https://app.example</code>.</li>
 </ul>
 
-<details class="deep"><summary>The directory and every /_shard route</summary>
+<details class="deep"><summary>The directory, the node and tenant routes, and CORS through the router</summary>
 <p>Its only state is the <b>directory</b>: two collections in a fenecdb file of
 its own, <code>nodes</code> and <code>tenants</code>. Every change is written and
 synced before it takes effect, and a tenant's node and state change in one
@@ -447,7 +447,7 @@ make drill          # two regions: a node killed and back, a router killed, the 
     the moment it was restored to.</li>
 </ul>
 
-<details class="deep"><summary>What deploy-check runs</summary>
+<details class="deep"><summary>What make deploy-check and make drill run</summary>
 <p><code>make deploy-check</code> boots systemd in two privileged
 containers, installs every unit and environment file as the runbook
 installs them, and runs them: <code>systemd-analyze verify</code> on each,

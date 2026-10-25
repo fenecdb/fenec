@@ -87,7 +87,7 @@ ordered index (<code>make open-bench</code>):</p>
 </table>
 </div>
 
-<details class="deep"><summary>Mapping: a 10 GB file on an 8 GB machine, and the trade</summary>
+<details class="deep"><summary>How a 10 GB file opens on an 8 GB machine, and what mapping costs</summary>
 <p>Because the format on disk is the format in memory, the file can be the
 memory: <code>fs::open</code> maps it where the target maps files, and a
 document is decoded from the pages the operating system brings in — and can
@@ -249,7 +249,7 @@ for a slightly slower search and almost no recall loss.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Half precision: 3 GB to 1.5 GB, 0.3 points of recall</summary>
+<details class="deep"><summary>What half precision saves in memory and loses in recall</summary>
 <p>Precision is part of the type, not of the index — the same choice pgvector
 makes with <code>halfvec</code>. That shrinks the record and the arena
 together; as an index option only the arena would shrink, and in the browser
@@ -291,7 +291,7 @@ exact because the final order comes from the real vectors.</p>
     it on them.</li>
 </ul>
 
-<details class="deep"><summary>How codes are searched, measured at 1 M vectors</summary>
+<details class="deep"><summary>How codes are searched, measured over a million vectors</summary>
 <p>Half precision shrinks the record and the arena together. A quantized
 index leaves the record alone and shrinks the arena further, by holding codes
 instead of vectors.</p>
@@ -482,7 +482,7 @@ graph in one parallel pass.</p>
 outside packages. That keeps the WebAssembly module small and every line of
 it auditable.</p>
 
-<details class="deep"><summary>Why nothing is imported, and what it costs</summary>
+<details class="deep"><summary>Why there are no dependencies, and what it costs</summary>
 <p>The core uses <code>std</code> and nothing else: its own binary codec, its
 own JSON, its own HNSW, its own lexer and parser, its own SCRAM, even its own
 decimal-to-<code>f64</code> — <code>str::parse</code> reaches for a 12 KB table
@@ -515,7 +515,7 @@ file a server can open.</p>
     file in the origin private file system.</li>
 </ul>
 
-<details class="deep"><summary>No wasm-bindgen: the glue and persistence</summary>
+<details class="deep"><summary>The glue without wasm-bindgen, and how persist works</summary>
 <p><code>fenec-wasm</code> exposes a C ABI and there is no
 <code>wasm-bindgen</code>. The glue is about 605 lines of JavaScript inside
 <code>web/fenec.js</code>, alongside persistence and the sync layer; the

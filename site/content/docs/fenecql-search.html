@@ -130,7 +130,7 @@ get products match title $1 fuzzy 1 limit 10           -- one edit at most
     found</b>: <code>databse</code> marks <code>database</code>.</li>
 </ul>
 
-<details class="deep"><summary>How an edit is counted; BEIR results</summary>
+<details class="deep"><summary>How an edit is counted, and the BEIR results</summary>
 <p>An edit is a letter added, dropped, changed, or two letters next to
 each other swapped — Damerau's distance in its restricted form, as Lucene,
 Elasticsearch and Meilisearch count it: the four are what Damerau found
@@ -202,7 +202,7 @@ get articles match body $1 near embed $2 fuse k 60 candidates 50 limit 10
   <li><b>It needs an <code>@hnsw</code> index</b> for the vector side.</li>
 </ul>
 
-<details class="deep"><summary>How fuse adds ranks; BEIR results</summary>
+<details class="deep"><summary>How fuse adds ranks, and the BEIR results</summary>
 <p><code>fuse</code> lets <code>match</code> and <code>near</code> rank the
 same query together. Each side takes its own first <code>candidates</code> —
 20 unless given, never fewer than <code>limit + offset</code> — with the

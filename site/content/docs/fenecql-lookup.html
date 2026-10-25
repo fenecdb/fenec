@@ -71,7 +71,7 @@ children per parent.</p>
     href="#lookup-folds">A level that folds</a>.</li>
 </ul>
 
-<details class="deep"><summary>Chains, limits and folded levels, with their costs</summary>
+<details class="deep"><summary>Chains, keys over several fields, folded levels, required, flat rows and costs</summary>
 <pre data-lang="fenecql">get products lookup reviews on product_id
 get products limit 20 lookup reviews on product_id order created desc limit 3
 get products where price &gt;= 10000 select name

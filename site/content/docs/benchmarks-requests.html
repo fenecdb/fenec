@@ -53,7 +53,7 @@ and pinned, over two runs.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Method, and what each writer result means</summary>
+<details class="deep"><summary>Method, and what holds the write lock and who waits for it</summary>
 <p>fenecdb and SQLite both take one writer at a time. What that costs when
 many want to write, and what readers wait meanwhile, measured in one process:
 fenecdb's threads share one database behind a lock, as <code>fenec-server</code>

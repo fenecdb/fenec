@@ -43,7 +43,7 @@ POST   /_schema/apply           body: a description -- migrations, then what onl
 POST   /mcp                     MCP for agents (--mcp): one JSON-RPC message a request
 </pre>
 
-<details class="deep"><summary>The special routes: _replication, _schema, _metrics</summary>
+<details class="deep"><summary>The _replication, _schema and _metrics routes</summary>
 <p>With <code>--replication-token</code>, <code>/_replication</code> is taken
 as well: the stream a replica is fed, its status, and a replica's promotion —
 see <a href="/docs/replication">Replication</a>. It asks for that token
@@ -538,7 +538,7 @@ curl -i 'http://127.0.0.1:8080/_changes?since=0&amp;limit=1000&amp;wait=10000'
     server's disk comes on a later page.</li>
 </ul>
 
-<details class="deep"><summary>How /_changes pages through writes, and what it costs</summary>
+<details class="deep"><summary>How /_changes pages through the writes on disk</summary>
 <p>A subscription keeps a query's rows up to date, and a client that falls
 behind its ring of ids is sent the rows again. A service that must see every
 write — to index it elsewhere, send it on to Kafka, or keep a read model —

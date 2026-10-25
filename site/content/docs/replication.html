@@ -232,7 +232,7 @@ loses up to the last 250 ms of writes.</p>
 </table>
 </div>
 
-<details class="deep"><summary>How the loss was measured, per policy</summary>
+<details class="deep"><summary>Method, and what a failover loses</summary>
 <p>How it was measured: a primary killed with <code>SIGKILL</code> while one
 client writes to it as fast as it answers, the replica promoted half a second
 later, ten times per policy; counted are the writes the client was told
@@ -270,7 +270,7 @@ replica keeps up with a bulk load.</p>
 </table>
 </div>
 
-<details class="deep"><summary>Lag and bulk load, measured</summary>
+<details class="deep"><summary>Method, and the lag and bulk-load figures</summary>
 <p>How it was measured: primary and replica in one process over loopback, each
 over its own file; lag is from a write's answer on the primary to the write
 being readable on the replica, over 1 000 writes.</p>
