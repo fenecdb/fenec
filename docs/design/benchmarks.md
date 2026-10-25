@@ -21,7 +21,7 @@ of its buffers, from its cgroup; macOS puts fenec-server's physical
 footprint at 992), answers a beam of 100 with 99.1% recall in 0.141 ms
 against 98.6% in 2.08, a filter keeping 1% in 0.67 ms against 16.1, and
 eight clients at 18 852 queries/s against 2 289; at 250 000 x 768, 39.9 s
-against 79.9 and 99.8% in 0.431 ms against 98.1% in 4.22 (`site/content/docs/benchmarks.html#scale`). The laptop this was
+against 79.9 and 99.8% in 0.431 ms against 98.1% in 4.22 (`site/content/docs/benchmarks-vector.html#scale`). The laptop this was
 measured on is a fanless M1 Air, which slows to a third under minutes of
 load on every core: a comparison runs its sides in turns (`--only fenec`,
 then `--only pg`), each after idle minutes, and a figure from a hot run is
@@ -70,7 +70,7 @@ container or a connection of its own -- fenec-server's in Docker, Redis's,
 PostgreSQL's -- is read once a cell's clients stop, not every 100 ms
 beside them (`System::size_beside`): two `docker run`s a second in the VM
 took fenec-server's C at one client from 3.14-3.17 k to 2.33-2.38 k.
-benchmarks.html's Redis part
+benchmarks-ycsb.html's Redis part
 sits between `ycsb redis` markers that `site/build.py` takes out until
 the results hold a Redis cell, its figures written in from the medians
 (`ycsb_redis`); `ycsb/run-redis.sh` is its run, a `--verify` pass first.

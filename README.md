@@ -138,11 +138,11 @@ The numbers behind the comparison, and the method that produced them, are in
 [Benchmarks](https://fenecdb.com/docs/benchmarks). On YCSB's
 workloads in process, fenecdb does B with 16 threads at 545 k operations a
 second against SQLite's 47.9 k, and C on one thread at 438 k against
-279 k, its file compacted on its own as updates grow it ([YCSB](https://fenecdb.com/docs/benchmarks#ycsb));
+279 k, its file compacted on its own as updates grow it ([YCSB](https://fenecdb.com/docs/benchmarks-ycsb#ycsb));
 over HTTP, `fenec-server` does B at 16 clients, durable, at 18.2 k against
 PostgreSQL's 13.0 k, both in Docker. At a million vectors it answers the
 nearest ten at 99.1% recall in 0.141 ms, against pgvector's 98.6% in 2.076
-([At scale](https://fenecdb.com/docs/benchmarks#scale)).
+([At scale](https://fenecdb.com/docs/benchmarks-vector#scale)).
 
 ---
 
@@ -358,7 +358,7 @@ query; it is not a join and is not trying to be one.
 | [From SQL](https://fenecdb.com/docs/sql) | The SQL FenecQL reads as written — tables, joins, subqueries, pgvector's distances — what it refuses and what to write instead, where the meaning is not SQL's: nulls, double quotes, text, joins |
 | [JavaScript client](https://fenecdb.com/docs/javascript) | The browser client, the immutable query builder, binding it to a transport, live queries as an app's state, a schema declared in code |
 | [Mobile and native apps](https://fenecdb.com/docs/mobile) | Swift, Kotlin and Dart/Flutter: a file on the device, the builder, live queries driving the UI, syncing with a server, TLS and the background, where the file lives, durability |
-| [HTTP endpoint](https://fenecdb.com/docs/http) | REST/JSON derived from the schema, raw FenecQL, batches, SSE, vector search over POST, a read marked for a replica |
+| [HTTP endpoint](https://fenecdb.com/docs/http) | Start a server and send it FenecQL from curl or any language's standard library: REST/JSON derived from the schema, raw FenecQL, batches, writes safe to retry; then the [reference](https://fenecdb.com/docs/http-reference) (every route, filter, header and status, SSE, vector search over POST, a read marked for a replica) and [security and scoped access](https://fenecdb.com/docs/http-access) |
 | [Server](https://fenecdb.com/docs/server) | Running `fenec-server`: flags, durability, tokens and policies, the audit log, limits, containers |
 | [Replication](https://fenecdb.com/docs/replication) | Read replicas fed the writes on the primary's disk, promotion by hand, what a failover loses, backups and restoring to a moment, every tenant of a node archived over one connection |
 | [Integrations](https://fenecdb.com/docs/integrations) | `useLiveQuery` for React, the Go and .NET SDKs, and LangChain and LlamaIndex vector stores over HTTP |
@@ -376,7 +376,7 @@ query; it is not a join and is not trying to be one.
 | [Import](https://fenecdb.com/docs/import) | Build a collection from SQLite or a live PostgreSQL server in one command, and keep it following the table's changes |
 | [Embedded Rust](https://fenecdb.com/docs/embedding) | `fenec-core` as a library: opening a file, executing parsed statements |
 | [File format](https://fenecdb.com/docs/file-format) | One file, replayed in a single pass; record kinds, and the crate layout |
-| [Benchmarks](https://fenecdb.com/docs/benchmarks) | YCSB against SQLite, PostgreSQL, MongoDB and Redis, writers beside readers, a request over HTTP and text search; then vectors, against SQLite and pgvector in process and fenec-server against pgvector at scale |
+| [Benchmarks](https://fenecdb.com/docs/benchmarks) | An overview and a page for each family: [YCSB](https://fenecdb.com/docs/benchmarks-ycsb) against SQLite, PostgreSQL, MongoDB and Redis, [writers beside readers and a request over HTTP](https://fenecdb.com/docs/benchmarks-requests), [text search](https://fenecdb.com/docs/benchmarks-text); then [vectors](https://fenecdb.com/docs/benchmarks-vector), against SQLite and pgvector in process and fenec-server against pgvector at scale, and [sizes and memory](https://fenecdb.com/docs/benchmarks-size) |
 | [Limits](https://fenecdb.com/docs/limits) | What it does not do, every hard-coded ceiling, memory and scale |
 
 The docs are the long-form reference; their source is

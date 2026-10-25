@@ -203,7 +203,7 @@ description: One database from the screen to the server: state your screens foll
 
     <p class="after rise">Durable writes, an fsync each, and four reading
       threads, in one process on an M1. A block of 1 000 writes builds its
-      rows beside the readers and holds them for the 0.15 ms it lands. <a href="docs/benchmarks.html#concurrency">Method
+      rows beside the readers and holds them for the 0.15 ms it lands. <a href="docs/benchmarks-requests.html#concurrency">Method
       and the rest of the table</a></p>
   </div>
 </section>
@@ -229,14 +229,14 @@ description: One database from the screen to the server: state your screens foll
       <div><dt>A row by id over HTTP</dt><dd><b>0.022 ms</b><span>median, one client</span></dd></div>
       <div><dt>Rows by id, eight clients at once</dt><dd><b>149 268/s</b></dd></div>
       <div><dt>YCSB C, all reads, 16 clients, buffered</dt><dd><b>18.4 k ops/s</b><span>p99 2.9 ms; Redis 14.0 k, p99 4.0 ms; both in Docker</span></dd></div>
-      <div><dt>YCSB B over HTTP, 16 clients, durable</dt><dd><b>18.2 k ops/s</b><span>Redis 9.25 k, PostgreSQL 13.0 k, both in Docker; <a href="docs/benchmarks.html#ycsb">every cell</a></span></dd></div>
+      <div><dt>YCSB B over HTTP, 16 clients, durable</dt><dd><b>18.2 k ops/s</b><span>Redis 9.25 k, PostgreSQL 13.0 k, both in Docker; <a href="docs/benchmarks-ycsb.html#ycsb">every cell</a></span></dd></div>
       <div><dt>Cells where Redis did more operations a second</dt><dd><b>none of 33</b><span>the same durability mode against the same</span></dd></div>
     </dl>
     <p class="after rise">The first two figures are over 10 000 rows on loopback,
       an M1, one <code>POST /query</code> a request on a kept-alive connection
-      (<a href="docs/benchmarks.html#requests">method</a>). The YCSB figures are one
+      (<a href="docs/benchmarks-requests.html#requests">method</a>). The YCSB figures are one
       node, 1 000 000 records of 1 KB, fenec-server and Redis 7.4 in Docker
-      (<a href="docs/benchmarks.html#ycsb-redis">every cell</a>).</p>
+      (<a href="docs/benchmarks-ycsb.html#ycsb-redis">every cell</a>).</p>
     <p class="after rise">In Docker a read by key spends 0.023 ms inside the server of
       a 0.288 ms round trip and the rest is the network, so over the same network
       a cache in front can take off at most the time spent inside the server, and
@@ -320,7 +320,7 @@ description: One database from the screen to the server: state your screens foll
       <a href="docs/fenecql-search.html#typos">typos and words begun</a>,
       <a href="docs/fenecql-search.html#facets">facets</a>,
       <a href="docs/fenecql-search.html#hybrid">words and meaning together</a> and
-      <a href="docs/benchmarks.html#retrieval-quality">how good the answers
+      <a href="docs/benchmarks-text.html#retrieval-quality">how good the answers
       are</a>; fenecdb beside
       <a href="docs/vs-postgres.html">PostgreSQL</a>,
       <a href="docs/vs-sqlite.html">SQLite</a> and

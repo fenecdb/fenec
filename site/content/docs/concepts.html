@@ -399,7 +399,7 @@ get passages near splade $1 limit 10
 </pre>
 
 <p>Encoded with SPLADE++ and scored on BEIR (<code>make beir</code>,
-<a href="benchmarks.html#retrieval-quality">Benchmarks</a>):</p>
+<a href="benchmarks-text.html#retrieval-quality">Benchmarks</a>):</p>
 
 <div class="tbl">
 <table>
@@ -473,7 +473,7 @@ graph in one parallel pass.</p>
 
 <p>This is already the recommended order for SQLite and PostgreSQL. In fenecdb
 <code>create index</code> exists for exactly this reason, and the comparison in
-<a href="benchmarks.html">Benchmarks</a> uses that order for all three engines.</p>
+<a href="benchmarks-vector.html#method">Vector search benchmarks</a> uses that order for all three engines.</p>
 </details>
 
 <h2>Zero dependencies</h2>
@@ -613,7 +613,7 @@ file, runs on its own. Held back, a write costs within 2% of what it did: a lone
 about 2.8 MB of headers over 100 000 rows. Most of the 2.4× between this file
 and the same data under pgvector is elsewhere: pgvector's HNSW index keeps its
 own copy of every vector, while this graph stores only the links
-(<a href="benchmarks.html">Benchmarks</a>).</p>
+(<a href="benchmarks-vector.html#how-to-read-the-numbers">Vector search benchmarks</a>).</p>
 
 <p>Concurrency still exists on the read side. HNSW search buffers are kept
 thread-locally so the same index can be searched in parallel; eight concurrent

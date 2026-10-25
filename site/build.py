@@ -58,13 +58,14 @@ def minify(body, ext):
 # order of what a reader is doing: Start gets a first query running, Clients
 # is how an app talks to the database, Guides are what one builds with it,
 # Reference is where one looks a thing up, Operate is for whoever runs a
-# server, and Design and comparisons is why it is built as it is and how it
-# measures against others. A page that fits two groups sits with the task that
+# server, Design and comparisons is why it is built as it is and how it sits
+# beside others, and Benchmarks is what was measured. A page that fits two groups sits with the task that
 # brings the reader to it: HTTP endpoint is in Clients, for the reader with no
-# SDK for their language, its route list being that client's reference (the
-# Reference group's Limits points there); File format is Reference, the place
-# one looks a byte up, though it is also why the file is as it is; Studio is
-# Operate, an admin page the server serves.
+# SDK for their language, and the reference of that client (every route, the
+# statuses, the tokens and policies) is in Reference, where the Limits page
+# points; File format is Reference, the place one looks a byte up, though it
+# is also why the file is as it is; Studio is Operate, an admin page the
+# server serves.
 NAV = [
     ("Start", [
         ("docs/index", "Overview"),
@@ -108,6 +109,12 @@ NAV = [
         ("docs/fenecql-search", "Text search"),
         ("docs/fenecql-vector", "Vector search"),
         ("docs/sql", "From SQL"),
+        # What `docs/http` once held beyond the way in (which is HTTP
+        # endpoint, in Clients): the routes and everything a request can
+        # carry or be answered with, and who may ask. A section of the old
+        # page is followed to its new one by moved.json.
+        ("docs/http-reference", "HTTP reference"),
+        ("docs/http-access", "HTTP security and scoped access"),
         ("docs/limits", "Limits"),
         ("docs/file-format", "File format"),
     ]),
@@ -138,11 +145,25 @@ NAV = [
     # what the three are beside.
     ("Design and comparisons", [
         ("docs/concepts", "How it works"),
-        ("docs/benchmarks", "Benchmarks"),
         ("docs/compare", "Compare"),
         ("docs/vs-postgres", "vs PostgreSQL"),
         ("docs/vs-sqlite", "vs SQLite"),
         ("docs/vs-pglite", "vs PGlite"),
+    ]),
+    # What `docs/benchmarks` once held, in a group of its own, as the
+    # sharding pages are: the overview, then a page for each family, the
+    # general database and text search before vectors. A section of the old
+    # page is followed to its new one by moved.json. The labels of the family
+    # pages keep "benchmarks": the previous and next links and llms.txt show
+    # a label with no group, and "Text search" and "Vector search" are the
+    # Reference group's.
+    ("Benchmarks", [
+        ("docs/benchmarks", "Benchmarks"),
+        ("docs/benchmarks-ycsb", "YCSB benchmarks"),
+        ("docs/benchmarks-requests", "Concurrency and request benchmarks"),
+        ("docs/benchmarks-text", "Text search benchmarks"),
+        ("docs/benchmarks-vector", "Vector search benchmarks"),
+        ("docs/benchmarks-size", "Size and memory benchmarks"),
     ]),
     # Last, after the reader has what they came for: the Quickstart installs
     # a release, and what is left for a clone is here.
@@ -150,6 +171,14 @@ NAV = [
         ("docs/build", "Build from source"),
     ]),
 ]
+
+
+def is_benchmark(key):
+    """Whether `key` (as NAV keys it) is the benchmarks overview or one of
+    its family pages: the header's Benchmarks link is current on all of
+    them, and the search files them under one kind."""
+    return key == "docs/benchmarks" or key.startswith("docs/benchmarks-")
+
 
 # ---------------------------------------------------------------- highlighting
 
@@ -591,6 +620,13 @@ APP = (
     "const db = connect('https://db.example.com', {{ token: 't' }});\n"
     "console.log(await db.from('docs').where('year', '>=', 2024).limit(10).rows());\n"
 )
+# The benchmarks pages a claim is on: docs/benchmarks is the overview, whose
+# glance holds the headline YCSB cells and the sizes a page loads, and each
+# family has a page of its own (a sentence a claim holds is on the page its
+# table is on; the YCSB page also holds the full grid, `ycsb_grid_claims`).
+BENCH = "site/content/docs/benchmarks.html"
+BENCH_YCSB = "site/content/docs/benchmarks-ycsb.html"
+BENCH_SIZE = "site/content/docs/benchmarks-size.html"
 CLAIMS = [
     # fenec studio's first load, which studio/test/statements.test.mjs holds
     # under 120 KB.
@@ -606,20 +642,20 @@ CLAIMS = [
     ("site/content/index.html", r"(\d+) KB of gzipped WebAssembly with no", "kb_gz", 0),
     ("site/content/playground.html", r"\((\d+) KB\s+gzipped\)", "kb_gz", 0),
     ("site/content/docs/concepts.html", r"(\d+) KB gzip<br><small>the wasm", "kb_gz", 0),
-    ("site/content/docs/benchmarks.html",
+    (BENCH_SIZE,
      r'wasm32, browser</td><td class="n"><b>(\d+) KB</b>', "kb", 0),
-    ("site/content/docs/benchmarks.html",
+    (BENCH_SIZE,
      r'<b>\d+ KB</b></td><td class="n"><b>(\d+) KB</b></td><td class="n">\d+ KB</td>',
      "kb_br", 0),
-    ("site/content/docs/benchmarks.html",
+    (BENCH_SIZE,
      r'<b>\d+ KB</b></td><td class="n"><b>\d+ KB</b></td><td class="n">(\d+) KB</td>',
      "kb_gz", 0),
-    ("site/content/docs/benchmarks.html",
+    (BENCH_SIZE,
      r'the client</td><td class="n">(\d+) KB</td>', "kb_client", 0),
-    ("site/content/docs/benchmarks.html",
+    (BENCH_SIZE,
      r'the client</td><td class="n">\d+ KB</td><td class="n">(\d+) KB</td>',
      "kb_client_br", 0),
-    ("site/content/docs/benchmarks.html",
+    (BENCH_SIZE,
      r"browser pays is\s*\n?\s*<b>(\d+) KB brotli</b>", "kb_br_all", 0),
     # The comparison pages set the module beside another engine's files.
     ("site/content/docs/vs-sqlite.html",
@@ -653,38 +689,38 @@ CLAIMS = [
     ("site/content/docs/javascript.html", r"and to (\d+) KB through <code>@fenecdb/web</code>", "kb_app_br", 0),
     ("site/content/docs/integrations.html", r"no module, (\d+) KB brotli of client", "kb_app_client_br", 0),
     ("site/content/docs/integrations.html", r"<td><code>fenec.wasm</code>, (\d+) KB brotli</td>", "kb_br", 0),
-    ("site/content/docs/benchmarks.html",
+    (BENCH,
      r'<code>fenec.wasm</code></td><td class="n"><b>(\d+) KB</b></td>', "kb_br", 0),
-    ("site/content/docs/benchmarks.html",
+    (BENCH,
      r'<code>fenec.wasm</code></td><td class="n"><b>\d+ KB</b></td><td class="n">(\d+) KB</td>', "kb_gz", 0),
-    ("site/content/docs/benchmarks.html",
+    (BENCH,
      r'<code>fenec.js</code> and its modules</td><td class="n">(\d+) KB</td>', "kb_client_br", 0),
-    ("site/content/docs/benchmarks.html",
+    (BENCH,
      r'<code>fenec.js</code> and its modules</td><td class="n">\d+ KB</td><td class="n">(\d+) KB</td>',
      "kb_client_gz", 0),
-    ("site/content/docs/benchmarks.html",
+    (BENCH,
      r"in an app's bundle, <code>@fenecdb/web/client</code></td><td class=\"n\">(\d+) KB</td>", "kb_app_client_br", 0),
-    ("site/content/docs/benchmarks.html",
+    (BENCH_SIZE,
      r"<code>@fenecdb/web/client</code> in an app's bundle, <code>connect</code> and a query's rows, esbuild, minified</td><td class=\"n\">(\d+) KB</td>", "kb_app_client", 0),
-    ("site/content/docs/benchmarks.html",
+    (BENCH_SIZE,
      r"<code>@fenecdb/web/client</code> in an app's bundle, <code>connect</code> and a query's rows, esbuild, minified</td><td class=\"n\">\d+ KB</td><td class=\"n\">(\d+) KB</td>", "kb_app_client_br", 0),
-    ("site/content/docs/benchmarks.html",
+    (BENCH_SIZE,
      r"<code>@fenecdb/web/client</code> in an app's bundle, <code>connect</code> and a query's rows, esbuild, minified</td><td class=\"n\">\d+ KB</td><td class=\"n\">\d+ KB</td><td class=\"n\">(\d+) KB</td>",
      "kb_app_client_gz", 0),
-    ("site/content/docs/benchmarks.html",
+    (BENCH_SIZE,
      r'<code>make wasm FEATURES=language SCHEMA=0</code></td><td class="n">(\d+) KB</td>', "kb_lite", 0),
-    ("site/content/docs/benchmarks.html",
+    (BENCH_SIZE,
      r'<code>make wasm FEATURES=language SCHEMA=0</code></td><td class="n">\d+ KB</td><td class="n">(\d+) KB</td>',
      "kb_lite_br", 0),
-    ("site/content/docs/benchmarks.html",
+    (BENCH_SIZE,
      r'<code>make wasm FEATURES=language SCHEMA=0</code></td><td class="n">\d+ KB</td><td class="n">\d+ KB</td><td class="n">(\d+) KB</td>',
      "kb_lite_gz", 0),
-    ("site/content/docs/benchmarks.html",
+    (BENCH_SIZE,
      r'<code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">(\d+) KB</td>', "kb_min", 0),
-    ("site/content/docs/benchmarks.html",
+    (BENCH_SIZE,
      r'<code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">\d+ KB</td><td class="n">(\d+) KB</td>',
      "kb_min_br", 0),
-    ("site/content/docs/benchmarks.html",
+    (BENCH_SIZE,
      r'<code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">\d+ KB</td><td class="n">\d+ KB</td><td class="n">(\d+) KB</td>',
      "kb_min_gz", 0),
     ("README.md", r"`@fenecdb/web/client`, (\d+) KB brotli\s+in its bundle", "kb_app_client_br", 0),
@@ -701,21 +737,21 @@ CLAIMS = [
     ("README.md", r"does B at 16 clients, durable, at ([\d.]+) k against", "ycsb:server-docker:durable:B:16", 0),
     ("README.md", r"durable, at [\d.]+ k against\s+PostgreSQL's ([\d.]+) k, both in Docker", "ycsb:pg:durable:B:16", 0),
     # The benchmarks page's glance, ahead of the section the cells are in.
-    ("site/content/docs/benchmarks.html", r"B, 95% reads, 16 threads, buffered</td><td class=\"n\"><b>([\d.]+) k", "ycsb:fenec:buffered:B:16", 0),
-    ("site/content/docs/benchmarks.html", r"B, 95% reads, 16 threads, buffered</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:sqlite:buffered:B:16", 0),
-    ("site/content/docs/benchmarks.html", r"C, reads, one thread, after the updates</td><td class=\"n\"><b>([\d.]+) k", "ycsb:fenec:buffered:C:1", 0),
-    ("site/content/docs/benchmarks.html", r"C, reads, one thread, after the updates</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:sqlite:buffered:C:1", 0),
-    ("site/content/docs/benchmarks.html", r"A, 50% updates, 16 threads, durable</td><td class=\"n\"><b>([\d.]+) k", "ycsb:fenec:durable:A:16", 0),
-    ("site/content/docs/benchmarks.html", r"A, 50% updates, 16 threads, durable</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:sqlite:durable:A:16", 0),
-    ("site/content/docs/benchmarks.html", r"B, 95% reads, 16 clients</td><td class=\"n\"><b>([\d.]+) k", "ycsb:server-docker:durable:B:16", 0),
-    ("site/content/docs/benchmarks.html", r"B, 95% reads, 16 clients</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:pg:durable:B:16", 0),
-    ("site/content/docs/benchmarks.html", r"B, 95% reads, 16 clients</td>(?:<td[^>]*>(?:<b>)?[\d.]+ k(?:</b>)?</td>){2}<td class=\"n\">([\d.]+) k", "ycsb:mongo:durable:B:16", 0),
-    ("site/content/docs/benchmarks.html", r"A, 50% updates, 16 clients</td><td class=\"n\"><b>([\d.]+) k", "ycsb:server-docker:durable:A:16", 0),
-    ("site/content/docs/benchmarks.html", r"A, 50% updates, 16 clients</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:pg:durable:A:16", 0),
-    ("site/content/docs/benchmarks.html", r"A, 50% updates, 16 clients</td>(?:<td[^>]*>(?:<b>)?[\d.]+ k(?:</b>)?</td>){2}<td class=\"n\">([\d.]+) k", "ycsb:mongo:durable:A:16", 0),
-    ("site/content/docs/benchmarks.html", r"A, 50% updates, one client</td><td class=\"n\"><b>([\d.]+) k", "ycsb:server-docker:durable:A:1", 0),
-    ("site/content/docs/benchmarks.html", r"A, 50% updates, one client</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:pg:durable:A:1", 0),
-    ("site/content/docs/benchmarks.html", r"A, 50% updates, one client</td>(?:<td[^>]*>(?:<b>)?[\d.]+ k(?:</b>)?</td>){2}<td class=\"n\">([\d.]+) k", "ycsb:mongo:durable:A:1", 0),
+    (BENCH, r"B, 95% reads, 16 threads, buffered</td><td class=\"n\"><b>([\d.]+) k", "ycsb:fenec:buffered:B:16", 0),
+    (BENCH, r"B, 95% reads, 16 threads, buffered</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:sqlite:buffered:B:16", 0),
+    (BENCH, r"C, reads, one thread, after the updates</td><td class=\"n\"><b>([\d.]+) k", "ycsb:fenec:buffered:C:1", 0),
+    (BENCH, r"C, reads, one thread, after the updates</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:sqlite:buffered:C:1", 0),
+    (BENCH, r"A, 50% updates, 16 threads, durable</td><td class=\"n\"><b>([\d.]+) k", "ycsb:fenec:durable:A:16", 0),
+    (BENCH, r"A, 50% updates, 16 threads, durable</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:sqlite:durable:A:16", 0),
+    (BENCH, r"B, 95% reads, 16 clients</td><td class=\"n\"><b>([\d.]+) k", "ycsb:server-docker:durable:B:16", 0),
+    (BENCH, r"B, 95% reads, 16 clients</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:pg:durable:B:16", 0),
+    (BENCH, r"B, 95% reads, 16 clients</td>(?:<td[^>]*>(?:<b>)?[\d.]+ k(?:</b>)?</td>){2}<td class=\"n\">([\d.]+) k", "ycsb:mongo:durable:B:16", 0),
+    (BENCH, r"A, 50% updates, 16 clients</td><td class=\"n\"><b>([\d.]+) k", "ycsb:server-docker:durable:A:16", 0),
+    (BENCH, r"A, 50% updates, 16 clients</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:pg:durable:A:16", 0),
+    (BENCH, r"A, 50% updates, 16 clients</td>(?:<td[^>]*>(?:<b>)?[\d.]+ k(?:</b>)?</td>){2}<td class=\"n\">([\d.]+) k", "ycsb:mongo:durable:A:16", 0),
+    (BENCH, r"A, 50% updates, one client</td><td class=\"n\"><b>([\d.]+) k", "ycsb:server-docker:durable:A:1", 0),
+    (BENCH, r"A, 50% updates, one client</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:pg:durable:A:1", 0),
+    (BENCH, r"A, 50% updates, one client</td>(?:<td[^>]*>(?:<b>)?[\d.]+ k(?:</b>)?</td>){2}<td class=\"n\">([\d.]+) k", "ycsb:mongo:durable:A:1", 0),
     ("site/content/index.html", r"YCSB B over HTTP, 16 clients, durable</dt><dd><b>([\d.]+) k ops/s", "ycsb:server-docker:durable:B:16", 0),
     ("site/content/index.html", r"PostgreSQL ([\d.]+) k, both in Docker", "ycsb:pg:durable:B:16", 0),
     ("site/content/docs/vs-sqlite.html", r"B, 95% reads, 16 threads, buffered</td><td class=\"n\"><b>([\d.]+) k", "ycsb:fenec:buffered:B:16", 0),
@@ -739,26 +775,27 @@ CLAIMS = [
     ("site/content/docs/vs-postgres.html", r"its median now ([\d.]+) k", "ycsb:pg:buffered:C:1", 0),
     ("site/content/docs/vs-postgres.html", r"fenec-server leads C,\s+([\d.]+) k", "ycsb:server-docker:buffered:C:16", 0),
     ("site/content/docs/vs-postgres.html", r"fenec-server leads C,\s+[\d.]+ k against ([\d.]+) k", "ycsb:pg:buffered:C:16", 0),
-    ("site/content/docs/benchmarks.html", r"buffered C ([\d.]+) k against [\d.]+ k and F", "ycsb:server-docker:buffered:C:1", 0),
-    ("site/content/docs/benchmarks.html", r"buffered C [\d.]+ k against ([\d.]+) k and F", "ycsb:pg:buffered:C:1", 0),
-    ("site/content/docs/benchmarks.html", r"here it does ([\d.]+) k against\s+PostgreSQL's [\d.]+ k buffered", "ycsb:server-docker:buffered:E:1", 0),
-    ("site/content/docs/benchmarks.html", r"here it does [\d.]+ k against\s+PostgreSQL's ([\d.]+) k buffered", "ycsb:pg:buffered:E:1", 0),
-    ("site/content/docs/benchmarks.html", r"k buffered, ([\d.]+) k against [\d.]+ k durable", "ycsb:server-docker:durable:E:1", 0),
-    ("site/content/docs/benchmarks.html", r"k buffered, [\d.]+ k against ([\d.]+) k durable", "ycsb:pg:durable:E:1", 0),
-    ("site/content/docs/benchmarks.html", r"3.27 k on 2026-10-04; here ([\d.]+) k against", "ycsb:server-docker:durable:A:1", 0),
-    ("site/content/docs/benchmarks.html", r"here [\d.]+ k against PostgreSQL's ([\d.]+) k\)", "ycsb:pg:durable:A:1", 0),
-    ("site/content/docs/benchmarks.html", r"and F ([\d.]+) k against [\d.]+ k\. A read", "ycsb:server-docker:buffered:F:1", 0),
-    ("site/content/docs/benchmarks.html", r"and F [\d.]+ k against ([\d.]+) k\. A read", "ycsb:pg:buffered:F:1", 0),
-    ("site/content/docs/benchmarks.html", r"2026-10-05, ([\d.]+) k here", "ycsb:pg:buffered:C:1", 0),
-    ("site/content/docs/benchmarks.html", r"fenec-server's [\d.]+ k and ([\d.]+) k\. E was", "ycsb:server-docker:buffered:C:1", 0),
-    ("site/content/docs/benchmarks.html", r"A ([\d.]+) k at one client and [\d.]+ k at 16, F", "ycsb:server:durable:A:1", 0),
-    ("site/content/docs/benchmarks.html", r"A [\d.]+ k at one client and ([\d.]+) k at 16, F", "ycsb:server:durable:A:16", 0),
-    ("site/content/docs/benchmarks.html", r"at 16, F ([\d.]+) k and [\d.]+ k\. Half", "ycsb:server:durable:F:1", 0),
-    ("site/content/docs/benchmarks.html", r"at 16, F [\d.]+ k and ([\d.]+) k\. Half", "ycsb:server:durable:F:16", 0),
+    (BENCH_YCSB, r"buffered C ([\d.]+) k against [\d.]+ k and F", "ycsb:server-docker:buffered:C:1", 0),
+    (BENCH_YCSB, r"buffered C [\d.]+ k against ([\d.]+) k and F", "ycsb:pg:buffered:C:1", 0),
+    (BENCH_YCSB, r"here it does ([\d.]+) k against\s+PostgreSQL's [\d.]+ k buffered", "ycsb:server-docker:buffered:E:1", 0),
+    (BENCH_YCSB, r"here it does [\d.]+ k against\s+PostgreSQL's ([\d.]+) k buffered", "ycsb:pg:buffered:E:1", 0),
+    (BENCH_YCSB, r"k buffered, ([\d.]+) k against [\d.]+ k durable", "ycsb:server-docker:durable:E:1", 0),
+    (BENCH_YCSB, r"k buffered, [\d.]+ k against ([\d.]+) k durable", "ycsb:pg:durable:E:1", 0),
+    (BENCH_YCSB, r"3.27 k on 2026-10-04; here ([\d.]+) k against", "ycsb:server-docker:durable:A:1", 0),
+    (BENCH_YCSB, r"here [\d.]+ k against PostgreSQL's ([\d.]+) k\)", "ycsb:pg:durable:A:1", 0),
+    (BENCH_YCSB, r"and F ([\d.]+) k against [\d.]+ k\. A read", "ycsb:server-docker:buffered:F:1", 0),
+    (BENCH_YCSB, r"and F [\d.]+ k against ([\d.]+) k\. A read", "ycsb:pg:buffered:F:1", 0),
+    (BENCH_YCSB, r"2026-10-05, ([\d.]+) k here", "ycsb:pg:buffered:C:1", 0),
+    (BENCH_YCSB, r"fenec-server's [\d.]+ k and ([\d.]+) k\. E was", "ycsb:server-docker:buffered:C:1", 0),
+    (BENCH_YCSB, r"A ([\d.]+) k at one client and [\d.]+ k at 16, F", "ycsb:server:durable:A:1", 0),
+    (BENCH_YCSB, r"A [\d.]+ k at one client and ([\d.]+) k at 16, F", "ycsb:server:durable:A:16", 0),
+    (BENCH_YCSB, r"at 16, F ([\d.]+) k and [\d.]+ k\. Half", "ycsb:server:durable:F:1", 0),
+    (BENCH_YCSB, r"at 16, F [\d.]+ k and ([\d.]+) k\. Half", "ycsb:server:durable:F:16", 0),
     # A cache in front of fenec-server (concepts.html tells the architecture,
     # these pages the comparison with Redis): the cells they quote, their
     # latencies, the count of cells Redis led in and the read by key taken
-    # apart, each held to what the results (or benchmarks.html) say.
+    # apart, each held to what the results (or benchmarks-requests.html's
+    # round-trip table) say.
     ("site/content/index.html", r"YCSB C, all reads, 16 clients, buffered</dt><dd><b>([\d.]+) k ops/s", "ycsb:server-docker:buffered:C:16", 0),
     ("site/content/index.html", r"<span>p99 ([\d.]+) ms; Redis [\d.]+ k", "ycsbms:server-docker:buffered:C:16:slowest_p99", 0),
     ("site/content/index.html", r"<span>p99 [\d.]+ ms; Redis ([\d.]+) k, p99", "ycsb:redis:buffered:C:16", 0),
@@ -919,9 +956,10 @@ def redis_facts():
 
 
 # A read by key in Docker taken apart (`make roundtrip-bench`) has no results
-# file: benchmarks.html's table is where its medians are recorded, so a page
-# quoting them is held to that table (`rt:docker:read:<part>`, microseconds).
-ROUND_TRIP_PAGE = os.path.join(ROOT, "content", "docs", "benchmarks.html")
+# file: the table of benchmarks-requests.html is where its medians are
+# recorded, so a page quoting them is held to that table
+# (`rt:docker:read:<part>`, microseconds).
+ROUND_TRIP_PAGE = os.path.join(ROOT, "content", "docs", "benchmarks-requests.html")
 ROUND_TRIP_ROWS = (
     ("rt:docker:read:round_trip",
      r'<tr><td>round trip, p50</td><td class="n">[\d.]+ ms</td><td class="n"><b>([\d.]+) ms</b>'),
@@ -955,7 +993,7 @@ def bench_facts():
     return {**ycsb, **latency, **counts}, unit
 
 
-# ---- Redis on benchmarks.html#ycsb
+# ---- Redis on benchmarks-ycsb.html#ycsb
 #
 # Redis's part of the YCSB section is in the page only once the results hold
 # a Redis cell: until then there is no Redis column at all, rather than an
@@ -1283,21 +1321,21 @@ def check_router_flags():
                for f in listed if f not in flags])
 
 
-# The names benchmarks.html#ycsb's full grid gives each system.
+# The names benchmarks-ycsb.html#ycsb's full grid gives each system.
 YCSB_NAMES = {"fenec": "fenecdb", "sqlite": "SQLite", "server": "fenec-server",
               "server-docker": "fenec-server in Docker", "pg": "PostgreSQL", "mongo": "MongoDB",
               "redis": "Redis"}
 
 
 def ycsb_grid_claims(truth):
-    """A claim for each cell of benchmarks.html#ycsb's full grid: its row
+    """A claim for each cell of benchmarks-ycsb.html#ycsb's full grid: its row
     names the cell, so every one is held to the results, not a few."""
     out = []
     for fact in truth:
         if not fact.startswith("ycsb:"):
             continue
         _, system, mode, wl, threads = fact.split(":")
-        out.append(("site/content/docs/benchmarks.html",
+        out.append((BENCH_YCSB,
                     rf'<tr><td>{re.escape(YCSB_NAMES[system])}</td><td>{mode}</td><td>{wl}</td>'
                     rf'<td class="n">{threads}</td><td class="n">([\d.]+) k</td>', fact, 0))
     return out
@@ -1328,7 +1366,7 @@ def claims_against(truth, unit, wanted):
             )
             why = ("a YCSB cell crates/fenec-bench/ycsb/results.tsv does not hold"
                    if fact.startswith(("ycsb:", "ycsbms:", "redis:")) else
-                   "a row of benchmarks.html's round-trip table it no longer has"
+                   "a row of benchmarks-requests.html's round-trip table it no longer has"
                    if fact.startswith("rt:") else why)
             problems.append(f"{rel}: /{pattern}/ claims {why}, so it went unchecked")
             continue
@@ -1637,7 +1675,7 @@ def search_documents(rendered):
         group = groups.get(key) or SEARCH_PAGES.get(key)
         if group is None:
             continue
-        kind = ("benchmark" if key == "docs/benchmarks"
+        kind = ("benchmark" if is_benchmark(key)
                 else "compare" if key == "docs/compare" or key.startswith("docs/vs-")
                 else "doc")
         title = re.sub(r"\s+—\s+fenecdb$", "", meta.get("title", "")).strip()
@@ -1994,13 +2032,13 @@ def build():
         page = page.replace("{{description}}", html.escape(meta.get("description", "")))
         page = page.replace("{{base}}", base)
         page = page.replace("{{repo}}", REPO_URL)
-        # One header link is current: Benchmarks for its page, Compare for the
+        # One header link is current: Benchmarks for its pages, Compare for the
         # comparison pages, Docs for the rest of the docs, Playground for its own.
         here = ' aria-current="page"'
         compare = key == "docs/compare" or key.startswith("docs/vs-")
-        page = page.replace("{{nav_bench}}", here if key == "docs/benchmarks" else "")
+        page = page.replace("{{nav_bench}}", here if is_benchmark(key) else "")
         page = page.replace("{{nav_compare}}", here if compare else "")
-        page = page.replace("{{nav_docs}}", here if is_docs and key != "docs/benchmarks"
+        page = page.replace("{{nav_docs}}", here if is_docs and not is_benchmark(key)
                             and not compare else "")
         page = page.replace("{{nav_playground}}", here if key == "playground" else "")
         if is_docs:

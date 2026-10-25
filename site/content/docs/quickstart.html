@@ -330,7 +330,7 @@ without an id makes a row each time.</p>
 
 <p>The REST routes read the same collection, and a stream sends the rows a
 filter holds, then each change to them (<a
-href="http.html#subscriptions">Subscriptions</a>):</p>
+href="http-reference.html#subscriptions">Subscriptions</a>):</p>
 
 <pre data-lang="bash">curl -s -H 'Authorization: Bearer secret' \
   'http://127.0.0.1:8080/notes?select=title,year&amp;year=gte.2020&amp;order=year.desc&amp;limit=10'
@@ -345,8 +345,8 @@ shasum -a 256 -c --ignore-missing SHA256SUMS    # Linux: sha256sum -c --ignore-m
 <p>There is no TLS in the server: on a network, put a terminator such as Caddy
 or nginx in front. <code>fenec-server --ping</code> is the health check for a
 container. Tokens, durability, limits and containers are on <a
-href="server.html">Server</a>; every route is on <a href="http.html">HTTP
-endpoint</a>. Past one machine, a read replica and archives are on <a
+href="server.html">Server</a>; every route is on <a href="http-reference.html">HTTP
+reference</a>. Past one machine, a read replica and archives are on <a
 href="replication.html">Replication</a>, a file per tenant behind a router, in
 one region or several, on <a href="sharding.html">Tenants and sharding</a>, and
 the systemd units, alert rules and runbook to run them on machines of your own
@@ -482,7 +482,7 @@ href="fenecql-search.html#highlights">Highlights and snippets</a>).</p>
     <code>match</code>, and <code>fuse</code> ranks both together: <a
     href="fenecql-vector.html#the-vector-clause">The vector clause</a>, <a
     href="fenecql-search.html#hybrid">Hybrid search</a>, <a
-    href="http.html#vector-search">Vector search</a> over HTTP and <a
+    href="http-reference.html#vector-search">Vector search</a> over HTTP and <a
     href="javascript.html#search">A search page</a> in the browser. The vectors come from your
     embedding model: load them first and build the index after, as <a
     href="concepts.html#bulk-load-first-index-after">Bulk load first, index

@@ -455,6 +455,6 @@ names a history, and a `Response` 16 bytes larger; the pool asks
 `replayable` only where a send failed (`Replay`), where every request
 scanned its headers for it before.
 The JS client grew 4.1 KB raw, 1.4 KB gzip, 1.2 brotli (59 KB gzip, 50
-brotli, as README and benchmarks.html quote), an app's minified bundle of
+brotli, as README and benchmarks-size.html quote), an app's minified bundle of
 `connect` and a query's rows 1 114 bytes, 406 brotli; the browser module not
 by a byte.

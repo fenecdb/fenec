@@ -119,7 +119,7 @@ documents that hold a value twice is refused and names the value and two
 of its documents. A replica takes what its primary took and does not ask
 again; <code>describe</code> shows the index as <code>@unique</code>. The
 refusal names the document holding the value and the value, but to a
-<a href="/docs/http#scoped-access">scoped token</a> it names the field
+<a href="/docs/http-access#scoped-access">scoped token</a> it names the field
 alone (<code>`users.email` is unique, and the value is taken</code>): the
 row is another user's, which the token may not read.</p>
 
@@ -507,7 +507,7 @@ back whole. The sweeper leaves a row a minute past its time before it deletes
 it, so a reaper that comes by once a minute sees every one; a row it misses
 for longer is deleted unseen, and what it held is the reconciliation's to
 find. A scoped token reads them only by the policy's <code>expired</code>
-grant (<a href="/docs/http#scoped-access">Scoped access</a>). Without
+grant (<a href="/docs/http-access#scoped-access">Scoped access</a>). Without
 <code>@ttl</code> on the collection, <code>expired()</code> is an error.</p>
 
 <div class="note">

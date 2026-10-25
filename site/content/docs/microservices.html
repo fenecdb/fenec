@@ -27,7 +27,7 @@ several: see <a href="/docs/sharding">Tenants and sharding</a>.</p>
 
 <p>Within a database, a JSON Web Token held to a policy gives each caller
 the collections, and the rows, its role may read or write
-(<a href="/docs/http#scoped-access">Scoped access</a>). A service that only
+(<a href="/docs/http-access#scoped-access">Scoped access</a>). A service that only
 reads can be pointed at a replica, which refuses every write
 (<a href="/docs/replication">Replication</a>), or hold a token whose policy
 grants <code>read</code> alone.</p>
@@ -51,7 +51,7 @@ announce the change together, or not at all. A fenecdb
 <code>/batch</code> is one record on disk, so the rows it
 writes are announced together already: <code>GET /_changes</code> hands
 over every write once it is on disk, the documents with it
-(<a href="/docs/http#changes">Change data capture</a>). The collection is
+(<a href="/docs/http-reference#changes">Change data capture</a>). The collection is
 its own outbox. Where the event should say something the rows do not —
 a command, an intent — write it into a collection of its own in the same
 <code>/batch</code>, and it comes in the same record.</p>

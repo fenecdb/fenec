@@ -302,7 +302,10 @@ A fragment never reaches the server, so a section that moves to another page
 cannot be redirected there by a rule. `docs/fenecql` was one page of 23 000
 words and is now a tour and eight reference pages, and `docs/sharding` one of
 22 000 and is now a tutorial and seven pages (guides, a reference, the
-design); `moved.json` names, for each page that was split and each fragment it had, the
+design); `docs/benchmarks` was one of 16 000 and is an overview and five pages
+by family (YCSB, concurrency and requests, text search, vector search, sizes
+and memory), and `docs/http` one of 9 000 and is the way in, a reference and
+a page of security and scoped access; `moved.json` names, for each page that was split and each fragment it had, the
 page and fragment that hold the section now. The page puts
 `{{moved_script}}` at its top, which `build.py` fills with one small script
 and that page's map: it sends a reader whose address has such a fragment there

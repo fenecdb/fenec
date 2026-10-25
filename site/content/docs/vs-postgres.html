@@ -78,7 +78,7 @@ and is alpha software.</p>
   <td>A replica in the page or app: offline reads, queued writes, live queries (<a href="sync.html">Sync</a>)</td>
   <td>Not in core; <a href="https://www.postgresql.org/docs/current/sql-notify.html"><code>LISTEN</code>/<code>NOTIFY</code></a> and <a href="https://www.postgresql.org/docs/current/logicaldecoding.html">logical decoding</a></td></tr>
 <tr><td>Access control</td>
-  <td>A server token; JWT rules added to every statement (<a href="http.html#scoped-access">Scoped access</a>). No TLS: a terminator goes in front</td>
+  <td>A server token; JWT rules added to every statement (<a href="http-access.html#scoped-access">Scoped access</a>). No TLS: a terminator goes in front</td>
   <td>Roles, <code>GRANT</code>, <a href="https://www.postgresql.org/docs/current/ddl-rowsecurity.html">row-level security</a></td></tr>
 <tr><td>Schema and migrations</td>
   <td>Typed schema, <code>alter collection</code>, a schema declared in code and checked at every open (<a href="javascript.html#schema">Schema in code</a>)</td>
@@ -105,7 +105,7 @@ and is alpha software.</p>
   <td><code>fuse</code>, reciprocal rank fusion (<a href="fenecql-search.html#hybrid">Hybrid search</a>)</td>
   <td>No operator; fusion written in SQL (<a href="https://www.tigerdata.com/blog/introducing-pg_textsearch-true-bm25-ranking-hybrid-retrieval-postgres">an example</a>)</td></tr>
 <tr><td>Size</td>
-  <td>A 2.99 MB server image (<a href="benchmarks.html#binary-size">Binary size</a>)</td>
+  <td>A 2.99 MB server image (<a href="benchmarks-size.html#binary-size">Binary size</a>)</td>
   <td>Not measured here</td></tr>
 <tr><td>Licence and hosting</td>
   <td>Apache-2.0; self-hosted only</td>
@@ -138,7 +138,7 @@ fenecdb keeps its indexes in memory and its documents in a mapped file
 
 <p>YCSB's core workloads over a million records, fenec-server over HTTP
 against PostgreSQL 17, both in Docker on the Mac, durable, operations a
-second, the median of three runs (<a href="benchmarks.html#ycsb">every
+second, the median of three runs (<a href="benchmarks-ycsb.html#ycsb">every
 cell, and MongoDB</a>). We measured these on one laptop; the method is
 below.</p>
 
@@ -193,17 +193,17 @@ client program with the same index settings.</p>
   <li><b>One machine, one run of each side.</b> An Apple M1 MacBook Air;
     PostgreSQL ran in Docker.</li>
   <li><b>Every figure, and the 768-dim run,</b> is in
-    <a href="benchmarks.html#scale">Benchmarks</a>.</li>
+    <a href="benchmarks-vector.html#scale">Benchmarks</a>.</li>
 </ul>
 
 <details class="deep"><summary>Method and details</summary>
 <p>YCSB is <code>make ycsb</code>'s, every cell of it in <a
-href="benchmarks.html#ycsb">Everyday reads and writes</a> with its method:
+href="benchmarks-ycsb.html#ycsb">Everyday reads and writes</a> with its method:
 each cell 30 s after a 5 s warm-up, the systems in turns, PostgreSQL with
 <code>shared_buffers</code> 1 GB and prepared statements. The vectors are
 <code>make scale-bench</code>'s and <code>make load-bench</code>'s, as <a
-href="benchmarks.html#scale">At scale</a> and <a
-href="benchmarks.html#loading">Loading rows</a> report them.</p>
+href="benchmarks-vector.html#scale">At scale</a> and <a
+href="benchmarks-requests.html#loading">Loading rows</a> report them.</p>
 
 <pre data-lang="bash">make ycsb
 make pgvector-up      # PostgreSQL 17 with pgvector, the pgvector/pgvector:pg17 image
@@ -235,7 +235,7 @@ make load-bench
 
 <p><b>Not measured yet:</b> a Linux machine, PostgreSQL outside Docker,
 data larger than memory and pgvectorscale. Several clients writing at once
-are <a href="benchmarks.html#ycsb">YCSB's</a>.</p>
+are <a href="benchmarks-ycsb.html#ycsb">YCSB's</a>.</p>
 </details>
 
 <h2 id="moving">Moving from PostgreSQL</h2>
@@ -295,7 +295,7 @@ rows (<a href="fenecql-lookup.html#the-lookup-clause">The lookup clause</a>,
 statements becomes a <code>/batch</code>, which lands whole or not at all
 but cannot read between its writes (<a href="http.html#batches">Batches</a>).
 Row-level security becomes a JWT rule
-(<a href="http.html#scoped-access">Scoped access</a>).</p>
+(<a href="http-access.html#scoped-access">Scoped access</a>).</p>
 
 <p>The import reads the table with <code>COPY ... TO STDOUT</code> and
 needs nothing installed on the server, and the follower reads a logical

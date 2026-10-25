@@ -120,7 +120,7 @@ its own.</p>
 worked out, never the expression: a replica, <code>/_changes</code>, an
 archive and a subscriber see the result, and a restore replays it as it
 was. A scoped token's rules test the document a <code>set</code> writes, as
-they test a literal's (<a href="/docs/http#scoped-access">Scoped
+they test a literal's (<a href="/docs/http-access#scoped-access">Scoped
 access</a>). A replica of <a href="/docs/sync">Sync</a> works the
 expression out over its own row at once and sends the statement, which the
 server works out again over its own: two replicas' offline increments both
@@ -340,11 +340,11 @@ del jobs where run_at &lt;= now() order run_at limit 10 returning id, payload.to
     <code>set</code> that would leave a row it may not read is refused
     whole (403). Every row it writes is held to its rules after the write,
     its fields to an <code>update(…)</code> grant's and its change to a
-    transition's (<a href="/docs/http#scoped-access">Scoped
+    transition's (<a href="/docs/http-access#scoped-access">Scoped
     access</a>). A row answered shows the fields of the read rules
     admitting it, and a value, a <code>where</code> or an
     <code>order</code> reads a field a rule withholds only as a read may
-    (<a href="/docs/http#field-grants">Fields a read shows</a>).</li>
+    (<a href="/docs/http-access#field-grants">Fields a read shows</a>).</li>
   <li><b>A sync replica refuses one</b> on a synced collection: it would
     pick and answer the replica's rows, and the server, sent the text, its
     own.</li>

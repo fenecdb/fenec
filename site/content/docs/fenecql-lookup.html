@@ -372,9 +372,9 @@ found.</p>
 hold any <code>get</code>: the list holds only rows the token may read, so
 nothing of the others reaches it through what the outer query finds, and a
 column its rules show on some rows alone is listed from those rows
-(<a href="/docs/http#field-grants">Fields a read shows</a>). A token's rule
+(<a href="/docs/http-access#field-grants">Fields a read shows</a>). A token's rule
 may hold one too, held to 1 000 values and answered before each statement
-(<a href="/docs/http#scoped-access">Scoped access</a>). The JavaScript
+(<a href="/docs/http-access#scoped-access">Scoped access</a>). The JavaScript
 builder takes a query
 as an <code>in</code>'s value:
 <code>{ customer: { in: db.from('customers').select('id').where({ country: 'TR' }) } }</code>.
