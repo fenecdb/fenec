@@ -377,12 +377,27 @@ jobs:
             cp -R "integrations/dart/$pkg" "$out"
             rm -f "$out/pubspec_overrides.yaml"
             cp LICENSE "$out/"
-            (cd "$out" && flutter pub publish --force)
-            # pub.dev's index shows a version some seconds after the upload,
-            # and the plugin, next, resolves `fenecdb` against it: 0.1.9's
-            # plugin was refused ("doesn't match any versions") for that.
-            for _ in $(seq 1 30); do
-              curl -sf "https://pub.dev/api/packages/$pkg/versions/$version" >/dev/null && break
+            # The plugin, published second, resolves `fenecdb` against the
+            # package's listing, which can name the new version minutes after
+            # the version's own page answers: 0.1.9's plugin and 0.1.11's were
+            # refused ("doesn't match any versions") with that page up. So a
+            # publish refused before its upload goes again, and one whose
+            # version is on pub.dev by then counts as done.
+            for try in 1 2 3 4 5 6 7 8 9 10; do
+              if (cd "$out" && flutter pub publish --force); then
+                break
+              fi
+              if curl -sf "https://pub.dev/api/packages/$pkg/versions/$version" >/dev/null; then
+                break
+              fi
+              if [ "$try" = 10 ]; then
+                echo "::error::$pkg $version was refused ten times"
+                exit 1
+              fi
+              sleep 30
+            done
+            for _ in $(seq 1 60); do
+              curl -sf "https://pub.dev/api/packages/$pkg" | grep -q "\"version\":\"$version\"" && break
               sleep 10
             done
           done
