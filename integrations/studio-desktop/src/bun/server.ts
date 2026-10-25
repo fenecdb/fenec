@@ -26,6 +26,7 @@
 import { PATHS } from "electrobun/main";
 import { join } from "node:path";
 import { serverEnvironment } from "./env.ts";
+import { parseListening } from "./listening.ts";
 
 /** The file is open in another process: the server refused its `<file>.lock`. */
 export class AlreadyOpen extends Error {}
@@ -76,7 +77,6 @@ export type FileServer = {
 	log(): string;
 };
 
-const LISTENING = /listening on: (http:\/\/\S+)/;
 const START_TIMEOUT_MS = 30_000;
 
 function spawnServer(file: string, token: string) {
@@ -98,8 +98,8 @@ export async function startFileServer(file: string): Promise<FileServer> {
 		if (tail.length > 200) tail.shift();
 	};
 
-	let announce!: (origin: string) => void;
-	const listening = new Promise<string>((resolve) => (announce = resolve));
+	let announce!: (where: { origin: string } | { refused: string }) => void;
+	const listening = new Promise<{ origin: string } | { refused: string }>((resolve) => (announce = resolve));
 	// Drain stderr for the life of the process: a pipe nobody reads fills up
 	// and blocks the server's log writes. Its promise ends with the stream.
 	const reading = (async () => {
@@ -112,8 +112,9 @@ export async function startFileServer(file: string): Promise<FileServer> {
 				const line = pending.slice(0, i);
 				pending = pending.slice(i + 1);
 				note(line);
-				const m = LISTENING.exec(line);
-				if (m) announce(m[1]!);
+				// Only the server's own line, only on the loopback address that was asked for (listening.ts).
+				const where = parseListening(line);
+				if (where) announce(where);
 			}
 		}
 		if (pending) note(pending);
@@ -122,6 +123,12 @@ export async function startFileServer(file: string): Promise<FileServer> {
 	const exited = proc.exited.then((code) => code as number | null);
 	const timeout = new Promise<"timeout">((r) => setTimeout(() => r("timeout"), START_TIMEOUT_MS));
 	const first = await Promise.race([listening, exited.then(() => "exited" as const), timeout]);
+	if (typeof first === "object" && "refused" in first) {
+		// Not the server this app started, or one that went where it was not asked to: no token goes there.
+		proc.kill("SIGKILL");
+		await exited;
+		throw new StartFailed(`fenec-server says it listens on ${first.refused}, not on 127.0.0.1 as it was asked to`, null);
+	}
 	if (first === "exited" || first === "timeout") {
 		if (first === "timeout") proc.kill("SIGKILL");
 		const code = await exited;
@@ -136,7 +143,7 @@ export async function startFileServer(file: string): Promise<FileServer> {
 	return {
 		file,
 		stdin: proc.stdin,
-		origin: first,
+		origin: first.origin,
 		token,
 		pid: proc.pid,
 		exited,

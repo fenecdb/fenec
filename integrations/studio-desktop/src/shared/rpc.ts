@@ -38,6 +38,7 @@ export type LauncherRPC = {
 			saveConnection: { params: ConnectionForm; response: { ok: boolean; message?: string; overview?: Overview } };
 			openConnection: { params: { id: string }; response: Result };
 			removeConnection: { params: { id: string }; response: Overview };
+			forgetToken: { params: { id: string }; response: Overview };
 		};
 		messages: {};
 	};

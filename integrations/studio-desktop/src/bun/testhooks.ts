@@ -17,10 +17,11 @@
 import { appendFileSync, readFileSync } from "node:fs";
 import { Utils, type BrowserWindow, type BrowserView } from "electrobun/main";
 import type { Notice } from "../shared/rpc.ts";
-import { createDatabase, onFact, openConnection, openFile, removeConnection, saveConnection, windows } from "./app.ts";
-import { showLauncher, showNewDatabase } from "./pages.ts";
-import type { StudioWindow } from "./windows.ts";
 import { secrets } from "./secrets.ts";
+import { keychainName, sealToken } from "./token.ts";
+import { createDatabase, forgetToken, onFact, openConnection, openFile, remotePartition, removeConnection, saveConnection, savedTokenOf, windows } from "./app.ts";
+import { showLauncher, showNewDatabase } from "./pages.ts";
+import { openStudioWindow, type StudioWindow } from "./windows.ts";
 
 const T0 = Date.now();
 const REPORT = process.env["FENEC_DESKTOP_REPORT"] ?? "";
@@ -158,7 +159,25 @@ async function run(c: any) {
 			break;
 		}
 		case "rmconn": await removeConnection(c.id); report("conn-removed", { id: c.id }); break;
-		case "secret": report("secret", { name: c.name, value: await secrets.get(c.name) }); break;
+		// The token saved for a connection, for the address it names now, and that address.
+		case "secret": report("secret", { id: c.id, ...(await savedTokenOf(c.id)) }); break;
+		// The Keychain item as it would be left by an edit of the address that was not
+		// followed by a new token: the same token, sealed for another origin.
+		case "seal": await secrets.set(keychainName(c.id), sealToken(c.origin, c.token)); report("sealed", { id: c.id }); break;
+		case "forget-token": await forgetToken(c.id); report("token-forgotten", { id: c.id }); break;
+		// A second window on a server's origin, in the data store named: a window of an
+		// open file's (`of`: its key; its own store unless `partition` is given) or of a
+		// saved server (`connection`: that connection's store, which a removal empties).
+		// Reads what a store holds from outside the window that wrote it.
+		case "store-window": {
+			const of = c.of ? windows.get(c.of) : undefined;
+			const origin = of?.server?.origin ?? c.origin;
+			const token = of?.server?.token ?? c.token;
+			const partition = c.connection ? remotePartition(c.connection) : (c.partition ?? `file-${crypto.randomUUID()}`);
+			await openStudioWindow({ key: c.key, title: c.key, session: { origin, token, tenant: null }, partition });
+			report("store-window-opened", { key: c.key, partition });
+			break;
+		}
 		case "quit": Utils.quit(); break;
 	}
 }

@@ -13,12 +13,14 @@ name: desktop
 # secret below; otherwise it ends at its first step with a notice. A pull
 # request, a push, or a dispatch from another branch never reaches a secret.
 #
-# What a maintainer sets up, once:
-#   1. Settings > Environments > New environment: `desktop-signing`. Add a
-#      required reviewer (so a dispatch waits for a person) and limit it to
-#      the `main` branch (so the code that is signed is main's).
-#   2. In that Environment, not in the repository's secrets, so that no other
-#      job can read them:
+# What a maintainer sets up, once, IN THIS ORDER (RELEASING.md has the commands):
+#   1. The Environment, with its rules, FIRST: Settings > Environments > New
+#      environment: `desktop-signing`, a required reviewer (so a dispatch waits
+#      for a person) and deployment branches limited to `main` (so the code that
+#      is signed is main's). A secret added to an Environment that has no rules
+#      yet is readable by any job that names it, from any branch.
+#   2. Then, in that Environment, not in the repository's secrets, so that no
+#      other job can read them:
 #        ELECTROBUN_DEVELOPER_ID      the certificate's name, "Developer ID Application: Name (TEAMID)"
 #        MACOS_CERTIFICATE_P12        that certificate and its key, a .p12 file, base64
 #        MACOS_CERTIFICATE_PASSWORD   the .p12's password
@@ -26,6 +28,15 @@ name: desktop
 #        ELECTROBUN_APPLEAPIISSUER    its issuer id
 #        ELECTROBUN_APPLEAPIKEY_P8    its AuthKey_<id>.p8 file, base64 (written to a file in the
 #                                     runner's temp directory, whose path is ELECTROBUN_APPLEAPIKEYPATH)
+#
+# The signing job's first step asks GitHub for the Environment's rules with the
+# job's own token and fails, before anything else, unless it has a required
+# reviewer and deployment branches limited to `main` alone. Whether that token
+# may read them is GitHub's to say (the Environments API asks for administration
+# rights, which a workflow's token cannot be given): where it may not, the step
+# says so in a warning and goes on, and the order above is all that stands
+# between a secret and a job without rules. The job still ends at its next step
+# if a secret is missing.
 #
 # Started by hand with a release's tag (`release: v0.1.12`), the signing job
 # bundles that release's server (its SHA-256 checked against the release's
@@ -169,6 +180,31 @@ jobs:
       HAVE: ${{ secrets.ELECTROBUN_DEVELOPER_ID != '' && secrets.MACOS_CERTIFICATE_P12 != '' && secrets.MACOS_CERTIFICATE_PASSWORD != '' && secrets.ELECTROBUN_APPLEAPIKEY != '' && secrets.ELECTROBUN_APPLEAPIISSUER != '' && secrets.ELECTROBUN_APPLEAPIKEY_P8 != '' }}
       RELEASE: ${{ github.event.inputs.release }}
     steps:
+      # First of all, before a secret is used for anything: does the Environment
+      # have the rules the comment above asks for?
+      - name: The Environment has a reviewer and is limited to main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          api="repos/$GITHUB_REPOSITORY/environments/desktop-signing"
+          if ! environment=$(gh api "$api" 2>"$RUNNER_TEMP/rules.err") || ! policies=$(gh api "$api/deployment-branch-policies" 2>>"$RUNNER_TEMP/rules.err"); then
+            echo "::warning::the job's token cannot read the rules of the Environment desktop-signing ($(tr '\n' ' ' < "$RUNNER_TEMP/rules.err" | cut -c1-160)), so they are not checked here: they must have been set up before the secrets were (see the header of this workflow and RELEASING.md)"
+            exit 0
+          fi
+          problems=""
+          custom=$(printf '%s' "$environment" | jq -r '.deployment_branch_policy.custom_branch_policies // false')
+          [ "$custom" = true ] || problems="$problems deployment branches are not limited to selected branches;"
+          names=$(printf '%s' "$policies" | jq -r '[.branch_policies[]? | select((.type // "branch") == "branch") | .name] | sort | join(",")')
+          [ "$names" = main ] || problems="$problems the branches allowed are '$names', not main alone;"
+          reviewers=$(printf '%s' "$environment" | jq '[.protection_rules[]? | select(.type == "required_reviewers") | (.reviewers // []) | length] | add // 0')
+          [ "$reviewers" -gt 0 ] || problems="$problems no required reviewer;"
+          if [ -n "$problems" ]; then
+            echo "::error::the Environment desktop-signing is not set up as the header of this workflow says:$problems nothing is signed. Set its rules first, then its secrets (RELEASING.md)."
+            exit 1
+          fi
+          echo "the Environment has $reviewers required reviewer(s) and is limited to: $names"
+
       - name: Are the signing secrets in the Environment?
         id: have
         run: |

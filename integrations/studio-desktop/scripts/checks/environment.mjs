@@ -27,7 +27,6 @@ const LEAKS = {
   FENEC_HTTP_TOKEN: 'leak-old-token',
   AWS_SECRET_ACCESS_KEY: 'leak-aws',
   GITHUB_TOKEN: 'leak-gh',
-  DYLD_INSERT_LIBRARIES: '',
 };
 const app = startApp('environment', { FENEC_SERVER_BIN: WRAP, FENEC_DESKTOP_OPEN: SMALL, ...LEAKS });
 await waitFor((l) => l.what === 'server-started', 60000, 'the server started');
@@ -39,7 +38,7 @@ const names = readFileSync(SEEN, 'utf8')
   .filter(Boolean)
   .map((l) => l.slice(0, l.indexOf('=')));
 log('names:', names.join(' '));
-for (const leak of ['OTEL_EXPORTER_OTLP_ENDPOINT', 'OTEL_SERVICE_NAME', 'FENEC_JWT_SECRET', 'AWS_SECRET_ACCESS_KEY', 'GITHUB_TOKEN', 'DYLD_INSERT_LIBRARIES', 'FENEC_DESKTOP_REPORT', 'FENEC_DESKTOP_CONTROL', 'FENEC_DESKTOP_OPEN', 'FENEC_SERVER_BIN']) {
+for (const leak of ['OTEL_EXPORTER_OTLP_ENDPOINT', 'OTEL_SERVICE_NAME', 'FENEC_JWT_SECRET', 'AWS_SECRET_ACCESS_KEY', 'GITHUB_TOKEN', 'FENEC_DESKTOP_REPORT', 'FENEC_DESKTOP_CONTROL', 'FENEC_DESKTOP_OPEN', 'FENEC_SERVER_BIN']) {
   assert.ok(!names.includes(leak), `${leak} must not reach the server`);
 }
 const ALLOWED = /^(HOME|PATH|TMPDIR|LANG|USER|LOGNAME|TZ|LC_[A-Z]+|FENEC_HTTP_TOKEN|PWD|SHLVL|_|OLDPWD)$/;

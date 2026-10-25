@@ -77,15 +77,31 @@ is handed an installer that refuses, so no path ends in the global one.
 `package-lock.json`; Hutch's and Electrobun's by `hutch.config.ts`. Set
 `HUTCH_HOME` yourself to keep the toolchain elsewhere.
 
-**Hutch is held to `hutch-pin.json`**, in this repository: the SHA-256 of the
-archive as it is downloaded, and of the two binaries in it, which
-`scripts/electrobun.mjs` checks on every run, cached or fresh, before it runs
-anything. The release's own index sits in the same place as the archive and
-proves little against that place; a CI cache of `.hutch-home/` is not trusted
-for being one. A different Electrobun is a change to `hutch-pin.json` (the
-script says which hashes), which a pull request shows. What Hutch then fetches
-(its Bun, the Electrobun runtime) it checks against its own lock, in
-`.hutch/dependencies.lock`.
+**The tool and what it fetches are held to `hutch-pin.json`**, in this
+repository, and `scripts/electrobun.mjs` checks it on every run, cached or
+fresh, before it builds anything:
+
+* **Hutch**: the SHA-256 of the archive as it is downloaded, and of the two
+  binaries in it. The release's own index sits in the same place as the archive
+  and proves little against that place; a CI cache of `.hutch-home/` is not
+  trusted for being one. The resolver's fallback to a Hutch that is already at
+  `.hutch-home/bin` (which would be a cache's, unpinned) and
+  `ELECTROBUN_HUTCH_BINARY` are switched off.
+* **What Hutch fetches** (`sync`, which runs nothing of the app's, goes first): a
+  digest of every file of the **Electrobun runtime** (the native library, the
+  launcher, the main process's API sources and the preloads, all of which ship
+  inside the app), of the **Bun** it bundles and runs, and of **Cottontail**
+  (`scripts/tree-digest.mjs`: path, executable bit and content of each file,
+  hidden ones too). Hutch checks these only against a lock it writes beside the
+  project (`.hutch/dependencies.lock`, not in git, with no hash for its Bun), so
+  a changed file there would pass it; here it stops the build, before it
+  starts, naming the directory. (A changed byte of the preload, of the native
+  library and of the Bun were each refused, and a changed `bin/hutch` in the
+  cache is not run.)
+
+A different Electrobun is a change to `hutch-pin.json`, which a pull request
+shows: `node scripts/electrobun.mjs --print-runtime-pin` prints the runtime's
+digests, and the script says which hashes a mismatch is.
 
 ### The checks
 
@@ -120,10 +136,10 @@ script says which hashes), which a pull request shows. What Hutch then fetches
    | `warmup` | the first launch of a build (below) |
    | `files` | open, edit through the studio's own form, a second open only shows the window, close stops the server with exit 0, reopen has the edit (also at once, while the first server is still stopping); a file another program holds is a message and **Try again** works once it lets go; a missing file, a folder, a file that is not a database and an empty one are said before any server is started, and nothing is written beside them; a quit right after a close waits for that server, and it ends with exit 0 |
    | `server-dies` | `kill -9` the server under a window: a message, the window closed, **Open again** works |
-   | `orphan` | the app killed with two files open, one opened after the other: **both servers end by themselves** (the end of their stdin), and both files are free for another program; so the second's start did not carry the first's pipe |
-   | `sandbox` | the session is `window.fenecHost`, frozen, in the page's own world, and in no storage; the studio has no sign-in form and no Sign out; only the event bridge in a studio window, no navigating off its origin, links out only as web addresses, to the browser, one in three seconds |
+   | `orphan` | the app killed with two files open, one opened after the other, **the second stopped (SIGSTOP) first**: the first ends by itself, the end of its stdin, while the second cannot run, so nothing of the second's holds the first's pipe; the second, let go, ends in its turn, and both files are free for another program |
+   | `sandbox` | the session is `window.fenecHost`, frozen, in the page's own world, and in no storage; the studio has no sign-in form and no Sign out; only the event bridge in a studio window, no navigating off its origin; **a non-web address is dropped by the app** (the page asked, and nothing reached the system) and the first web link is handed to the browser, which the rate limit of one in three seconds does not explain |
    | `pages` | the launcher, the new-database window and a notice window cannot be navigated anywhere else (a web page, a file, another of the app's pages): without the rule, the launcher goes to example.com |
-   | `storage` | what a window keeps (the studio's history, theme) is its own: two saved servers on one address do not share it, a saved server's survives its window, a file's does not outlive its window, a removed connection's is cleared |
+   | `storage` | what a window keeps (the studio's history, theme) is its own, **read from a second window on the same origin** (`store-window`, a test hook): a window in another store does not see a file window's, one in the same store does (the control); two saved servers on one address do not share it; a saved server's survives its window; **a removed connection's store, opened again under its id, is empty**, whether or not a window was open on it |
    | `environment` | the server is started with the allowlist and its token, whatever the app was started with (`OTEL_*`, `FENEC_JWT_SECRET`, and the checks' own variables stay out) |
    | `remote` | saved servers: token in the Keychain and in no `state.json` or process argument; the studio signed in; every failure in words (wrong token, no token, studio off, unreachable, a redirect that the token does not follow); an address changed without a token is refused; edit; two clicks open one window; remove deletes the Keychain item |
    | `newdb` | the folder dialog (answered by the check), a name, the file made and opened; an existing name refused, case-insensitively, the file untouched; bad names; Cancel |
@@ -162,12 +178,12 @@ thing in the list below that has to be looked at with a real certificate.
 
 | | |
 |---|---|
-| `src/bun/server.ts` | **the one place a server is started**: `fenec-server --file F --studio --http 127.0.0.1:0 --exit-on-stdin-close` with a random 32-byte token in `FENEC_HTTP_TOKEN` and **a pipe on its stdin that the app holds for the server's life**, found by the `listening on:` line on stderr, which is read for as long as it runs; SIGTERM when the window closes (sync and checkpoint on the way down), SIGKILL after 30 s; given a few variables (`env.ts`: `HOME`, `PATH`, `TMPDIR`, `LANG`, `LC_*`, `USER`, `LOGNAME`, `TZ`) and nothing else of the app's environment |
+| `src/bun/server.ts` | **the one place a server is started**: `fenec-server --file F --studio --http 127.0.0.1:0 --exit-on-stdin-close` with a random 32-byte token in `FENEC_HTTP_TOKEN` and **a pipe on its stdin that the app holds for the server's life**, found by the `fenec-http <version> listening on: http://127.0.0.1:<port>` line on stderr (the whole line, anchored, on the loopback address that was asked for: a line that merely contains the words, or an address that is not 127.0.0.1, is refused and the server stopped; `listening.ts`), which is read for as long as it runs; SIGTERM when the window closes (sync and checkpoint on the way down), SIGKILL after 30 s; given a few variables (`env.ts`: `HOME`, `PATH`, `TMPDIR`, `LANG`, `LC_*`, `USER`, `LOGNAME`, `TZ`) and nothing else of the app's environment |
 | `src/bun/session.ts` | **the one place a token reaches a page**: the preload that defines `window.fenecHost` (below) |
 | `src/bun/windows.ts` | what a studio window is held to; the notice window; `holdTo`, which holds every window of the app to its address |
 | `src/bun/app.ts` | open a file or a saved server, make a new database, keep the saved list; one window per `file:<real path>` or `remote:<id>`; one open of a thing at a time; what a quit waits for |
 | `src/bun/pages.ts` | the launcher and the new-database window and what they may ask (`src/shared/rpc.ts`) |
-| `src/bun/messages.ts`, `remote.ts`, `names.ts`, `dbfile.ts`, `env.ts` | every failure in words, the probe of a saved server, the check of a new name, what a file is, the server's environment: pure, unit-tested |
+| `src/bun/messages.ts`, `remote.ts`, `names.ts`, `dbfile.ts`, `env.ts`, `token.ts`, `listening.ts` | every failure in words, the probe of a saved server, the check of a new name, what a file is, the server's environment, a token and the address it is for, the one line of a server's stderr the app acts on: pure, unit-tested |
 | `src/bun/secrets.ts`, `store.ts` | Keychain (`Bun.secrets`) and `state.json` |
 | `src/launcher`, `src/newdb`, `src/notice`, `src/ui` | the app's own pages |
 
@@ -191,9 +207,15 @@ wherever a redirect says; a redirect is a message, not a place to go. A
 connection's URL, name and tenant are in `state.json` under the app's data
 folder (`~/Library/Application Support/dev.fenecdb.studio/stable/`); its token
 is in the Keychain, service `dev.fenecdb.studio`, name `connection:<id>`, and
-nowhere else. **A token is for the address it was saved with**: changing a
-connection's address with no token typed is refused, since keeping the old
-token would send it to the new address. A second click on a saved server while
+nowhere else. **A token is for the address it was saved with**: the Keychain
+item holds the token *and that address* (`token.ts`), and a token read back is
+used only for the address it names, so a connection edited between the Keychain's
+answer and the window (or an item left from before an edit) sends nothing to a
+new address; and the connection is read again after the Keychain answers, and
+the open stops if it changed. Changing a connection's address with no token
+typed is refused as well, with the reason; **Forget token** in the edit form
+takes a saved token away without a new one (a blank token field only ever means
+"keep it"). A second click on a saved server while
 the first is being looked at (up to a few seconds) waits for it: one window.
 
 Each window has **a store of its own** for what a page keeps (the studio's
@@ -285,6 +307,15 @@ it. So a window that shows one gets:
   page, which is the studio) until the window closes; it is in no storage.
 * A saved server on plain `http://` to another machine sends its token
   unencrypted: the launcher warns where the address is typed.
+* **A server's page can start a download into `~/Downloads` without a prompt**
+  (a `Content-Disposition: attachment`, a link with `download`): Electrobun 2.0.4
+  lets any download through whatever the navigation rules say, and gives the app
+  only `download-started`, `-progress`, `-completed` and `-failed` events after
+  the fact, no hook that could refuse one. The file is the server's to name and
+  to fill, as a browser's download is a site's; macOS puts the quarantine flag on
+  it, and Gatekeeper checks what is opened from it. The page is the studio of a
+  server you chose to open, and no studio route sends one that it was not asked
+  for. If a later Electrobun has a decision hook, studio windows should deny.
 * **A page can ask for a link to open in your browser without a click**
   (`window.open` from a script): Electrobun 2.0.4 does not say whether a click
   made the request. The app hands over only web addresses, and at most one in
@@ -341,13 +372,16 @@ validates. The test variant is never signed.
 `.github/workflows/desktop.yml` signs **only by hand, from `main`, in a GitHub
 Environment that holds the secrets**, so that a pull request, a push or a
 dispatch of another branch never reaches one and the code that is signed is
-main's. **A maintainer sets it up once:**
+main's. **A maintainer sets it up once, in this order** (RELEASING.md has the
+`gh` commands):
 
-1. Settings, Environments, New environment: **`desktop-signing`**, with a
-   required reviewer (a dispatch then waits for a person) and the deployment
-   branch limited to `main`.
-2. In that Environment (not in the repository's secrets, where any job could
-   read them):
+1. **First**, Settings, Environments, New environment: **`desktop-signing`**,
+   with a required reviewer (a dispatch then waits for a person) and the
+   deployment branch limited to `main`. **No secret goes in before this is
+   done**: a secret in an Environment with no rules yet is readable by a job from
+   any branch that names it.
+2. **Then**, in that Environment (not in the repository's secrets, where any job
+   could read them):
 
    | secret | what |
    |---|---|
@@ -356,7 +390,13 @@ main's. **A maintainer sets it up once:**
    | `ELECTROBUN_APPLEAPIKEY`, `ELECTROBUN_APPLEAPIISSUER` | the App Store Connect API key's id and issuer |
    | `ELECTROBUN_APPLEAPIKEY_P8` | its `AuthKey_<id>.p8`, base64 |
 
-Without them the `sign` job ends at its first step with a notice. With them,
+The `sign` job's first step reads the Environment's rules back with the job's own
+token and fails, before it uses anything, unless it has a required reviewer and
+deployment branches limited to `main` alone. Whether that token may read them is
+GitHub's to say (the Environments API asks for administration rights, which a
+workflow token is not given as far as the permissions go): where it may not, the
+step warns and goes on, and the order above is what stands behind it. Without
+the secrets the job ends at its second step with a notice. With them,
 Actions, desktop, Run workflow, with a release's tag (`v0.1.12`): the job
 bundles that release's server (SHA-256 checked), signs and notarizes with the
 certificate in a keychain of its own that only `codesign` and `security` may

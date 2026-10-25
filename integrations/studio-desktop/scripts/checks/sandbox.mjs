@@ -64,10 +64,19 @@ const where = await evalIn(KEY, `return location.href + ' | ' + document.title`)
 log('after location.href = https://example.com:', where.value);
 assert.ok(where.value.startsWith(started.origin), `still on ${started.origin}: ${where.value}`);
 
-step('window.open to another origin goes to the browser, not into the window');
-const m2 = lines().length;
+step('an address that is not http(s) is not handed to the system, and the first one that is, is: the address was what held the others back');
+// Before any web link, so that the rate limit below has nothing to do with it.
+const mNon = lines().length;
+await evalIn(KEY, `window.open("file:///etc/passwd"); window.open("javascript:alert(1)"); window.open("fenec-check://x/y"); return 1`);
+await waitNone((l, i) => i >= mNon && l.what === 'external', 1500, 'a non-web link was handed to the system');
+// The page did ask: the app was told of at least one of them, and dropped it.
+const asked = lines().slice(mNon).filter((l) => l.what === 'new-window-open' && /file:|fenec-check:/.test(l.data));
+log('asked of the app and not handed on:', asked.length, 'of the 3');
+assert.ok(asked.length > 0, 'the app was asked to open a non-web address, so the filter is what refused it');
+// The control: a web link, the window's first, goes to the browser at once.
+const mWeb = lines().length;
 await evalIn(KEY, `window.open("https://example.com/"); return 1`);
-const ext = await waitFor((l, i) => i >= m2 && l.what === 'external', 10000, 'the link out');
+const ext = await waitFor((l, i) => i >= mWeb && l.what === 'external', 10000, 'the link out');
 assert.equal(ext.url, 'https://example.com/');
 assert.ok((await evalIn(KEY, `return location.href`)).value.startsWith(started.origin), 'the window stayed');
 
@@ -75,11 +84,6 @@ step('a page cannot ask for links without end: a window is given one in three se
 const mRepeat = lines().length;
 await evalIn(KEY, `window.open("https://example.com/a"); window.open("https://example.com/b"); return 1`);
 await waitNone((l, i) => i >= mRepeat && l.what === 'external', 1500, 'a second link within the gap was handed to the browser');
-
-step('an address that is not http(s) is not handed to the system at all');
-const m3 = lines().length;
-await evalIn(KEY, `window.open("file:///etc/passwd"); window.open("javascript:alert(1)"); return 1`);
-await waitNone((l, i) => i >= m3 && l.what === 'external', 1200, 'a non-web link was handed to the system');
 
 step('quit');
 await quit(app);

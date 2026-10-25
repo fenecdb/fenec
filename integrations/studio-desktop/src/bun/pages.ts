@@ -6,7 +6,7 @@
 import { homedir } from "node:os";
 import { BrowserView, BrowserWindow, Utils } from "electrobun/main";
 import type { LauncherRPC, NewDbRPC } from "../shared/rpc.ts";
-import { createDatabase, onChange, onEdit, openConnection, openFile, overview, removeConnection, saveConnection } from "./app.ts";
+import { createDatabase, forgetToken, onChange, onEdit, openConnection, openFile, overview, removeConnection, saveConnection } from "./app.ts";
 import { store } from "./store.ts";
 import { holdTo, pageFrame } from "./windows.ts";
 
@@ -70,6 +70,10 @@ const launcherRPC = BrowserView.defineRPC<LauncherRPC>({
 			openConnection: ({ id }) => openConnection(id),
 			removeConnection: async ({ id }) => {
 				await removeConnection(id);
+				return overview();
+			},
+			forgetToken: async ({ id }) => {
+				await forgetToken(id);
 				return overview();
 			},
 		},

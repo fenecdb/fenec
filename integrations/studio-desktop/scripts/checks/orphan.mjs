@@ -6,9 +6,12 @@
 //
 // Two files, opened one after the other: the second server is started by a
 // process that already holds the first's pipe, and if that write end leaked
-// into it (a descriptor not marked close-on-exec) the first would hold on
-// until the second ended, and the second would keep no more than itself. Both
-// ending, and both locks free, is the check.
+// into it (a descriptor not marked close-on-exec) the first would not see its
+// stdin end for as long as the second ran. So the second is **stopped**
+// (SIGSTOP) before the app is killed: the first must end while the second
+// cannot, and only then is the second let go to end in its turn. Without
+// that, a leak shows only as the first ending a moment after the second, and
+// both ending is no proof there was none.
 import assert from 'node:assert/strict';
 import { assertClean, data, describe, mine, procs, startApp, startServer, step, until, waitFor, waitStudio, log } from './lib.mjs';
 
@@ -22,7 +25,8 @@ const b = await waitFor((l) => l.what === 'server-started' && l.path === B, 6000
 await waitStudio(`file:${A}`);
 await waitStudio(`file:${B}`);
 
-step(`SIGKILL the app (everything of it but its servers ${a.pid} and ${b.pid})`);
+step(`stop server B (${b.pid}) where it is, then SIGKILL the app (everything of it but its servers)`);
+process.kill(b.pid, 'SIGSTOP');
 for (const p of mine().filter((p) => !p.command.includes('fenec-server'))) {
   try {
     process.kill(p.pid, 'SIGKILL');
@@ -31,9 +35,15 @@ for (const p of mine().filter((p) => !p.command.includes('fenec-server'))) {
   }
 }
 
-step('both servers shut down by themselves: the end of their stdin is the event');
+step(`server A (${a.pid}) ends by itself while B cannot run: the end of its stdin is the event, and nothing of B's holds it open`);
 const gone = (pid) => !procs().some((p) => p.pid === pid);
-await until(() => gone(a.pid) && gone(b.pid), 20000, 'both servers ending');
+await until(() => gone(a.pid), 20000, 'A ending while B is stopped');
+assert.equal(gone(b.pid), false, 'B is still there, stopped');
+log('A is gone, B is not');
+
+step('B is let go: it sees its own stdin end and ends too');
+process.kill(b.pid, 'SIGCONT');
+await until(() => gone(b.pid), 20000, 'B ending once it runs');
 log('both gone');
 
 step('and each file is free: another program opens it');

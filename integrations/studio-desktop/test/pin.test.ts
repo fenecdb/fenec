@@ -23,6 +23,19 @@ test("every hash in the pin is a SHA-256", () => {
 	assert.deepEqual(Object.keys(mac.files).sort(), ["bin/hutch", "bin/hutch-engine"]);
 });
 
+test("what Hutch fetches, and what ships inside the app, is pinned: the Electrobun runtime, the Bun, and Cottontail", () => {
+	const runtime = pin["macos-arm64"].runtime as Record<string, { files: number; tree: string }>;
+	assert.deepEqual(
+		Object.keys(runtime).map((k) => k.split("/").slice(0, 3).join("/")),
+		[`releases/electrobun/${pin.electrobun}`, "toolchains/bun/1.4.0", "releases/cottontail/0.7.2"],
+	);
+	for (const [dir, want] of Object.entries(runtime)) {
+		assert.match(want.tree, /^[0-9a-f]{64}$/, dir);
+		assert.ok(Number.isInteger(want.files) && want.files > 0, dir);
+	}
+	assert.match(read("hutch.config.ts"), /cottontail=0\.7\.2/);
+});
+
 test("the dependencies are exact versions", () => {
 	for (const [name, version] of Object.entries<string>({ ...pkg.devDependencies })) assert.match(version, /^\d+\.\d+\.\d+$/, name);
 });

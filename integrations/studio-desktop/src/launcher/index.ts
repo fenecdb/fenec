@@ -86,6 +86,8 @@ function edit(c: Connection) {
 	f("token").placeholder = c.hasToken ? "unchanged: type one to replace it" : "kept in the system keychain";
 	$("save").textContent = "Save changes";
 	$("cancel-edit").hidden = false;
+	// A token saved can be taken away without a new one: a blank field means keep it.
+	$("forget-token").hidden = !c.hasToken;
 	warnClear();
 	f("token").focus();
 }
@@ -96,6 +98,7 @@ function stopEditing() {
 	(form.elements.namedItem("token") as HTMLInputElement).placeholder = "kept in the system keychain";
 	$("save").textContent = "Save connection";
 	$("cancel-edit").hidden = true;
+	$("forget-token").hidden = true;
 	warnClear();
 }
 
@@ -130,6 +133,13 @@ async function run(p: Promise<Result>, doing = "") {
 $("open").addEventListener("click", () => run(ask.chooseFile({})));
 $("new").addEventListener("click", () => run(ask.newDatabase({})));
 $("cancel-edit").addEventListener("click", stopEditing);
+$("forget-token").addEventListener("click", async () => {
+	if (editing === null) return;
+	render(await ask.forgetToken({ id: editing }));
+	(form.elements.namedItem("token") as HTMLInputElement).placeholder = "kept in the system keychain";
+	$("forget-token").hidden = true;
+	say("The saved token was removed from the keychain. The connection stays.");
+});
 (form.elements.namedItem("url") as HTMLInputElement).addEventListener("input", warnClear);
 
 form.addEventListener("submit", async (e) => {

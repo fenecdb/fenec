@@ -17,7 +17,7 @@ import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import {
-  assertClean, cmd, data, evalIn, IDENTIFIER, lines, pressNotice, procs, quit, startApp, startServer, step, textOf, USER_DATA, waitFor, waitNotice, waitStudio, log, file,
+  assertClean, cmd, data, evalIn, IDENTIFIER, lines, pressNotice, procs, quit, startApp, startServer, step, textOf, until, USER_DATA, waitFor, waitNotice, waitStudio, log, file,
 } from './lib.mjs';
 
 assertClean('before');
@@ -56,8 +56,10 @@ const TOKEN = `remote-${randomBytes(12).toString('hex')}`;
 const remote = await startServer(['--file', REMOTE, '--studio', '--http', '127.0.0.1:0'], { FENEC_HTTP_TOKEN: TOKEN });
 const id = await save('remote check', remote.origin, TOKEN);
 let n = lines().length;
-cmd({ cmd: 'secret', name: `connection:${id}` });
-assert.equal((await waitFor((l, i) => i >= n && l.what === 'secret', 10000, 'secret')).value, TOKEN, 'the Keychain holds the token');
+cmd({ cmd: 'secret', id });
+const held = await waitFor((l, i) => i >= n && l.what === 'secret', 10000, 'secret');
+assert.equal(held.token, TOKEN, 'the Keychain holds the token');
+assert.equal(held.origin, remote.origin, 'and it holds it for the address it was saved with');
 assert.ok(keychainHas(id), 'the item exists in the Keychain');
 const written = readFileSync(`${USER_DATA}/state.json`, 'utf8');
 assert.ok(!written.includes(TOKEN), 'state.json holds no token');
@@ -88,6 +90,14 @@ await pressNotice(wrong, 'edit');
 await waitFor((l) => l.what === 'page-text' && l.key === 'launcher' && /Save changes/.test(l.text), 10000, 'the launcher on the edit form');
 const form = await evalIn('launcher', `const f = document.getElementById('add'); return [f.elements.name.value, f.elements.url.value, f.elements.token.value].join('|')`);
 assert.equal(form.value, `wrong token|${remote.origin}|`, 'the form is filled in, the token field empty');
+// Forget token: the saved token goes, the connection stays (a blank token field only ever means keep it).
+const forget = await evalIn('launcher', `const b = document.getElementById('forget-token'); const offered = !b.hidden; b.click(); return offered`);
+assert.equal(forget.value, true, 'the edit form offers Forget token for a connection that has one');
+await until(() => !keychainHas(bad), 10000, 'the token forgotten');
+assert.ok(state().connections.some((c) => c.id === bad), 'the connection stays');
+n = lines().length;
+cmd({ cmd: 'secret', id: bad });
+assert.equal((await waitFor((l, i) => i >= n && l.what === 'secret', 10000, 'secret')).token, '', 'and no token is left for it');
 // What the edit form does: the same connection, a new token, nothing else changed.
 n = lines().length;
 cmd({ cmd: 'addconn', id: bad, name: 'wrong token', url: remote.origin, token: TOKEN, tenant: '' });
@@ -108,21 +118,37 @@ assert.match(noMove.message, /not sent to another address/);
 assert.equal(state().connections.find((c) => c.id === mover).url, remote.origin, 'the connection is as it was');
 assert.ok(keychainHas(mover), 'and so is its token');
 n = lines().length;
-cmd({ cmd: 'secret', name: `connection:${mover}` });
-assert.equal((await waitFor((l, i) => i >= n && l.what === 'secret', 10000, 'secret')).value, TOKEN, 'unchanged');
+cmd({ cmd: 'secret', id: mover });
+assert.equal((await waitFor((l, i) => i >= n && l.what === 'secret', 10000, 'secret')).token, TOKEN, 'unchanged');
 // With a token typed for the new address, it goes.
 n = lines().length;
 cmd({ cmd: 'addconn', id: mover, name: 'mover', url: third.origin, token: 'third-token', tenant: '' });
 await waitFor((l, i) => i >= n && l.what === 'conn-added' && l.name === 'mover', 10000, 'the change taken');
 assert.equal(state().connections.find((c) => c.id === mover).url, third.origin);
 n = lines().length;
-cmd({ cmd: 'secret', name: `connection:${mover}` });
-assert.equal((await waitFor((l, i) => i >= n && l.what === 'secret', 10000, 'secret')).value, 'third-token', 'the new address has its own');
+cmd({ cmd: 'secret', id: mover });
+const moved2 = await waitFor((l, i) => i >= n && l.what === 'secret', 10000, 'secret');
+assert.equal(moved2.token, 'third-token', 'the new address has its own');
+assert.equal(moved2.origin, third.origin, 'saved for the new address');
 // The same address with the token left blank is an edit of the name: the token stays.
 n = lines().length;
 cmd({ cmd: 'addconn', id: mover, name: 'mover renamed', url: third.origin, token: '', tenant: '' });
 await waitFor((l, i) => i >= n && l.what === 'conn-added' && l.name === 'mover renamed', 10000, 'the rename taken');
 assert.ok(keychainHas(mover));
+
+step('a token sealed for another address is none for this one: it is not sent, and the open says a token is needed');
+const stale = await save('stale', remote.origin, TOKEN);
+n = lines().length;
+cmd({ cmd: 'seal', id: stale, origin: third.origin, token: TOKEN });
+await waitFor((l, i) => i >= n && l.what === 'sealed' && l.id === stale, 10000, 'sealed');
+n = lines().length;
+cmd({ cmd: 'secret', id: stale });
+const sealed = await waitFor((l, i) => i >= n && l.what === 'secret', 10000, 'secret');
+assert.equal(sealed.token, '', "the token of the other address is not the token of this one");
+n = lines().length;
+assert.equal((await open(stale)).ok, false);
+await waitNotice('This server asks for a token', 10000, n);
+assert.ok(!(await windowsOpen()).includes(`remote:${stale}`), 'no window opened with it');
 await third.stop();
 
 step('two clicks on one saved server while it is being looked at: one window');
@@ -180,9 +206,9 @@ assert.match(unreachable.message, /nothing is listening/);
 assert.deepEqual(unreachable.actions, ['edit']);
 
 step('removing a connection removes its Keychain item');
-for (const c of [id, bad, none, nostudio, dead, mover, twice, moved]) cmd({ cmd: 'rmconn', id: c });
+for (const c of [id, bad, none, nostudio, dead, mover, stale, twice, moved]) cmd({ cmd: 'rmconn', id: c });
 await waitFor((l) => l.what === 'conn-removed' && l.id === moved, 10000, 'all removed');
-assert.ok(![id, bad, mover, twice, moved].some(keychainHas), 'every item is gone');
+assert.ok(![id, bad, mover, stale, twice, moved].some(keychainHas), 'every item is gone');
 assert.deepEqual(state().connections, []);
 
 step('quit with windows open: nothing of the app is left (the remote server is not the app\'s)');

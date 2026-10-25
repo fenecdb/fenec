@@ -124,7 +124,7 @@ studio-desktop:
 ## The desktop app's checks: the release build (above) is held to carrying
 ## none of the test hooks, the sources type-checked and the unit tests run
 ## (names, the remote probe, wording, the token hand-off script, the server's
-## environment, the reaper against real processes, get-server.sh, the signing
+## environment, a token and its address, get-server.sh, the signing
 ## switches, the Hutch pin), then the test variant, the same app with the
 ## hooks and an identifier of its own, is built and driven through every
 ## scripted check (integrations/studio-desktop/scripts/checks): open, edit,

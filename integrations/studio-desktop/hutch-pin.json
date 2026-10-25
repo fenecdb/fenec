@@ -6,6 +6,20 @@
 		"files": {
 			"bin/hutch": "b228cda0706c5bccd6a6cfb5cd0f41139e5a84891696d2b0d34b726a4f003aea",
 			"bin/hutch-engine": "817ea96568da1f57005df8a6b7976809656ea6e267119490afb319cfdff38cc3"
+		},
+		"runtime": {
+			"releases/electrobun/2.0.4/macos-arm64": {
+				"files": 233,
+				"tree": "b1748d7258fa98a74cf1c783bec4e9e536bfddf85839f860df629321b5b7130e"
+			},
+			"toolchains/bun/1.4.0/macos-arm64": {
+				"files": 2,
+				"tree": "c1b21d2f03219dd0dd73854a36ba8fd985a6580b9acfe6517749aa5605128188"
+			},
+			"releases/cottontail/0.7.2/873c890ce57d8a8f011731776bca478453db8e76/macos-arm64": {
+				"files": 312,
+				"tree": "c0f4993e182ba17f44ab557acd041db286b9f7956ab58b5516154390008cf6cf"
+			}
 		}
 	}
 }

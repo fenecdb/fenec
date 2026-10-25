@@ -206,12 +206,25 @@ option, so the window is made with no page and the view made in it with one
 (`BrowserView`'s `partition`, `autoResize`, `windowId`): a name without
 `persist:` is `nonPersistentDataStore`, one store for that window, which a file
 gets; `persist:remote-<id>` is `dataStoreForIdentifier`, kept between runs and
-apart from every other saved server's, cleared with `Session.clearStorageData`
-when the connection is removed. The blank view Electrobun made for the window is
+apart from every other saved server's, cleared when the connection is removed.
+**`clearStorageData("all")` does nothing in Electrobun 2.0.4**: the native side
+(`sessionClearStorageData`) takes a comma-separated list of exactly `cookies`,
+`localStorage`, `sessionStorage`, `indexedDB`, `cache` and `serviceWorkers`
+(its strings are those six and no "all"), and a name it does not know is
+skipped, so the first version left a removed connection's history in the
+store, to be shown to a new connection that got the same id's store (ids are
+random, but the README promised removal clears). The list is explicit
+(`STORE_KINDS`), the connection's own window is closed first (a page writes
+again while its store is cleared), and the Keychain item goes before the store. The blank view Electrobun made for the window is
 removed (`win.webview.remove()`; kept, idle memory was about 20 MB more, a second
-WebKit view per window). `checks/storage.mjs` holds it: two saved servers on one
-address do not share, a saved server's survives its window, a file's does not,
-the page is the window's size and has focus.
+WebKit view per window). `checks/storage.mjs` holds it by reading a store from
+outside the window that wrote it: a test hook (`store-window`) opens a second
+window on the same server's origin in the store it is told, so under one shared
+store (the thing the partitions are for) the file window's history would show,
+and a window in the very same store is the positive control. A removed
+connection's store, opened again under its id, is empty, with a window open on
+it at the removal or not. Two saved servers on one address do not share, a saved
+server's survives its window, the page is the window's size and has focus.
 
 The saved server. The probe asks `/_studio/` (served before any token), then
 `/_whoami` **without** the token and sends it only if fenecdb's own 401 (a JSON
@@ -220,7 +233,14 @@ a message that says where, as an origin): an `Authorization` header goes whereve
 a redirect says, and a proxy's sign-in page or a moved address would be told the
 token. A token is for the address it was saved with: a connection pointed at
 another origin with no token typed is refused (`tokenMayStay`), since keeping it
-would send the old server's token to the new one. The Keychain keeps it from
+would send the old server's token to the new one; and the Keychain item holds
+the token **with the origin it was saved for** (`token.ts`, `{origin, token}`),
+read back only for that origin, and the connection is read again after the
+Keychain answers (a Keychain read can wait on the user), the open stopping if
+its address changed meanwhile: a token from an edit that landed between the two
+never reaches the address it was not saved for. A saved token is taken away
+alone with "Forget token" (a blank token field means keep it, as it did, so
+there was no way to remove one but to delete the connection). The Keychain keeps it from
 other users and from pages, **not from other programs of the same user**: the
 client is the bundled `bun`, a general-purpose runtime that any such program can
 run with a script of its own (`Bun.secrets.get` with the service and the id that
@@ -269,7 +289,27 @@ is fetched from the same release as the archive, so `hutch-pin.json` holds, in
 the repository, the SHA-256 of the archive as downloaded (checked through the
 resolver's `download` hook) and of the two binaries in it (checked on every run,
 cached or fresh: a CI cache of `.hutch-home/` is not trusted for being one);
-`ELECTROBUN_HUTCH_BINARY`, which the resolver takes unchecked, is ignored.
+`ELECTROBUN_HUTCH_BINARY`, which the resolver takes unchecked, is ignored, and
+the resolver is told no file exists (`existsSync: () => false`), which is how it
+decides on a Hutch "already at `$HUTCH_HOME/bin`" that it would run unchecked
+when the paired download failed (a cache's, with no pin). That is not all that
+ships: Hutch then fetches the Electrobun runtime (`libNativeWrapper.dylib`, the
+launcher, the main process's API sources, `preload-sandboxed.js`), its Bun and
+Cottontail, and puts the first two inside the app. It checks those against a
+lock of its own (`.hutch/dependencies.lock`, not in git, no hash for its Bun) and
+a tampered file in a restored cache would be in the lock that cache wrote. So
+`hutch-pin.json` holds a digest of each directory too (`scripts/tree-digest.mjs`:
+the path, executable bit and SHA-256 of every file, hidden ones too, and a
+symlink as itself), and `scripts/electrobun.mjs` runs `sync` first (which runs
+nothing of the app's), compares, and only then builds; tried with a byte added
+to the preload, to the native library and to the Bun, each refused, and a
+Hutch binary changed in the cache, which is not run. The digests are
+deterministic (a fresh `.hutch-home/` gives them again, and the hosted runner
+checks them each run). An Electrobun that Hutch could not fetch without its
+install script was also considered: a lock file was not committed, since
+Hutch's own is per project and per machine and with no Bun hash proved nothing
+here. A Bun upgrade is a pin change by the same command
+(`--print-runtime-pin`).
 
 The first launch. A stable Electrobun build is a self-extractor: the first run
 unpacks the app in place with an installer window and starts it as a process of
@@ -287,7 +327,14 @@ paths the app is made from (the studio, `fenec-server`, `fenec-http`,
 `main`, in the Environment `desktop-signing` that holds the six secrets (the
 Developer ID's name, the `.p12` and its password, the App Store Connect key's id,
 issuer and `.p8`): a pull request's or another branch's code never meets one, and
-a dispatch from another branch is skipped. The signing job has read access only,
+a dispatch from another branch is skipped. The Environment is made, with a required
+reviewer and `main` as its only deployment branch, **before any secret**: a
+secret added to one without rules is readable from any branch that names the
+Environment, and the order cannot be enforced by the workflow alone, since the
+Environments API asks for administration rights that the job's token does not
+have; the job's first step reads the rules back where the token can, and fails
+unless they are those, and warns where it cannot (RELEASING.md has the `gh api`
+commands). The signing job has read access only,
 restores no cache (what a cache holds was written by runs without the secrets),
 checks out without persisting the token, imports the certificate into a
 keychain of its own with `-T /usr/bin/codesign -T /usr/bin/security` and not

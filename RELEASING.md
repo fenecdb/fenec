@@ -71,6 +71,43 @@ the .NET SDK is installed.
 | `fenecdb` on pub.dev | `integrations/dart/fenecdb` | the Dart package over `dart:ffi`; `package:ffi` alone |
 | `fenecdb_flutter` on pub.dev | `integrations/dart/fenecdb_flutter` | the Flutter plugin: the package with the library for iOS, Android and macOS |
 
+## Once: the desktop app's signing Environment
+
+The Mac app (`integrations/studio-desktop`) is signed and notarized by
+`desktop.yml`, by hand and from `main` only, in a GitHub Environment that holds
+the certificate. **Make the Environment, with its rules, before any secret goes
+into it**: a secret in an Environment that has no rules yet is readable by a
+job from any branch that names it.
+
+A required reviewer (you: the dispatch waits for a person) and deployment
+branches limited to `main` alone (the code that is signed is main's):
+
+    gh api -X PUT repos/fenecdb/fenecdb/environments/desktop-signing --input - <<EOF
+    {"reviewers":[{"type":"User","id":$(gh api user -q .id)}],
+     "deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}
+    EOF
+    gh api -X POST repos/fenecdb/fenecdb/environments/desktop-signing/deployment-branch-policies -f name=main -f type=branch
+
+Look at what it holds (one reviewer, `main`, and nothing else) before going on:
+
+    gh api repos/fenecdb/fenecdb/environments/desktop-signing -q '.protection_rules'
+    gh api repos/fenecdb/fenecdb/environments/desktop-signing/deployment-branch-policies -q '[.branch_policies[].name]'
+
+Only then the secrets, in the Environment and not in the repository's own,
+pasting each when asked (the `.p12` and the `.p8` as base64):
+
+    for s in ELECTROBUN_DEVELOPER_ID MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD \
+             ELECTROBUN_APPLEAPIKEY ELECTROBUN_APPLEAPIISSUER ELECTROBUN_APPLEAPIKEY_P8; do
+      gh secret set "$s" --env desktop-signing -R fenecdb/fenecdb
+    done
+
+A release whose server has `--studio` and `--exit-on-stdin-close` (0.1.12 and
+after) is then signed and its DMG attached with `gh workflow run desktop.yml -f
+release=v0.1.12`. The job's first step reads the Environment's rules back and
+stops unless they are the above, where GitHub lets its token read them; it
+may not be able to (the Environments API asks for administration rights, which
+a workflow's token is not given), so the order above is what stands behind it.
+
 ## Once: the registries' side
 
 `packages.yml` publishes with a token where a registry's secret holds one,

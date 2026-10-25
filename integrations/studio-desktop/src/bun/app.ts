@@ -28,9 +28,10 @@ import { originOf, probeRemote, tokenMayStay } from "./remote.ts";
 import { secrets } from "./secrets.ts";
 import { AlreadyOpen, StartFailed, startFileServer, type FileServer } from "./server.ts";
 import { store, type StoredConnection } from "./store.ts";
+import { keychainName, sealToken, tokenFor } from "./token.ts";
 import { openStudioWindow, showNotice, type StudioWindow } from "./windows.ts";
 
-type Open = { key: string; title: string; win: BrowserWindow; view: StudioWindow["view"]; server?: FileServer; released?: Promise<unknown> };
+type Open = { key: string; title: string; win: BrowserWindow; view: StudioWindow["view"]; partition: string; server?: FileServer; released?: Promise<unknown> };
 
 /** The open windows. Read by the pages (what is open), the menu and the test hooks. */
 export const windows = new Map<string, Open>();
@@ -152,14 +153,15 @@ async function startFile(path: string, key: string): Promise<Result> {
 		return failed(`Could not open ${name}.`);
 	}
 	try {
+		// Not `persist:`: a store that is this window's alone and goes with it.
+		const partition = `file-${crypto.randomUUID()}`;
 		const studio = await openStudioWindow({
 			key,
 			title: `${name} — fenec studio`,
 			session: { origin: server.origin, token: server.token, tenant: null },
-			// Not `persist:`: a store that is this window's alone and goes with it.
-			partition: `file-${crypto.randomUUID()}`,
+			partition,
 		});
-		track({ key, title: name, ...studio, server }, path);
+		track({ key, title: name, ...studio, partition, server }, path);
 	} catch (err) {
 		await server.stop();
 		notify(internalError(`The window for ${name} could not be opened.`, err));
@@ -193,7 +195,7 @@ function release(entry: Open): Promise<unknown> {
 /** Wires a window to what must follow its closing, and the server's dying. */
 function track(entry: Open, path: string) {
 	windows.set(entry.key, entry);
-	fact("window-opened", { key: entry.key });
+	fact("window-opened", { key: entry.key, partition: entry.partition });
 	entry.win.on("close", () => {
 		// Only its own entry: a window opened since for the same key is not this one.
 		if (windows.get(entry.key) === entry) windows.delete(entry.key);
@@ -297,10 +299,23 @@ async function startRemote(c: StoredConnection, key: string): Promise<Result> {
 	}
 	let token: string;
 	try {
-		token = (await secrets.get(`connection:${c.id}`)) ?? "";
+		// The token for this address: an item saved for another is none (token.ts).
+		token = tokenFor(await secrets.get(keychainName(c.id)), origin);
 	} catch (err) {
 		notify(internalError(`The token saved for ${c.name} could not be read from the keychain.`, err));
 		return failed("The keychain did not give the token.");
+	}
+	// The Keychain took a moment, and the connection may have been edited or
+	// removed in it: what was read is for the address that was read it for, and
+	// is used only if the connection still names that address.
+	const now = store.connections().find((x) => x.id === c.id);
+	if (!now || addressOf(now) !== origin) {
+		notify({
+			title: "That connection changed while it was being opened",
+			message: `${c.name} was edited or removed just now, so nothing was sent to the address it had.`,
+			hint: "Open it again.",
+		});
+		return failed(`${c.name} changed while it was being opened.`);
 	}
 	// Say what is wrong in words before a blank window does.
 	const probe = await probeRemote(origin, token, c.tenant);
@@ -315,7 +330,7 @@ async function startRemote(c: StoredConnection, key: string): Promise<Result> {
 			session: { origin, token, tenant: c.tenant },
 			partition: remotePartition(c.id),
 		});
-		track({ key, title: c.name, ...studio }, "");
+		track({ key, title: c.name, ...studio, partition: remotePartition(c.id) }, "");
 	} catch (err) {
 		notify(internalError(`The window for ${c.name} could not be opened.`, err));
 		return failed(`Could not open ${c.name}.`);
@@ -344,21 +359,73 @@ export async function saveConnection(form: ConnectionForm): Promise<string> {
 	}
 	// The token goes to the keychain first and nowhere else on disk; a
 	// failure there leaves the list as it was.
-	if (form.token) await secrets.set(`connection:${id}`, form.token);
+	if (form.token) await secrets.set(keychainName(id), sealToken(origin, form.token));
 	store.saveConnection({ id, name: form.name.trim() || new URL(origin).host, url: origin, tenant: form.tenant.trim() || null });
 	changed();
 	return id;
 }
 
 /** What a saved server's windows keep (the studio's history, saved queries and theme): a store of its own, kept between runs. */
-const remotePartition = (id: string) => `persist:remote-${id}`;
+export const remotePartition = (id: string) => `persist:remote-${id}`;
+
+/**
+ * What a store holds that a removal must take: Electrobun 2.0.4's native
+ * `sessionClearStorageData` knows these six names and nothing else, and the
+ * "all" its TypeScript sends (as `["all"]`) matches none of them, so it does
+ * nothing. (The type has no `serviceWorkers` and a `webSQL` the native code
+ * does not know, hence the cast.)
+ */
+const STORE_KINDS = ["cookies", "localStorage", "sessionStorage", "indexedDB", "cache", "serviceWorkers"] as never[];
+
+/** Empties the store a saved server's windows use. */
+export function clearStore(id: string) {
+	Session.fromPartition(remotePartition(id)).clearStorageData(STORE_KINDS);
+}
+
+/** Closes a window and waits until it is closed. */
+function closeWindow(entry: Open): Promise<void> {
+	return new Promise((resolve) => {
+		const gave = setTimeout(resolve, 3000);
+		entry.win.on("close", () => {
+			clearTimeout(gave);
+			resolve();
+		});
+		entry.win.close();
+	});
+}
 
 export async function removeConnection(id: string) {
 	store.removeConnection(id);
-	await secrets.delete(`connection:${id}`);
+	// A window open on it holds its store, and would write to it again: it goes first.
+	const open = windows.get(`remote:${id}`);
+	if (open) await closeWindow(open);
+	await secrets.delete(keychainName(id));
 	// What its windows kept goes with it.
-	Session.fromPartition(remotePartition(id)).clearStorageData("all");
+	clearStore(id);
 	changed();
+}
+
+/** The saved token goes, the connection stays: it is asked for again when it is next needed. */
+export async function forgetToken(id: string) {
+	await secrets.delete(keychainName(id));
+	changed();
+}
+
+/** The address a connection names, or "" if what it names is not one. */
+function addressOf(c: StoredConnection): string {
+	try {
+		return originOf(c.url);
+	} catch {
+		return "";
+	}
+}
+
+/** The token saved for a connection, for the address it names now; "" if none. */
+export async function savedTokenOf(id: string): Promise<{ origin: string; token: string } | null> {
+	const c = store.connections().find((x) => x.id === id);
+	if (!c) return null;
+	const origin = addressOf(c);
+	return { origin, token: tokenFor(await secrets.get(keychainName(id)).catch(() => null), origin) };
 }
 
 // ------------------------------------------------------------------ the launcher's view
@@ -367,9 +434,10 @@ export async function overview(): Promise<Overview> {
 	const connections = await Promise.all(
 		store.connections().map(async (c) => ({
 			...c,
+			// A token for the address the connection names now (an item for another is none).
 			hasToken: await secrets
-				.get(`connection:${c.id}`)
-				.then((t) => (t ?? "") !== "")
+				.get(keychainName(c.id))
+				.then((item) => tokenFor(item, addressOf(c)) !== "")
 				.catch(() => false),
 		})),
 	);
