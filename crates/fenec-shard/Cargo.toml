@@ -83,10 +83,12 @@ path = "tests/follower_cuts.rs"
 name = "replica_retries"
 path = "tests/replica_retries.rs"
 
-# Apart: its 43 tests held up to 1 195 threads at once, the rest of `all`
-# 868 -- together 2 028 to 2 045 of macOS's 2 048 a process on main, and
-# past them, `thread::spawn` failing in other tests, once the repairs a
-# failed attach now runs again went on in the background of its routers.
+# Apart: each test's nodes, routers and links serve on until the process
+# ends, and these leave some 1 200 threads. In `all` beside the rest the
+# process stood at 1 939-2 047 of macOS's 2 048 threads a process under
+# load, and a server that could make no thread for a connection dropped it
+# unanswered: a reset to whichever test was asking, 7 runs of 20 beside
+# busy loops. Apart, `all` peaks at 870 and these at 1 200.
 [[test]]
 name = "read_replicas"
 path = "tests/read_replicas.rs"

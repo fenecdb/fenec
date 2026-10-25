@@ -12,6 +12,14 @@
 //! state and catches up once healed; and in regions keeping their own
 //! directory, each region's router places, routes to and re-points the
 //! read replicas on its nodes, whichever region the tenant lives in.
+//!
+//! A binary of its own: each test's nodes, routers and links serve on
+//! until the process ends, their followers, pools and looks with them, and
+//! these tests leave some 1 200 threads. In `all` beside the others the
+//! process stood at macOS's 2 048 threads a process, where a server that
+//! could make no thread for a connection dropped it unanswered: whichever
+//! test asked then read a reset (`request`'s read, or a node's 502 through
+//! the router).
 
 use fenec_http::replication::{fresh_id, Follower, Replication};
 use fenec_http::tenants::refusals::{self, Stage};
@@ -1613,7 +1621,12 @@ fn a_read_after_a_write_waits_for_its_history_across_a_failover_not_its_number()
     w.tenant("acme");
     write(w.us, "acme", r#"put notes {body: "a"}"#);
     // eu2, the tenant's own replica, falls behind: what eu1 takes from here
-    // is lost once eu2 is promoted.
+    // is lost once eu2 is promoted. It holds "a" first: a write's answer
+    // waits for its stream to send it to eu2, not for eu2 to apply it, and
+    // re-pointed before its follower had read "a", eu2 was promoted a
+    // change short, its next write a number below the lost one's (5 runs
+    // in 18 beside busy loops).
+    w.replicated("acme", r#""a""#);
     let eu2 = w._nodes[1].port;
     let (status, body) = admin(
         eu2,
@@ -3411,7 +3424,12 @@ fn a_hung_replica_node_is_let_be_by_the_first_read_that_waits_it_out() {
     let (status, body) = marked(w.port, "a", "get notes select body", None);
     assert_eq!(status, 200, "{body}");
     assert!(body.contains(r#""before""#), "answered home: {body}");
-    assert_eq!(w.us_link.asked("/t/a/"), 1, "a waited it out");
+    // The node's link reads each request line on a thread of its own,
+    // which the router waits for nothing from: the line may land after the
+    // answer home.
+    until("a waited it out at the node", || {
+        w.us_link.asked("/t/a/") == 1
+    });
     until("the node let be", || w.router.replica_node_resting("us1"));
     until("the node's health asked", || {
         w.us_link.asked("GET /_health") == 1
@@ -3473,14 +3491,17 @@ fn two_tenants_slow_reads_leave_a_third_s_answered_by_its_replica() {
 /// `/_health` once: one question a node at a time, on a thread of the
 /// router's own, and none once it rests. Asked on each read's path, every
 /// one of them waited the question out past its timeout and asked it
-/// again. The replica timeout is three seconds, so every read reaches the
-/// node before the first times out.
+/// again. The replica timeout is ten seconds, so every read reaches the
+/// node before the first times out: a read the router takes once the
+/// node is let be goes home without asking it, and at three seconds that
+/// was eight clients' threads and the router's set out on a machine that
+/// may hold a thread still for seconds under load.
 #[test]
 fn reads_timing_out_together_on_a_hung_node_ask_its_health_once() {
     const READS: usize = 8;
     let tag = "hung-many";
     let w = Near::with(tag, |cfg| {
-        cfg.replica_timeout = Duration::from_secs(3);
+        cfg.replica_timeout = Duration::from_secs(10);
         cfg.replica_rest = Duration::from_secs(600);
     });
     w.tenant("a");
@@ -3494,7 +3515,11 @@ fn reads_timing_out_together_on_a_hung_node_ask_its_health_once() {
         assert_eq!(status, 200, "{body}");
         assert!(body.contains(r#""before""#), "answered home: {body}");
     }
-    assert_eq!(w.us_link.asked("/t/a/"), READS, "every read waited it out");
+    // Each line read on a thread of the link's own, which may land after
+    // the answer home.
+    until("every read waited it out at the node", || {
+        w.us_link.asked("/t/a/") == READS
+    });
     until("the node let be", || {
         w.router.replica_node_resting("us1") && w.router.health_questions() == 0
     });
@@ -3543,7 +3568,9 @@ fn a_marked_read_whose_body_the_replica_does_not_read_goes_home_by_the_replica_t
     assert!(read.is_ok(), "{read:?} after {took:?}");
     assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
     assert!(answer.contains(r#""before""#), "answered home: {answer}");
-    assert_eq!(w.us_link.asked("/t/a/"), 1, "the replica asked");
+    // Its line read on a thread of the link's own, as the hung node's
+    // test above has it: it may land after the answer home.
+    until("the replica asked", || w.us_link.asked("/t/a/") == 1);
     // Half the upstream timeout it would have waited.
     assert!(took < UPSTREAM / 2, "{took:?}");
     w.us_link.heal();
