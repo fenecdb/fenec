@@ -1,0 +1,399 @@
+<!--
+title: Lookup and subqueries — FenecQL — fenecdb
+description: Lookup and subqueries in FenecQL: lookup attaches another collection's documents to each row, chains, keys of several fields and levels that fold; in (get ...) filters by another collection's rows.
+-->
+
+<h1>Lookup and subqueries</h1>
+<p class="kicker">Another collection's documents, attached to a row or used as a filter.</p>
+
+<p><code>lookup</code> attaches the matching documents of another
+collection to each row, and <code>in (get …)</code> keeps the rows whose value
+another collection's rows hold. A SQL <code>JOIN</code> on a key is one or
+the other (<a href="sql.html#joins">From SQL</a>).</p>
+
+<p>Run in <a href="quickstart.html#in-the-shell">the shell</a>, answers and all; the timings are from one run.</p>
+
+<pre data-lang="text">fenec&gt; create collection customers (name text, country text);
+collection `customers` created
+fenec&gt; create collection orders (customer int @hash, total int, status text);
+collection `orders` created
+fenec&gt; put customers [{name: "Ada", country: "UK"}, {name: "Bo", country: "TR"}, {name: "Cem", country: "TR"}];
+3 records (112.38µs)
+fenec&gt; put orders [{customer: 1, total: 1200, status: "paid"}, {customer: 1, total: 800, status: "open"}, {customer: 1, total: 300, status: "paid"}, {customer: 2, total: 450, status: "paid"}];
+4 records (116.75µs)
+fenec&gt; get customers select name lookup orders on customer select total, status order total desc limit 2
+name  orders.total  orders.status
+----  ------------  -------------
+Ada   1200          paid
+Ada   800           open
+Bo    450           paid
+Cem   -             -
+(4 rows, 198.08µs)
+fenec&gt; get customers select name lookup orders on customer required select total where status = "open"
+name  orders.total
+----  ------------
+Ada   800
+(1 rows, 184.96µs)
+fenec&gt; get orders select customer, total where customer in (get customers select id where country = "TR")
+customer  total
+--------  -----
+2         450
+(1 rows, 176.00µs)
+</pre>
+
+<p>The <code>limit</code> after <code>lookup</code> counts children per
+parent: Ada keeps her two largest orders, Bo his one, and Cem, who has none,
+keeps his row. The shell prints the children as joined rows; over JSON they
+nest under <code>orders</code>. <code>required</code> keeps only the parents
+with a match, and the last line is a filter by another collection's
+rows.</p>
+
+<h2 id="the-lookup-clause">The lookup clause</h2>
+
+<p><code>lookup</code> attaches matching documents from another collection to
+each row — reviews to their products, say. A <code>limit</code> after it counts
+children per parent.</p>
+
+<pre data-lang="fenecql">get products limit 20 lookup reviews on product_id order created desc limit 3
+</pre>
+
+<ul>
+  <li><b>Clauses after <code>lookup</code> apply to the child
+    collection</b>; clauses before it apply to the parent.</li>
+  <li><b>The child's key needs <code>id</code>, a <code>@hash</code>
+    index, or an index over several fields it leads.</b> A key of several
+    fields is written <code>on (org, order) = (org, id)</code>.</li>
+  <li><b><code>required</code> keeps only parents that have a match.</b></li>
+  <li><b>A level's list may aggregate</b> — <code>lookup orders on shop
+    select count(*) as n, sum(total) as revenue</code> — each parent's
+    children folded, one row a parent; and a <code>get</code> whose list
+    aggregates takes a <code>lookup</code> off its groups. See <a
+    href="#lookup-folds">A level that folds</a>.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<pre data-lang="fenecql">get products lookup reviews on product_id
+get products limit 20 lookup reviews on product_id order created desc limit 3
+get products where price &gt;= 10000 select name
+  lookup reviews on product_id select body where stars &gt;= 4 limit 3
+get products lookup tags on sku = sku
+</pre>
+
+<p><code>lookup</code> attaches the matching documents of another collection
+to the row they belong to. <code>on</code> names the child's field; the
+parent's key is <code>id</code> unless <code>= &lt;parent&gt;</code> says
+otherwise, which is the foreign-key-to-primary-key case spelled out.</p>
+
+<p>It is <b>terminal</b>: everything before it binds to the driving
+collection, everything after it to the looked-up one. That is the whole
+scoping rule, and it is why there are no qualified names in the language —
+<code>where</code> on either side means what it has always meant. The price
+is that a parent clause cannot follow a child one, which reads the way the
+query runs anyway.</p>
+
+<pre data-lang="fenecql">get shops limit 20
+  lookup orders on shop_id limit 3
+  lookup lines on order_id limit 5
+</pre>
+
+<p>A second <code>lookup</code> <b>chains</b> onto the first: its clauses bind
+to <i>its</i> collection, and <code>on &lt;child&gt; = &lt;parent&gt;</code>
+names a field of the level immediately above. Position keeps scoping the query
+one level deeper, so exactly one collection is in scope at any point and it is
+the last one named — which is what keeps qualified names out of the language at
+any depth. Up to <b>8</b> levels; deeper is an error, not a silent truncation.</p>
+
+<div class="note">
+  <p><b><code>limit</code> after <code>lookup</code> counts children per
+  parent.</b> This is the clause's reason to exist. A join's limit counts
+  pairs, so a single product with 56 374 reviews consumes the whole page and
+  the other nineteen never appear; asking a join for three reviews each needs
+  a window function. Here twenty products with three reviews apiece is one
+  query with a bounded answer.</p>
+</div>
+
+<p>The child key must be <code>id</code> or carry <code>@hash</code>. Refusing
+an unindexed one is the same rule <code>near</code> and <code>match</code>
+follow: the clause is one bucket probe per parent, and quietly becoming a
+full scan of the child collection instead — 12.98 ms against 0.092 ms on the
+same 200 000 rows — is not a thing a query should do without saying so.</p>
+
+<h3 id="a-key-over-several-fields">A key over several fields</h3>
+
+<pre data-lang="fenecql">create collection lines (org int, order int, line int, qty int, @sorted(org, order, line))
+get orders where org = $1 limit 20
+  lookup lines on (org, order) = (org, id) order line limit 5
+</pre>
+
+<p>Where one field does not say which children are a row's — a tenant's
+rows by <code>(org, user)</code>, an order's lines in a file every tenant's
+orders share, a child keyed by two fields of its parent — <code>on</code>
+pairs a field of each side for each part, in order: <code>(org, order) =
+(org, id)</code> is <code>lines.org = orders.org and lines.order =
+orders.id</code>. The positional rule is the one above: the names on the
+left are the looked-up collection's, those on the right the level
+immediately above's, <code>id</code> among them. A null on either side
+matches nothing, as for a single key.</p>
+
+<p>The child side is answered by an <a href="fenecql-indexes.html#composite">index over several
+fields</a> whose first parts are the child's fields, in any order:
+<code>@sorted(org, order, line)</code> or <code>@unique(order, org)</code>
+answer <code>on (org, order) = …</code>. A parent's values, each made its
+child field's type as a single key's is, laid end to end as the index lays
+a row's, are the start of its children's keys, so its children are one run
+of the index, found by two searches. No such index is refused, naming the
+one to declare — <code>needs an index whose first fields are those
+(declare it with @sorted(org, order))</code> — for the reason an unindexed
+single key is. A child's <code>id</code> cannot be one of several parts (it
+names one row alone), and the two sides name as many fields.</p>
+
+<p>Where the level's <code>order</code> is the index's next parts — in its
+directions or every one reversed, a part the key fixes ordering nothing —
+each parent's run is <b>walked</b> in that order and stops at the page:
+"the five latest lines of each order" reads five lines an order, where a
+bucket is read whole and sorted. Any other order is read and sorted per
+parent, as for a single key, its ties in ascending id either way. A single
+field leading an index over several is answered the same way: with no
+<code>@hash</code> of its own, or where the level's order walks the index
+past it — <code>lookup reviews on product_id order created desc limit
+3</code> over <code>@sorted(product_id, created desc)</code>.</p>
+
+<p><code>required</code> takes either side here too: where a part is paired
+with the parent's <code>id</code> and the child filter holds a
+<code>@hash</code> equality, the children it names map back to their
+parents by that part, each held to the rest of the key by its own parts
+against its parent's — the same bytes the probe from the parent would
+find.</p>
+
+<h3 id="lookup-folds">A level that folds</h3>
+
+<pre data-lang="fenecql">get shops limit 20 lookup orders on shop select count(*) as n, sum(total) as revenue
+get couriers limit 20 lookup deliveries on courier order at desc limit 50
+  select count(*) as n, avg(km) as km
+get shops lookup lines on shop select product, sum(qty) as sold group product
+  order sold desc limit 3
+get orders select courier, count(*) as n where at &gt;= $1 group courier
+  order n desc limit 10 lookup couriers on user = courier select name
+</pre>
+
+<p>A level's list may aggregate, as a <code>get</code>'s does, by the same
+rules: each parent's children — probed once, as any level's are, held to
+its <code>where</code> — folded into one row, or with <code>group</code>
+into one row a group, ordered and paged a parent at a time. A level is the
+<code>get</code> its children would be with the parent's key in its
+<code>where</code>, and its clauses mean what they mean there: ungrouped,
+<code>order</code>, <code>limit</code> and <code>offset</code> pick the
+children folded — a courier's latest 50, walked off <code>@sorted(courier,
+at desc)</code> as far as the page and no further — and grouped they order
+and page the groups, a shop's three best sellers, a window function's
+question in SQL. A parent with no child gets the one row every ungrouped
+list answers, <code>count</code> 0 and a sum null, and no group.</p>
+
+<p>A <code>get</code> whose list aggregates takes a <code>lookup</code> too:
+it hangs off the rows the list answers, its groups, and <code>on child =
+parent</code> names a column of the list — the busiest ten couriers with
+their names, above, where the list named the courier. The same holds below
+a level that folds. The positional rule does not move: the names on the left
+are the looked-up collection's, those on the right the level immediately
+above's, and that level's rows are its groups.</p>
+
+<p>What stays out is a list of two collections: grouping parents by a field
+of theirs and folding their children's — revenue by the shops' city — would
+put a parent's name and a child's beside each other in one list, which is
+the qualified name the scoping keeps out. Fold the level a parent at a time
+and group the parents in the client, or keep the field on the child.</p>
+
+<p><code>required</code> on a level that folds asks of its children, as on
+any level: an ungrouped list answers a row for every parent, so asked of the
+rows it would keep them all, and "couriers who delivered, with their counts"
+is the question. A <code>required</code> level below one that folds drops
+its groups. Over 2 000 couriers and 200 000 deliveries, a page of the 20
+busiest with the count and mean of each one's latest 50 takes 53 µs in
+process, against 81 for the 50 attached and folded by the client; every
+delivery of each folded, 3.5 to 4.1 ms against 6.4 to 6.5; the ten busiest
+with their names off a week's groups 8.3 ms, as the groups and a query for
+the names apart do, less the round trip between them (<code>make
+analytics-bench</code>).</p>
+
+<pre data-lang="fenecql">get products limit 20 lookup reviews on product_id required where stars = 5
+get products count lookup reviews on product_id required where stars = 5
+</pre>
+
+<p><code>required</code> drops a parent that no child matches — "products that
+have a five-star review" rather than "products, with their five-star reviews".
+It is tested before <code>offset</code> and <code>limit</code>, so a page of
+twenty comes back with twenty parents that have children rather than whatever
+survived; a child <code>offset</code> that walks past every match does not undo
+it, because the parent has matches all the same. It is the one shape where
+<code>count</code> combines with <code>lookup</code>: nothing is being attached,
+so counting the parents that have a match is a question with an answer.</p>
+
+<div class="note">
+  <p><b><code>required</code> is a pass, and it is not cheap.</b> It is
+  answered from whichever side is smaller: walking the candidate parents and
+  probing each, or — when the child filter carries a <code>@hash</code>
+  equality and the parent's key is <code>id</code> — reading the children that
+  equality names and taking their parents. Both counts that decide are exact,
+  so the choice is not a guess; what neither plan escapes, once the page is
+  put in order or a facet counts every parent, is that one full pass has to
+  happen. With no <code>order</code> the page is the first parents kept, and
+  walking the parents stops once it holds them. Over 20 000 products and
+  200 000 reviews, for a page of twenty:</p>
+  <table>
+  <tbody>
+  <tr><td><code>required</code>, child filter on a <code>@hash</code> field</td><td>12.07 ms</td></tr>
+  <tr><td>the same, walking the parents instead</td><td>15.63 ms</td></tr>
+  <tr><td><code>required</code>, no child filter, no <code>order</code></td><td>0.036 ms</td></tr>
+  <tr><td><code>count … required</code></td><td>4.50 ms</td></tr>
+  <tr><td>a <code>bool @hash</code> field on the parent</td><td>0.02 ms</td></tr>
+  </tbody>
+  </table>
+  <p>Ask it occasionally and <code>required</code> is the right tool. Ask it on
+  every page load and the answer belongs in a field on the parent, maintained
+  on write — which is the same trade the rest of this database makes.</p>
+</div>
+
+<p>In a chain, <code>required</code> is a statement about its own level: it
+drops rows of the level immediately above it and stops there. Requiring lines
+drops the <i>orders</i> that have none; the shops keep their rows, with an
+empty group, unless the orders level says <code>required</code> as well. Said
+at every level it composes into "shops with an order that has a line", and the
+existence check walks the whole way down — a row is only kept if it has a
+descendant that is itself kept. Nothing acts at a distance, and the flag means
+the same thing wherever it is written.</p>
+
+<p><code>lookup</code> combines with neither <code>near</code>,
+<code>match</code> nor <code>rerank</code>: each ranks one collection's
+documents, and a score spanning a parent and its children has no defensible
+meaning. <code>count</code> is refused as well unless the clause is
+<code>required</code>, since otherwise it collapses the very rows the children
+would hang from.</p>
+
+<p><code>order</code> inside a <code>lookup</code> is bounded in advance: the
+clause carries its own <code>limit</code>, so only <code>offset + limit</code>
+children can ever be emitted and the rest are never put in order. On a parent
+with 56 374 children, <code>order created desc limit 3</code> costs 3.71 ms
+rather than 7.52 ms. What remains is reading one key per child, which no
+ordering can avoid — you cannot know the first three without having seen all
+of them. The query's own <code>order</code> works the same way.</p>
+
+<p>Over JSON the children are nested under the collection's name, and a chain
+nests all the way down. Flattened into rows, for a caller that wants a table,
+they arrive the way a join presents them — the same data; a chain widens once
+per level, one row per
+root-to-leaf path, and a level that ran out fills its own columns and every
+column below it with nulls. A parent with no matches keeps its row either way:
+the page is the parents. What the flat shape cannot show is the per-level
+<code>limit</code>, which is exactly why the nesting is what the other
+transports carry.</p>
+
+<div class="note">
+  <p><b>What it buys, measured</b> (5 000 products, 100 007 reviews, twenty
+  parents with three children each): the clause is <b>22.7 µs</b> in process
+  and <b>0.188 ms</b> over HTTP, against <b>0.332 ms</b> for the same work as
+  a <code>/batch</code> of twenty-one queries merged on the client.</p>
+  <p>The larger gain is that there is one way to write it. The same question
+  in SQLite, over the same data: a correlated subquery takes 0.053 ms, a
+  window function with the restriction pushed inside the partition 0.331 ms,
+  and the same window function with the restriction left outside
+  <b>81.34 ms</b> — a factor of 1 500 between three spellings of one
+  question, with nothing in the query text to tell them apart.</p>
+  <p>A second level is where batching stops being an answer. One level of N+1
+  fits in a single round trip, because every query in it can be written from
+  the page's ids; the level below cannot, because its keys are in rows that
+  have not come back yet — so the client pays two round trips whatever it
+  does. Over 2 000 shops, 20 000 orders and 200 000 lines, for a page of
+  20 × 3 × 5: <b>49.1 µs</b> in process against <b>139.8 µs</b> for the same
+  page as 81 separate queries, and <b>0.204 ms</b> for the one HTTP request
+  against <b>0.415 ms</b> for two <code>/batch</code> trips — measured on
+  loopback, where the extra trip costs almost nothing and still doubles it.</p>
+</div>
+</details>
+
+<h2 id="subqueries">Subqueries</h2>
+
+<p><code>in (get …)</code> filters by rows of another collection: the reverse
+of <code>lookup</code>. The inner <code>get</code> runs once, before the
+query, and the one column it selects is the list.</p>
+
+<pre data-lang="fenecql">get orders where customer in (get customers select id where country = "TR")
+</pre>
+
+<ul>
+  <li><b>It answers as its list written out.</b> One bucket per value over a
+    <code>@hash</code> field or <code>id</code>, a scan otherwise — the
+    <code>in [..]</code> you would have written.</li>
+  <li><b>The inner <code>get</code> selects exactly one column.</b> A field,
+    or one aggregate; no <code>lookup</code> and no <code>count</code>.</li>
+  <li><b>It goes wherever a filter goes</b>: <code>get</code>,
+    <code>count</code>, aggregates, a <code>near</code>'s or a
+    <code>match</code>'s filter, a <code>lookup</code> level's, <code>set …
+    where</code> and <code>del … where</code>.</li>
+  <li><b>At most 100 000 distinct values</b> and 4 levels of nesting; past
+    either the query is an error, never a set cut short. A value held by many
+    rows counts once.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<pre data-lang="fenecql">get orders where status = "open" and customer in (get customers select id where tier &gt;= $1)
+get orders where not customer in (get customers select id where country = "TR") count
+del sessions where user in (get users select name where banned = true)
+get customers limit 20 lookup orders on customer
+  where id in (get returns select order_id) limit 3
+get orders where customer in (get customers select id
+  where tier in (get tiers select n where active = true))
+</pre>
+
+<p>It is uncorrelated: the inner <code>get</code> reads nothing of the row
+being tested, so it runs once, with the same parameters as the query around
+it — <code>$1</code> inside is the query's <code>$1</code>. Its column is a
+field, or one aggregate (<code>get orders select max(total)</code>); a
+<code>null</code> in it is left out of the list, since it would otherwise find
+the rows whose field is null, and <code>not … in</code> would lose every row.
+<code>not</code> is FenecQL's own <code>not</code>, written before:
+<code>not customer in (get …)</code>; <code>customer not in</code> is not
+FenecQL.</p>
+
+<p>The values become the list an <code>in [..]</code> is answered with, and
+the same rule holds: a list reaches the <code>@hash</code> index only when
+every value is one the field's type can express, or the whole list goes to
+the scan. A long list is looked up rather than walked — a scan of 200 000
+rows by an unindexed field against the 2 000 codes an inner <code>get</code>
+handed it took 2 302 ms compared a value at a time and takes 16. The bound
+is on the values the list holds, not on the rows that hold them: a
+funnel's 125 000 <code>buy</code> events from 937 users is a list of 937.
+Past 100 000 rows the values are told apart, and the inner <code>get</code>
+read until they number more than 100 000; with a <code>limit</code>,
+<code>group</code> or ranking it is read one row past the bound, and a
+<code>limit</code> inside is the query's own cut, and answers. <code>explain</code> names what each inner <code>get</code>
+found.</p>
+
+<p>Over HTTP a scoped token's rules hold the inner <code>get</code> as they
+hold any <code>get</code>: the list holds only rows the token may read, so
+nothing of the others reaches it through what the outer query finds, and a
+column its rules show on some rows alone is listed from those rows
+(<a href="/docs/http#field-grants">Fields a read shows</a>). A token's rule
+may hold one too, held to 1 000 values and answered before each statement
+(<a href="/docs/http#scoped-access">Scoped access</a>). The JavaScript
+builder takes a query
+as an <code>in</code>'s value:
+<code>{ customer: { in: db.from('customers').select('id').where({ country: 'TR' }) } }</code>.
+A subscription's shape takes a list only — its stream follows its own
+collection's writes, and an inner set would not follow the other's.</p>
+
+<div class="note">
+  <p><b>What it costs, measured</b> (<code>make subquery-bench</code>, 20 000
+  customers and 200 000 orders, the median of 21). The orders of one
+  country's 2 000 customers by the <code>@hash</code> on
+  <code>customer</code>: 0.83 ms, against 0.72 ms with the 2 000 ids written
+  out; by an unindexed code, 16.1 ms against 15.9. The customers with a rare
+  order — the inner <code>get</code> reading a bucket — 0.20 ms against
+  0.065 written out and 0.44 for <code>lookup orders on customer required
+  where status = "rare"</code>, the same question asked from the other side;
+  with a filter on the customers as well, 0.56 against <code>lookup</code>'s
+  0.95. Where the inner <code>get</code> scans 200 000 orders it is that scan,
+  10.4 ms, and <code>lookup … required</code> probes each customer's orders
+  instead, 32.5. The difference to the list written out is the inner
+  <code>get</code>: a subquery is one round trip where the list is two.</p>
+</div>
+</details>

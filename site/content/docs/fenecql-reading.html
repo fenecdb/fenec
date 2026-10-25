@@ -1,0 +1,228 @@
+<!--
+title: Reading data — FenecQL — fenecdb
+description: Reading with FenecQL: get, select, where, order, limit and offset, pages that take parameters, ordering by an expression, columns worked out, count and explain.
+-->
+
+<h1>Reading data</h1>
+<p class="kicker"><code>get</code> a collection's documents, filtered, ordered and paged.</p>
+
+<p><code>get</code> reads a collection: <code>select</code> names the fields
+to return, <code>where</code> the rows to keep, <code>order</code> their order,
+and <code>limit</code> and <code>offset</code> the page. Every clause is
+optional, so <code>get films</code> alone is every row.</p>
+
+<p>Run in <a href="quickstart.html#in-the-shell">the shell</a>, answers and all; the timings are from one run.</p>
+
+<pre data-lang="text">fenec&gt; create collection films (title text, year int, rating float, tags [text]);
+collection `films` created
+fenec&gt; put films [{title: "Dune Run", year: 1999, rating: 7.1, tags: ["sand", "chase"]}, {title: "Night Heist", year: 2008, rating: 8.2, tags: ["heist", "night"]}, {title: "The Quiet Oasis", year: 2015, rating: 7.8, tags: ["sand", "drama"]}, {title: "Neon Heist", year: 2021, rating: 6.9, tags: ["heist", "neon"]}, {title: "Desert Fox", year: 2023, rating: 8.6, tags: ["sand", "drama"]}];
+5 records (163.25µs)
+fenec&gt; get films select title, year where year &gt;= 2000 and rating &gt;= 7.5 order rating desc
+title            year
+---------------  ----
+Desert Fox       2023
+Night Heist      2008
+The Quiet Oasis  2015
+(3 rows, 168.96µs)
+fenec&gt; get films select title where tags has "heist" order year desc
+title
+-----------
+Neon Heist
+Night Heist
+(2 rows, 138.79µs)
+fenec&gt; get films select title, year order year desc limit 2 offset 1
+title            year
+---------------  ----
+Neon Heist       2021
+The Quiet Oasis  2015
+(2 rows, 126.12µs)
+fenec&gt; get films where rating &gt;= 7 count
+count
+-----
+4
+(1 rows, 85.92µs)
+</pre>
+
+<p>A row has its <code>id</code> unless <code>select</code> leaves it out,
+and <code>count</code> answers one row with one column. Only filters joined
+by <code>and</code> reach an index (<a href="fenecql-indexes.html">Indexes</a>),
+and <code>explain</code>, below, says which one a query used. The operators,
+logic and ordering are in <a href="fenecql.html#reference">the reference
+table</a>. Reading across collections, totals and search have pages of their
+own: <a href="fenecql-lookup.html">Lookup and subqueries</a>,
+<a href="fenecql-aggregates.html">Aggregates and grouping</a> and
+<a href="fenecql-search.html">Text search</a>.</p>
+
+<h2 id="paging">Pages by parameters</h2>
+
+<p><code>limit</code>, <code>offset</code> and a facet's <code>top</code>
+take a parameter wherever they take a number: a <code>get</code>'s, a
+<code>lookup</code> level's, an inner <code>get</code>'s, and a
+<code>set</code>'s or a <code>del</code>'s that picks its rows.</p>
+
+<pre data-lang="fenecql">get articles where year = $1 order published desc limit $2 offset $3
+get products limit $1 lookup reviews on product_id order created desc limit $2
+get products match title $1 facet brand top $2 limit $3
+set jobs {owner: $1} where run_at &lt;= now() order run_at limit $2 returning *
+</pre>
+
+<ul>
+  <li><b>Every page is one statement.</b> Written into the text, each page
+    size and each page was a text of its own, which a server parses unless
+    its parse cache still holds it; as parameters a list is one text
+    whatever page is asked. Every builder sends them so.</li>
+  <li><b>A parameter is the number it holds.</b> It is checked as the
+    statement runs, before the plan: <code>limit $1</code> handed 10
+    answers what <code>limit 10</code> answers, row for row, through the
+    same plan, and <code>explain</code> names the number.</li>
+  <li><b>It is refused as the number written would be,</b> in the same
+    words: a count is a whole number from 0 (<code>20.0</code>, a float
+    with no fraction, is 20), and <code>-1</code>, <code>2.5</code>, a text
+    or <code>null</code> is <code>`limit` takes a whole number from 0, not
+    -1</code>. Past a ceiling it meets the check the number written meets:
+    <code>near</code> and <code>match</code> at 10 000 rows of <code>limit +
+    offset</code>, a facet's <code>top</code> from 1 to 10 000. A count
+    past what memory could hold is every row.</li>
+  <li><b><code>require N</code> stays a number written.</b> Its count is
+    what the statement guards — <code>require 1</code>, "this row and no
+    other" — a constant of the code, which never makes a text of its own;
+    a page's size and place are a request's data.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>The statement keeps the parameter, so what reads a statement by its
+shape reads <code>limit $2</code> as a limit: <code>count</code> and an
+aggregate without <code>group</code> refuse <code>offset $1</code> as they
+refuse <code>offset 5</code>, and a sync replica refuses a synced
+<code>set … limit $1</code> as it refuses <code>limit 1</code>. What reads
+it by its number reads the number it is handed: a long read is <a
+href="/docs/concepts#single-writer">pinned</a> or not by the page it asks
+for, as a number written is. <code>/_stats/statements</code> counted a page size
+written in as a place already, <code>limit $3</code>; the parse cache
+(<code>POST /query</code>, 16 shards of 64, a shard emptied when full)
+kept a text a page.</p>
+</details>
+
+<h2 id="order-by-expression">Ordering by an expression</h2>
+
+<p>A key of <code>order</code> is a field, or any expression over the row:
+a distance, a product, a <code>case</code>. The rows a <code>get</code>
+answers, and those a <code>set</code> or a <code>del</code> picks, are put
+in its order as by a field's, ties in id order:</p>
+
+<pre data-lang="fenecql">get orders order n * 2 desc, item limit 10
+get orders order case when customer = "bo" then 0 else 1 end, id
+</pre>
+
+<ul>
+  <li><b>Every match's key is worked out</b> and the page put in order: the
+    cost follows the matches, as an order over a field without
+    <code>@sorted</code> does. A field beside an expression keeps its own
+    collation and fold; an expression's text orders by its bytes, or in the
+    collation <code>collate</code> names.</li>
+  <li><b><code>distance(&lt;field&gt;, &lt;point&gt;)</code> ascending</b>
+    over a field with <code>@geo</code>, with a <code>limit</code>, walks
+    the point index nearest first and stops at the page, as
+    <code>near</code> does — where no row the filter passes lacks a point,
+    whose null distance comes first: the index holds every row, or the
+    filter puts a radius or a box on the field
+    (<a href="/docs/geo#nearest">Nearest first</a>).</li>
+  <li><b>Not in every place an order goes:</b> over groups a key names a
+    column of the list (give the expression a name with <code>as</code>);
+    a <code>lookup</code> level orders its children by fields; a key holds
+    no inner <code>get</code>, aggregate or <code>expired()</code>.</li>
+</ul>
+
+<h2 id="columns">Columns worked out</h2>
+
+<p>An item of the select list can be an expression over the row: its
+fields and paths, parameters and functions, with <code>+</code>
+<code>-</code> <code>*</code> <code>/</code>. It answers under the name
+<code>as</code> gives it; a field can be named again the same way.</p>
+
+<pre data-lang="fenecql">get ticks select sym, px * qty as notional where qty > 100
+get ticks select px as price, bucket(at, 1m) as minute, greatest(px, $1) as floor
+get orders select id, case when total >= 100 then "large" else "small" end as size
+</pre>
+
+<details class="deep"><summary>Details</summary>
+<p>The types are a <code>set</code>'s (<a href="fenecql-writing.html#writes">Writes that read
+the row</a>): two <code>int</code>s make an <code>int</code>, and one past
+64 bits is refused, never wrapped; a null is null. An expression is bound
+to the collection once a query — each field it reads by its place, every
+field the list reads decoded in one pass a row — and its error comes at
+the first row it fails on. An item that is neither a field nor an
+aggregate of one has no name of its own: <code>select px * qty</code> is
+refused, and asks for <code>as</code>.</p>
+</details>
+
+<h2 id="explain">Explain</h2>
+
+<p>Put <code>explain</code> in front of a <code>get</code> to see how the
+query ran: which index it used and how many rows each step read.</p>
+
+<pre data-lang="fenecql">explain get events where cat = "c7" order created desc limit 20
+
+plan
+order: the ordered index on created not walked, an equality names fewer rows
+filter: the hash index on cat, 9753 rows, which is the answer
+order: created desc, every key read, 9753 matches, the first 20 put in order
+rows: 20
+</pre>
+
+<ul>
+  <li><b>It runs the query</b>, because some choices depend on the data.</li>
+  <li><b>The wording is for reading</b>, not parsing; it may change between
+    versions.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p><code>explain</code> in front of a <code>get</code> runs the query and
+answers with the path it took instead of its rows: one row a step, in the
+order the steps ran, in a single <code>plan</code> column. The last row is
+the size of the answer.</p>
+
+<pre data-lang="fenecql">explain get events where cat ~ "c77" order created desc limit 20
+
+plan
+order: walked the ordered index on created desc, 2153 rows tested, 20 kept
+rows: 20
+</pre>
+
+<p>Both are over a million events, <code>cat</code> carrying
+<code>@hash</code> and <code>created</code> <code>@sorted</code>. The first
+filter names a hundredth of the rows through an index, so they are sorted;
+the second is one no index narrows, so the walk tests rows newest first
+until twenty pass.</p>
+
+<p>It runs the query because several choices depend on the data rather than
+the text: whether a filter's rows outnumber the ANN's budget, whether a walk
+along an ordered index fills the page before it gives up, whether the ANN
+came up short and fell back. The steps name each of them.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>A step that starts</th><th>says</th></tr></thead>
+<tbody>
+<tr><td><code>filter:</code></td><td>which index narrowed the filter — the id index, a hash index, an <code>in</code> over one, an ordered index's range — or that it was a full scan, how many rows were tested, and whether the scan stopped at the page</td></tr>
+<tr><td><code>order:</code></td><td>a walk along an ordered index and how many rows it tested, why one was not walked, or the sort: how many matches, how many put in order</td></tr>
+<tr><td><code>near:</code></td><td>the ANN and its <code>ef</code>, the filter's set searched exactly, the probe that stopped past the budget, the fallback when the ANN came up short, and the wider beam or exact search when tombstones cut it short</td></tr>
+<tr><td><code>match:</code>, <code>rerank:</code></td><td>the text index and how many rows it ranked, the vectors read for the rerank</td></tr>
+<tr><td><code>fuse:</code></td><td>the rank offset, and how many candidates each side brought — after its own <code>match:</code> and <code>near:</code> steps</td></tr>
+<tr><td><code>lookup:</code>, <code>required:</code></td><td>the probe per parent and how many children it attached — over several fields the index and whether its runs were walked in the level's order or probed and sorted; which side <code>required</code> was answered from</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The same statement goes through every transport: the shell prints
+the rows, <code>POST /query</code> returns
+them as JSON, and the JavaScript builder has <code>.explain()</code>, which
+resolves to the lines. The steps are for reading, not parsing — their wording
+may change between versions.</p>
+</details>
+
+<h2 id="counting">Counting</h2>
+
+<pre data-lang="fenecql">get articles where year >= 2024 count
+-- one row, one column
+</pre>

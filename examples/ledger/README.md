@@ -169,7 +169,7 @@ captured ones too. A hold keeps `until` under `@sorted`, and the reaper
 block guarded by `state = "held" and until <= now()`. A capture checks
 `until > now()` in its own guard, so a lapsed hold cannot be captured even
 before the reaper comes by. A hold kept only while it lives would take
-`@ttl` and a reaper reading `expired()` (`site/content/docs/fenecql.html`,
+`@ttl` and a reaper reading `expired()` (`site/content/docs/fenecql-indexes.html`,
 the reaper).
 
 ### Under concurrency: 20 000 operations, 16 clients

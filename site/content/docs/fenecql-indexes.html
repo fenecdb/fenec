@@ -1,0 +1,524 @@
+<!--
+title: Indexes — FenecQL — fenecdb
+description: Indexes in FenecQL: hash, unique, ordered, text, vector and geo, indexes over several fields, rows that expire with a ttl, and explain.
+-->
+
+<h1>Indexes</h1>
+<p class="kicker">One index makes one kind of question fast: hash, ordered, unique, over several fields, and rows that expire.</p>
+
+<p>An index makes one kind of question fast and gives the rows that
+reading every row would. Declare it on a field when the collection is
+made, or add it later with <code>create index</code>.</p>
+
+<p>Run in <a href="quickstart.html#in-the-shell">the shell</a>, answers and all; the timings are from one run.</p>
+
+<pre data-lang="text">fenec&gt; create collection events (user int, kind text, at timestamp);
+collection `events` created
+fenec&gt; put events [{user: 1, kind: "view", at: "2026-05-03T09:00:10Z"}, {user: 1, kind: "buy", at: "2026-05-03T09:05:30Z"}, {user: 2, kind: "view", at: "2026-05-03T09:01:00Z"}, {user: 3, kind: "view", at: "2026-05-03T10:20:00Z"}, {user: 3, kind: "buy", at: "2026-05-03T10:40:00Z"}];
+5 records (196.17µs)
+fenec&gt; explain get events where kind = "buy" order at desc limit 2
+plan
+-----------------------------------------------------------
+filter: a full scan, 5 of 5 rows tested, 2 matched
+order: at desc, every key read, 2 matches, all put in order
+rows: 2
+(3 rows, 188.29µs)
+fenec&gt; create index on events (kind) @hash;
+index built on `events.kind`
+fenec&gt; create index on events (at) @sorted;
+index built on `events.at`
+fenec&gt; explain get events where kind = "buy" order at desc limit 2
+plan
+-----------------------------------------------------------------------
+order: the ordered index on at not walked, an equality names fewer rows
+filter: the hash index on kind, 2 rows, which is the answer
+order: at desc, every key read, 2 matches, all put in order
+rows: 2
+(4 rows, 327.04µs)
+fenec&gt; explain get events where at &gt;= "2026-05-03T10:00:00Z" order at desc limit 2
+plan
+--------------------------------------------------
+order: walked the ordered index on at desc, 2 rows
+rows: 2
+(2 rows, 253.75µs)
+fenec&gt; describe events
+events
+  user           int           
+  kind           text            @hash
+  at             timestamp       @sorted
+</pre>
+
+<p>With no index the filter tested all five rows. With a
+<code>@hash</code> on <code>kind</code> it names the two rows holding
+<code>"buy"</code>, and with a <code>@sorted</code> on <code>at</code> a range
+and an order walk the index and stop at the page. Text and vector indexes
+are on <a href="fenecql-search.html">Text search</a> and
+<a href="fenecql-vector.html">Vector search</a>.</p>
+
+<h2 id="indexes">Indexes</h2>
+
+<p>An index makes one kind of question fast. Declare it on a field when you
+create the collection, or add it later with <code>create index</code>.</p>
+
+<pre data-lang="fenecql">create collection articles (
+  title      text,
+  body       text @text(k1=0.9, b=0.4, prefix=0),
+  year       int @hash,
+  slug       text @unique,
+  published  timestamp @sorted,
+  embed      vector&lt;768&gt; @hnsw(cosine, m=16, ef_construction=200)
+)
+</pre>
+
+<ul>
+  <li><b>One index per field:</b> <code>@hash</code> for equality,
+    <code>@sorted</code> for ranges and order, <code>@text</code> for ranked
+    text search, <code>@hnsw</code> for nearest neighbours, <code>@geo</code>
+    for points near a place. A path into a
+    <code>json</code> field takes <code>@hash</code>, <code>@unique</code>
+    or <code>@sorted</code> of its own (<a href="fenecql-schema.html#json">Objects and
+    paths</a>), and an index over several fields is the collection's, beside
+    them (<a href="#composite">below</a>).</li>
+  <li><b><code>@unique</code> is a <code>@hash</code> that refuses a second
+    document</b> holding a value one holds already. <code>null</code> is no
+    value: any number of documents may hold it.</li>
+  <li><b>Only filters joined by <code>and</code> use an index.</b> Anything
+    under <code>or</code>, and <code>!=</code>, <code>~</code> or
+    <code>has</code>, reads every row.</li>
+  <li><b>For Turkish, Chinese or Japanese text</b>, see <code>prefix</code>
+    and <code>chars</code> below.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<pre data-lang="fenecql">create index on articles (embed) @hnsw(cosine)
+create index on articles (body) @text
+create index on articles (body) @text(prefix=6)   -- for an inflected language
+create index on products (title) @text(chars)     -- short Chinese or Japanese text
+create index on articles (title) @sorted
+create index on users (email) @unique             -- refused if a value is held twice
+</pre>
+
+<p>A field takes one index. <code>@hash</code> answers equality,
+<code>@sorted</code> ranges and order, <code>@text</code> ranked text
+retrieval, <code>@hnsw</code> nearest neighbours. <code>@sorted</code> is
+for <code>int</code>, <code>float</code>, <code>timestamp</code> and
+<code>text</code> — the types with an order.</p>
+
+<p><code>@unique</code> is a <code>@hash</code> index that refuses a
+second document holding a value one holds already: a <code>put</code>, an
+<code>insert</code> or a <code>set</code> that would write one is refused,
+and nothing of the statement is written — <code>409</code> over HTTP, as a
+taken id is. It answers equality and a <code>lookup</code> as
+<code>@hash</code> does. A block — a <code>/batch</code>, a run of several —
+is checked against its own earlier writes, so it may free a value and take
+it again, and a document keeping its own value is no second one.
+<code>null</code> is no value, as in SQL: any number of documents hold it.
+Values are one where <code>=</code> finds them one, so <code>-0.0</code>
+and <code>0.0</code> collide. <code>create index ... @unique</code> over
+documents that hold a value twice is refused and names the value and two
+of its documents. A replica takes what its primary took and does not ask
+again; <code>describe</code> shows the index as <code>@unique</code>. The
+refusal names the document holding the value and the value, but to a
+<a href="/docs/http#scoped-access">scoped token</a> it names the field
+alone (<code>`users.email` is unique, and the value is taken</code>): the
+row is another user's, which the token may not read.</p>
+
+<p>The check asks the bucket the value would go in, so the index has to
+hold every document: the first write after an open builds it, where a
+plain <code>@hash</code> waits for the first read that wants it. An open
+costs what it did — 19 ms for an image of a million rows either way — and
+that first write takes 15 ms over 100 000 rows and 259 ms over a million;
+after it a <code>put</code> takes 940 ns against 850 for the same field
+under <code>@hash</code>, the price of the lookup. A collection with no
+unique field writes as fast as before (848 and 852 ns).</p>
+
+<p>An <code>@hnsw</code> graph holds a vector once. Documents written with
+the same vector — the embedding of an empty chunk, a line of boilerplate,
+a zero vector — share its node, and <code>near</code> hands back each of
+them at the one distance. A node each, a vector written hundreds of times
+filled its neighbours' lists with copies of itself: over 20 000 rows of 128
+dimensions, a third of them copies of 20 vectors, 1 812 copies were found by
+no search and other queries' recall fell from 0.82 to 0.67; one node each,
+none is missed and it is 0.87.</p>
+
+<div class="note">
+  <p><b><code>prefix=N</code> indexes each word's prefixes alongside it</b>
+  (3..N by default; <code>prefix_min</code> moves the lower bound). It is a
+  stemmer that needs no dictionary and no language setting, and it is off
+  unless asked for because it is a trade the corpus decides. Word-boundary
+  matching suits English; it does not suit a language that inflects by gluing
+  suffixes on, where <code>kitap</code>, <code>kitabı</code> and
+  <code>kitapların</code> are three terms sharing a stem the index never
+  sees.</p>
+  <p>Measured on Turkish WebFAQ (144 846 documents, 10 000 queries):
+  nDCG@10 0.4841 &rarr; 0.5547, +14.6%, closing about two fifths of the gap to
+  a 278M-parameter multilingual transformer (0.650). The cost is the 3.4&times;
+  postings it indexes — 58 MB &rarr; 182 MB, and 82 &rarr; 485 µs per query.
+  On English SciFact the same option is worth +0.0137.</p>
+</div>
+
+<div class="note">
+  <p><b>A script written without spaces is indexed in runs of
+  characters.</b> Chinese, Japanese and Thai run their words together, and
+  Korean hangs its particles on them, so a word is not a term there: a run of
+  Han, kana or Hangul is indexed as its overlapping pairs of characters —
+  <code>東京都に</code> is <code>東京</code>, <code>京都</code>,
+  <code>都に</code> — and one of Thai, Lao, Khmer or Myanmar, whose
+  characters are letters, as its triples. A query is split the same way, so
+  <code>match body "東京"</code> finds the run it is written in. There is no
+  dictionary and no language setting; a script that spaces its words keeps
+  its words.</p>
+  <p><code>chars</code> indexes each character of Han, kana and Hangul as
+  well, so a query of one character finds every run holding it, which pairs
+  alone do only for a run of one. It pays on short text and costs on long:
+  product titles gain a fifth, news and questions lose a little, and the
+  index holds 1.6 to 1.9&times; the postings for a query 3 to 8&times;
+  slower. Off unless asked for.</p>
+</div>
+
+<div class="tbl">
+<table>
+<thead><tr><th>nDCG@10, BM25</th><th class="n">documents</th><th class="n">words whole</th><th class="n">runs of characters</th><th class="n">with <code>chars</code></th></tr></thead>
+<tbody>
+<tr><td>C-MTEB EcomRetrieval, Chinese product titles</td><td class="n">100 902</td><td class="n">0.006</td><td class="n">0.439</td><td class="n"><b>0.528</b></td></tr>
+<tr><td>C-MTEB CovidRetrieval, Chinese news</td><td class="n">100 001</td><td class="n">0.162</td><td class="n">0.868</td><td class="n"><b>0.872</b></td></tr>
+<tr><td>WebFAQ, Chinese</td><td class="n">132 491</td><td class="n">0.146</td><td class="n"><b>0.686</b></td><td class="n">0.666</td></tr>
+<tr><td>JaGovFaqs-22k, Japanese</td><td class="n">22 135</td><td class="n">0.119</td><td class="n"><b>0.582</b></td><td class="n">0.576</td></tr>
+<tr><td>WebFAQ, Korean</td><td class="n">102 000</td><td class="n">0.537</td><td class="n"><b>0.682</b></td><td class="n">0.651</td></tr>
+<tr><td>WebFAQ, Thai (triples; pairs 0.495)</td><td class="n">47 429</td><td class="n">0.448</td><td class="n"><b>0.547</b></td><td class="n">—</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The same pipeline as BEIR (<code>make beir</code> over each set in its
+layout); English SciFact scores what it did, to the fourth decimal. A query
+over those sets takes 0.09 to 0.66 ms at the median.</p>
+
+<div class="note">
+  <p><b>A filter reaches an index only inside an <code>and</code> chain.</b>
+  Equality — <code>=</code> and <code>in [..]</code> — reaches a
+  <code>@hash</code> field; <code>in</code> is a set of equalities written
+  short, so it is answered as the union of one bucket per element. Either
+  reaches <code>id</code>, which the store's own id index answers without a
+  <code>@hash</code> being declared or possible. Comparisons —
+  <code>&lt;</code>, <code>&lt;=</code>, <code>&gt;</code>, <code>&gt;=</code>
+  and <code>=</code> — reach a <code>@sorted</code> field, which narrows them
+  to a range of keys.</p>
+  <p>Everything else — <code>!=</code>, <code>~</code>, <code>has</code>,
+  comparisons on a field without <code>@sorted</code>, and anything under an
+  <code>or</code> — is a full scan: each matching row is decoded and
+  evaluated. <code>~</code> in particular is substring matching without
+  ranking and reaches no index; ranked retrieval is <code>match</code> over a
+  <code>@text</code> field.</p>
+  <p>A full scan reads rows in id order, and starts at the lowest id an
+  <code>id &gt; x</code> or <code>id &gt;= x</code> in the <code>and</code>
+  chain lets through, so a page read after the last id of the one before —
+  <code>where id &gt; $1 limit 1000</code> — reads only its own rows: a
+  million rows read that way a page at a time took 8.6 s and take 110 ms.
+  The browser module leaves this out.</p>
+</div>
+</details>
+
+<h2 id="ordered-indexes">Ordered indexes</h2>
+
+<p><code>@sorted</code> makes ranges, counts over a range and
+<code>order … limit</code> fast. It always gives the same rows as reading
+every row would.</p>
+
+<pre data-lang="fenecql">get articles order published desc limit 20
+get articles where published >= "2026-09-01" order published desc limit 20
+</pre>
+
+<ul>
+  <li><b>It costs memory and write time</b>: about 20 bytes a row for a
+    number, plus the text for <code>text</code>.</li>
+  <li><b>It is rebuilt after an open</b> by the first query that needs it; it
+    is never written to the file.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<pre data-lang="fenecql">get articles where title >= "k" and title < "l" count
+get articles where published >= "2026-01-01" near embed $1 limit 10
+</pre>
+
+<p><code>order</code> over a <code>@sorted</code> field with a
+<code>limit</code> walks the index in order and stops at the page, testing
+the rest of the filter on each row it passes; without one, every match's key
+is read and only <code>offset + limit</code> of them are put in order. A
+filter that matches too little to fill the page within an eighth of the
+collection sends the walk back to the scan: over a million rows one matching
+nothing cost 152 ms against the scan's 121, while one matching 1% fills the
+page in 0.29 ms against 125. A range on a <code>@sorted</code> field is read
+from the index as a set of ids — for a filter, a <code>count</code>, or the
+allowed set of a filtered <code>near</code>.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>1 000 000 rows unless noted</th><th class="n">scan</th><th class="n"><code>@sorted</code></th></tr></thead>
+<tbody>
+<tr><td><code>order created desc limit 20</code></td><td class="n">26.8 ms</td><td class="n">0.001 ms</td></tr>
+<tr><td>the newest 1%, <code>order created desc limit 20</code></td><td class="n">63.1 ms</td><td class="n">0.001 ms</td></tr>
+<tr><td><code>where price &gt;= 99900 limit 20</code>, 0.1% of the rows</td><td class="n">1.44 ms</td><td class="n">0.008 ms</td></tr>
+<tr><td>the same range, <code>count</code></td><td class="n">65.8 ms</td><td class="n">0.008 ms</td></tr>
+<tr><td><code>where pct &lt; 1 near embed $1 limit 10</code>, 1% of 200 000 × 128</td><td class="n">17.9 ms</td><td class="n">0.16 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>A comparison with <code>now()</code> — <code>run_at &lt;= now()</code>,
+<code>at &gt;= now() - 3600000</code> — is a range of the index as one with a
+literal is: the time is worked out once, before the query is planned, and
+is the statement's one time. Left a call, a queue's claim walked past its
+ready jobs into the leased and delayed ones after them, testing each.</p>
+
+<p>The planner prefers a smaller set when it has one: an equality over a
+<code>@hash</code> field, or a narrow range on another <code>@sorted</code>
+field, names fewer rows than the walk would pass, so those are sorted instead.
+A range wider than half the collection is left to the scan, which is cheaper
+than gathering and sorting that many ids.</p>
+
+<div class="note">
+  <p><b>A comparison reaches the index only when its literal says exactly
+  what the scan would compare.</b> <code>price &lt; 12.5</code> on an
+  <code>int</code> field, or an integer past 2<sup>53</sup> against a
+  <code>timestamp</code>, is evaluated row by row — the index narrows with the
+  comparisons it can express and the rest are tested — because an answer that
+  differs from the scan's is a wrong answer, not a fast one. Ties come out in
+  ascending <code>id</code> either way, as the scan leaves them.</p>
+  <p>The cost is paid on write and in memory: about 20 bytes a row for a
+  number, plus the text for <code>text</code>, and an insert into a sorted
+  run. Over a million rows two ordered indexes took a bulk load from 0.52 s
+  to 0.88 s, and the index is built from the documents by the first query
+  that reads it after an open, like the hash and text indexes — it is never
+  written to the file.</p>
+</div>
+</details>
+
+<h2 id="composite">Indexes over several fields</h2>
+
+<p><code>@sorted(owner, created desc)</code> keeps the rows in the order of
+several fields, the first first. The page an app reads most — one user's
+latest twenty, a tenant's inbox, a feed — is a run of it, read to the page
+and no further. <code>@unique(org, slug)</code> refuses a second row holding
+the same values in every part.</p>
+
+<pre data-lang="fenecql">create collection posts (
+  owner    int,
+  created  timestamp,
+  title    text,
+  @sorted(owner, created desc)
+)
+get posts where owner = $1 order created desc limit 20     -- a run of the index, 20 rows read
+get posts where owner in [$1, $2, $3] order created desc limit 20   -- three runs, merged
+get posts where owner = $1 and created >= $2 count          -- counted off the index
+create index on pages (org, slug) @unique                   -- or @unique(org, slug) in the collection
+</pre>
+
+<ul>
+  <li><b>Equalities on its first fields, then a range or an order on the
+    next.</b> <code>where owner = $1 order created desc</code> reads its
+    run; <code>where created &gt; $1</code> alone does not use
+    <code>(owner, created)</code>, since <code>owner</code> comes first.</li>
+  <li><b>An order matches it</b> in its fields' directions, or every one the
+    other way round: <code>(owner, created desc)</code> answers
+    <code>order created desc</code> and <code>order created</code> for one
+    owner.</li>
+  <li><b>It gives the scan's answer, row for row</b>, ties in ascending
+    <code>id</code> either way, as <code>@sorted</code> does.</li>
+  <li><b>A <code>lookup</code> keyed by its first fields</b> reads each
+    parent's children as a run of it, walked in the level's order where
+    that is the index's next parts:
+    <a href="fenecql-lookup.html#a-key-over-several-fields"><code>lookup lines on (org, order)
+    = (org, id) order line limit 5</code></a>.</li>
+  <li><b>Up to 8 fields</b> of <code>bool</code>, <code>int</code>,
+    <code>float</code>, <code>timestamp</code>, <code>text</code> (in its
+    collation) or <code>json</code>, a path into one among them
+    (<code>meta.lang</code>). A field keeps its own index beside it.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<pre data-lang="fenecql">create index on posts (owner, created desc) @sorted        -- built beside the database on a server
+drop index on posts (owner, created)                        -- by its fields
+explain get posts where owner = 7 order created desc limit 20
+-- order: walked the index on (owner, created desc), owner fixed, 20 of 100 rows read, 20 kept
+</pre>
+
+<p>A key is its fields' values laid end to end, each written so that the
+bytes order as the values do — an int's sign turned over, a float's bits
+made to order, a text escaped and ended, a descending field's bytes
+inverted — so an equality on its first fields is a run of the keys and a
+range on the next one is a run inside it. A text in a collation is kept as
+written and compared in it. <code>null</code> stands below every value of a
+field, as <code>order</code> puts it; a row holding a float's
+<code>NaN</code>, which compares equal to everything, or a json value no
+order has a place for (a boolean, a list, an object, an int past
+2<sup>53</sup>) is held apart: while one is, the index is walked for no
+<code>order</code>, and a filter's run takes those rows with it, each
+tested.</p>
+
+<p>The planner takes the <code>and</code> chain's terms in the index's order
+— an equality, or an <code>in</code> whose every element it can say exactly,
+on each field as far as one is fixed, then the comparisons on the next — and
+tests every other term row by row; a term it cannot say exactly (a
+<code>null</code>, <code>12.5</code> against an <code>int</code>) is left to
+that test, so the answer never changes. An <code>in</code> makes a run for
+each element, 256 at most together; under an <code>order</code> on the
+fields after it the runs are walked together, merged by those fields. Of the
+plans, the narrower set wins by exact counts: the run is two searches, a
+<code>@hash</code> bucket its length, so a filter the index says whole reads
+the page and nothing more, and one it does not is walked only while its run
+is no longer than any set another index names — and gives up past an eighth
+of the collection, as a <code>@sorted</code> walk does. A
+<code>count</code> the index says whole is counted off it without a row
+read. <code>explain</code> names the index, the fields fixed, the runs and
+the range.</p>
+
+<p><code>@unique</code> over several fields is asked before every
+<code>put</code>, <code>insert</code> and <code>set</code>: a second row
+holding the same values in every part is refused,
+<code>409</code> over HTTP, naming the fields and the other row — to a
+scoped token the fields alone. A <code>null</code> in any part is no value.
+<code>put ... if absent</code> passes over the row holding them, and
+<code>if absent else set</code> sets it. <code>create index ...
+@unique</code> over rows already holding a key twice is refused naming two of
+them.</p>
+
+<p>It is derived data, built from the documents by the first read after an
+open, kept on every write, put back with a block that does not land, and
+never written to the file. A field renamed keeps it under the new name; a
+field dropped takes it off. A sync replica builds what the schema declares,
+a unique one as an ordered one, as its <code>@unique</code> fields are
+<code>@hash</code>.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>1 000 000 posts over 10 000 owners</th><th class="n">p50</th><th class="n">p99</th><th class="n">built in</th><th class="n">memory</th></tr></thead>
+<tbody>
+<tr><td><code>where owner = $1 order created desc limit 20</code>, <code>@sorted(owner, created desc)</code></td><td class="n">0.006 ms</td><td class="n">0.011 ms</td><td class="n">147 ms</td><td class="n">40 MB</td></tr>
+<tr><td>the same over <code>owner @hash</code>, its bucket sorted</td><td class="n">0.012 ms</td><td class="n">0.017 ms</td><td class="n">75 ms</td><td class="n">11 MB</td></tr>
+<tr><td>the same over <code>created @sorted</code>, walked and given up</td><td class="n">24.4 ms</td><td class="n">40.5 ms</td><td class="n">34 ms</td><td class="n">20 MB</td></tr>
+<tr><td>the same by the scan</td><td class="n">21.3 ms</td><td class="n">37.4 ms</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>a feed, <code>owner in</code> ten owners, <code>@sorted(owner, created desc)</code></td><td class="n">0.022 ms</td><td class="n">0.029 ms</td><td></td><td></td></tr>
+<tr><td>the feed over <code>owner @hash</code></td><td class="n">0.100 ms</td><td class="n">0.136 ms</td><td></td><td></td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Writes pay for it: a lone <code>put</code> into those million rows took
+715 ns with no index, 851 beside <code>created @sorted</code> and
+<code>owner @hash</code>, and 1 561 beside <code>@sorted(owner, created
+desc)</code>, whose first field puts each write anywhere in it. A unique one
+asks its run before each write: 1 745 ns a put against 1 285 for
+<code>@unique</code> on the two joined into one field, and a read by both
+fields 2.5 µs against 1.3 by the joined field — a hash index
+over several fields would answer that read sooner, by a microsecond, and was
+not worth a third index's code beside this one (<code>make
+composite-bench</code>).</p>
+</details>
+
+<h2 id="ttl">Rows that expire</h2>
+
+<p><code>@ttl</code> on a <code>timestamp</code> field makes a row expire that
+long after its value — for sessions, caches and anything else kept for a
+while.</p>
+
+<pre data-lang="fenecql">create collection sessions (user text @hash, seen timestamp @ttl(30m))
+</pre>
+
+<ul>
+  <li><b>Reads are exact at once.</b> A row past its time is never returned,
+    even before it is deleted: every read of the collection leaves it out.</li>
+  <li><b>The server deletes it.</b> A primary sweeps once a minute, as
+    ordinary deletes that replicas, <code>/_changes</code>, archives and
+    subscriptions see as any.</li>
+  <li><b><code>expired()</code> reads what the others leave out,</b> for
+    a reaper that gives back what a row held before the sweep deletes it
+    (<a href="#reaper">below</a>).</li>
+  <li><b>Durations</b> are whole <code>ms</code>, <code>s</code>,
+    <code>m</code>, <code>h</code> or <code>d</code>: <code>@ttl(45s)</code>,
+    <code>@ttl(12h)</code>, <code>@ttl(7d)</code>.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<pre data-lang="fenecql">put sessions {user: "ada", seen: now()}
+set sessions {seen: now()} where user = "ada"        -- seen again: lives on
+get sessions where user = "ada"                       -- nothing once 30 minutes pass
+create index on events (at) @ttl(7d)                  -- an existing timestamp field
+alter collection sessions alter field seen @ttl(1h)   -- another expiry
+alter collection sessions alter field seen @sorted    -- none: the rows live
+</pre>
+
+<p>A read of the collection — <code>get</code>, <code>count</code>, an
+aggregate, <code>near</code>, <code>match</code>, a <code>lookup</code> level,
+an inner <code>get</code>, a <code>set</code> or <code>del</code> by filter,
+and a subscription's shape — has <code>not (seen &lt;= now - ttl)</code>
+added to its filter, the way a token's rule is added: a row is gone at the
+moment its time plus the ttl is reached. A row whose field is
+<code>null</code> has no time to expire from, and lives. In the browser the
+module has no clock: <code>now</code> is the page's, <code>Date.now()</code>
+unless <code>db.now</code> is set, as every time is handed to it; the page
+deletes nothing, and a row past its time stays in its file, out of every
+read. A live query in the page is woken by writes, not by time passing.</p>
+
+<p><code>@ttl</code> is an ordered index whose rows expire, so the field
+also does everything <code>@sorted</code> does, and a collection's rows
+expire by one such field. The sweeper deletes a range
+of it at a time rather than scan for the rows past their time: found under
+the read lock, deleted under the write lock 1 000 at a time, each batch a
+block of ordinary deletes, its fsync run once the lock is let go. A replica
+never sweeps — its writes are its primary's, the sweep's among them — and
+neither does a tenant that follows another node. The server's
+<code>Idempotency-Key</code>s are kept this way.</p>
+
+<p>The ttl is a kind of index in the file (kind 9, the milliseconds behind
+it), so a binary from before it refuses the file rather than hand out the
+rows past their time. A write takes the place of a row past its time:
+an <code>insert</code> naming its id writes over it, and a
+<code>@unique</code> value it holds is let go of with it, the row deleted
+in the same statement — so a lock taken by <code>insert</code> and left to
+expire can be taken again at once (<a href="/docs/redis#lock">Instead of
+Redis</a>). BM25's statistics count the row until the sweep.</p>
+
+<h3 id="reaper">Reading what expired: the reaper</h3>
+
+<p>A row past its time is out of every read, so a hold that lapsed cannot be
+found to give its money back, nor a reservation its stock. <code>expired()</code>
+in a filter reads those rows — and only those, where the filter says so —
+wherever a filter goes: <code>get</code>, <code>count</code>, a
+<code>lookup</code> level, an inner <code>get</code>, <code>set</code> and
+<code>del</code>. It is <code>until &lt;= now - ttl</code>, a range of the
+field's ordered index; <code>not expired()</code> is what a read finds without
+it.</p>
+
+<pre data-lang="fenecql">create collection holds (account text @hash, amount int, until timestamp @ttl(1ms))
+
+get holds select id, account, amount where expired() limit 100   -- what lapsed
+
+-- each given back once, in one block (a /batch): the delete is the guard
+del holds where expired() and id = $1 require 1
+set accounts {held: held - $2} where ext = $3 and held &gt;= $2 require 1
+</pre>
+
+<p>A capture needs no guard of its own against the lapse:
+<code>get holds where id = $1 limit 1 require 1</code> finds no hold past
+its time. Two reapers, or a reaper and a capture, racing for one hold: the
+<code>del ... require 1</code> lets one through, and the other's block is put
+back whole. The sweeper leaves a row a minute past its time before it deletes
+it, so a reaper that comes by once a minute sees every one; a row it misses
+for longer is deleted unseen, and what it held is the reconciliation's to
+find. A scoped token reads them only by the policy's <code>expired</code>
+grant (<a href="/docs/http#scoped-access">Scoped access</a>). Without
+<code>@ttl</code> on the collection, <code>expired()</code> is an error.</p>
+
+<div class="note">
+  <p><b>What it costs, measured</b> (<code>make ttl-bench</code>, a million
+  rows, half past their time). A read tests each row's time as part of its
+  filter, as the same test written by hand does: <code>count</code> becomes a
+  scan, 68.8 ms against 1.1 with no expiry, and a filter that scanned
+  already reads one field more, <code>where s = "w7" count</code> 68.5 ms
+  against 51.9 — 70.1 with the test written out. A collection with no
+  <code>@ttl</code> reads as it did. The sweep of 100 000 rows past their
+  time out of a file of 200 000 took 0.56 s in batches of 1 000, each
+  holding the write lock 1.06 ms at the median and 2.3 at most.</p>
+</div>
+</details>

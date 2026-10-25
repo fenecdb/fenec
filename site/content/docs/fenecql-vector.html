@@ -1,0 +1,152 @@
+<!--
+title: Vector search — FenecQL — fenecdb
+description: Vector search in FenecQL: near finds the documents whose vector is closest, with a filter, ef and exact; quantized vector indexes, sparse vectors and a hybrid query.
+-->
+
+<h1>Vector search</h1>
+<p class="kicker"><code>near</code> finds the documents whose vector is closest to the one you pass.</p>
+
+<p>A <code>vector&lt;N&gt;</code> field with an <code>@hnsw</code> index
+holds one embedding a document, and <code>near</code> finds the documents whose
+vector is closest to the one you pass.</p>
+
+<p>Run in <a href="quickstart.html#in-the-shell">the shell</a>, answers and all; the timings are from one run.</p>
+
+<pre data-lang="text">fenec&gt; create collection places (name text, year int @sorted, embed vector&lt;3&gt; @hnsw(cosine));
+collection `places` created
+fenec&gt; put places [{name: "north", year: 2021, embed: [0, 1, 0]}, {name: "east", year: 2024, embed: [1, 0, 0]}, {name: "up", year: 2024, embed: [0, 0, 1]}, {name: "north-east", year: 2022, embed: [0.7, 0.7, 0]}];
+4 records (264.08µs)
+fenec&gt; get places select name near embed [0.9, 0.1, 0] limit 2
+name        _score
+----------  ------
+east        0.9939
+north-east  0.7809
+(2 rows, 90.25µs)
+fenec&gt; get places select name where year &gt;= 2024 near embed [0.9, 0.1, 0] limit 2
+name  _score
+----  ------
+east  0.9939
+up    0.0000
+(2 rows, 199.75µs)
+fenec&gt; get places select name near embed [0.9, 0.1, 0] exact limit 1
+name  _score
+----  ------
+east  0.9939
+(1 rows, 99.71µs)
+</pre>
+
+<p>The index is <code>@hnsw(cosine)</code>, so <code>_score</code> is the
+cosine similarity: <code>east</code> points where the query does and
+<code>up</code> is at right angles to it. A <code>where</code> narrows the rows
+searched and <code>exact</code> checks every vector instead of walking the
+graph. A real embedding has hundreds of dimensions, <code>vector&lt;768&gt;</code>;
+three keep the example readable. Words and meaning together, <code>fuse</code>,
+are under <a href="fenecql-search.html#hybrid">Hybrid search</a>.</p>
+
+<h2 id="the-vector-clause">The vector clause</h2>
+
+<p><code>near</code> finds the documents whose vector is closest to the one
+you pass. Add a <code>where</code> to search only the rows that match.</p>
+
+<pre data-lang="fenecql">get articles near embed $1 limit 10
+get articles where year >= 2024 near embed $1 ef 200 limit 10
+get articles near embed $1 exact limit 10
+</pre>
+
+<ul>
+  <li><b><code>ef</code> trades speed for accuracy</b> for one query.</li>
+  <li><b><code>exact</code> checks every vector</b>, which is how you measure
+    recall.</li>
+  <li><b>Each row gets a <code>_score</code></b> column.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p><code>ef</code> raises the search beam for this query only, trading latency
+for recall. <code>exact</code> replaces the ANN walk with a full scan, which is
+how you verify recall against ground truth. A query that uses
+<code>near</code> gains a <code>_score</code> column. Over a
+<code>sparse&lt;N&gt;</code> field <code>near</code> ranks by dot product and
+is exact already, so it takes no <code>ef</code> — see <a
+href="#sparse">Sparse vectors</a>.</p>
+
+<p>A filter next to <code>near</code> is planned, not stacked: the filter's
+rows are read only until it is clear whether there are more of them than the
+ANN would measure anyway, and the planner picks between searching that set
+exactly and running the ANN with each candidate tested against the filter.
+The mechanism, and the fallback that keeps it correct, is in <a
+href="concepts.html#a-filter-and-a-vector-together">How it works</a>.</p>
+</details>
+
+<h2 id="quantized">Quantized vector indexes</h2>
+
+<p><code>quant=</code> makes a vector index smaller by storing a compact code
+for each vector. Scores stay exact, because the final order uses the full
+vectors.</p>
+
+<pre data-lang="fenecql">create collection articles (embed vector&lt;768&gt; @hnsw(cosine, quant=int8))
+create index on articles (embed) @hnsw(cosine, quant=bit)
+</pre>
+
+<ul>
+  <li><b><code>int8</code></b> is a quarter of the size; <b><code>bit</code></b>
+    about a thirtieth, and cosine only.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p><code>quant=</code> sets what the index holds of each vector:
+<code>int8</code> a byte a component, a quarter of <code>f32</code>, and
+<code>bit</code> a bit a component, about a thirtieth: the signs of how far
+the vector lies from the nearest of 128 centres the index learns from its
+first 2 048 vectors, which it holds whole until then — cosine only, since
+the vectors are taken at unit length. The documents keep their vectors whole. The codes
+find the candidates, the beam's <code>ef</code> of them, and the documents'
+own vectors put those in order, so <code>_score</code> is the exact distance.
+An int8 code knows how far off it can be, so a candidate is read only while
+it can still make the page; a bit code does not, and the whole beam is read.
+A filtered set small enough to search without the walk is ranked by its codes
+the same way, and <code>exact</code> reads every vector. Bit codes take a
+wider beam: <code>ef_search</code> is 200 there unless it is named. What they save and what they cost is in
+<a href="concepts.html#quantized-indexes">How it works</a>.</p>
+</details>
+
+<h2 id="sparse">Sparse vectors</h2>
+
+<p><code>sparse&lt;N&gt;</code> stores the output of a learned sparse model
+such as SPLADE. <code>near</code> over it finds the documents with the
+largest dot product, exactly.</p>
+
+<pre data-lang="fenecql">create collection passages (body text @text, splade sparse&lt;30522&gt; @inverted)
+put passages {body: "...", splade: "{1037:0.84,2003:1.27,7592:2.1}/30522"}
+get passages near splade $1 limit 10
+get passages match body $1 near splade $2 fuse limit 10
+</pre>
+
+<ul>
+  <li><b>It is written as pgvector's <code>sparsevec</code></b>:
+    <code>{index:value,...}/N</code>, indices from 1.</li>
+  <li><b>Index it with <code>@inverted</code>.</b></li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p><code>sparse&lt;N&gt;</code> holds a vector of <code>N</code> dimensions by
+its non-zero entries alone: what a learned sparse model such as SPLADE gives a
+text, a weight for a few dozen or hundred of its vocabulary's 30 522 words. It
+is written and read in pgvector's <code>sparsevec</code> text form,
+<code>{index:value,...}/N</code> with the indices counted from 1, as a string
+in JSON and in FenecQL; entries come back in index order and
+zeros are dropped. <code>@inverted</code> indexes it as a word index is
+indexed, dimension by dimension, and <code>near</code> over it returns the
+documents with the largest dot product — the exact ones, walked with the
+pruning <code>match</code> uses — and ranks only documents sharing at least one
+dimension with the query. A filter is tested as the lists are merged;
+<code>exact</code> scores every document instead, and <code>fuse</code> takes a
+sparse <code>near</code> as it takes a dense one.</p>
+</details>
+
+<h2 id="a-hybrid-query">A hybrid query</h2>
+
+<pre data-lang="fenecql">get articles select title, year
+  where year >= 2024 and tags has "rust" and not (title ~ "draft")
+  near embed $1 ef 128
+  limit 10
+</pre>

@@ -33,16 +33,19 @@ footer: the two stylesheets name the same classes and tokens (`.top`,
 `.btn`, `--sun`), and a frame keeps each to its own. `_headers` lets the
 site alone frame `/studio/*`, where every other page is `DENY`.
 
-Three placeholders are written into a page as it is read (`filled`): `{{version}}`
+Four placeholders are written into a page as it is read (`filled`): `{{version}}`
 is the release's number, from the workspace's `Cargo.toml` -- the one place
 `make version` writes -- so an install line, an image's tag or a sample's
 banner moves with a release instead of being found and edited;
-`{{docs_map}}` is every page of `NAV` by group, for the docs index; and
+`{{docs_map}}` is every page of `NAV` by group, for the docs index;
 `{{language_tabs}}` is the first example of each HTTP language's tab on
 `languages.html` as the tabs of the HTTP endpoint page, so the two cannot say
 different things (`make languages-test` holds that page's statements to the
 programs it runs, and runs the HTTP page's curl tab as written:
-`integrations/languages/docs_check.py`). All are filled before the claims are checked and before the search and `llms.txt` read
+`integrations/languages/docs_check.py`); and `{{moved}}` is `moved.json` as an
+object literal, for the script on `docs/fenecql` ("Adding a docs page",
+below). All are filled before the claims are checked and before the search and
+`llms.txt` read
 the page, and a version in prose that is a fact about the past (a comparison
 checked against a competitor's page on a day, a benchmark's build) stays as
 written. The Quickstart installs that release, so its steps use only what the
@@ -111,6 +114,8 @@ into a hashed name that means nothing to a reader.
 ```
 site/
   build.py        the generator
+  moved.json      where each section of the old, whole docs/fenecql went
+  check_links.py  every internal link and anchor in dist, and moved.json
   template.html   the page shell; {{placeholders}} are filled per page
   styles.css      the whole design system
   site.js         the sky, the scenes, the language sessions, docs navigation
@@ -285,6 +290,15 @@ it needs, all once:
 
 Every `<h2>` and `<h3>` gets an id and a table-of-contents entry automatically;
 write your own `id="..."` when another page already links to it.
+
+A fragment never reaches the server, so a section that moves to another page
+cannot be redirected there by a rule: `docs/fenecql` was one page of 23 000
+words and is now a tour and eight reference pages, and `moved.json` names, for
+each old fragment, the page and fragment that hold it now. The one script on
+`docs/fenecql` (`{{moved}}`, filled by `build.py`) sends a reader whose
+address has such a fragment there with `location.replace`, and
+`check_links.py` fails a target that was not built. Move a section the same
+way: its heading keeps its `id`, and `moved.json` gets a line.
 
 ## Conventions
 

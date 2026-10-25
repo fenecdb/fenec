@@ -70,7 +70,7 @@ retriever = store.as_retriever(search_kwargs={"k": 8, "mode": "hybrid"})
 search takes <code>mode</code>: <code>"text"</code> ranks by the words alone
 with <code>match</code> and embeds nothing, and <code>"hybrid"</code> runs
 <code>match</code> and <code>near</code> each to their own depth and fuses
-the two rankings (<a href="fenecql.html#hybrid"><code>fuse</code></a>). Their
+the two rankings (<a href="fenecql-search.html#hybrid"><code>fuse</code></a>). Their
 scores are BM25's and the fusion's, not similarities. <code>quant</code>,
 <code>"int8"</code> or <code>"bit"</code> (<code>cosine</code> only), keeps the
 graph over codes, and <code>near</code> still orders by the vectors
@@ -151,7 +151,7 @@ a query takes the modes that need it: <code>TEXT_SEARCH</code> ranks by the
 words alone (<code>match</code>), and <code>HYBRID</code> runs
 <code>match</code> and <code>near</code> each to their own depth —
 <code>hybrid_top_k</code>, or <code>sparse_top_k</code>, deep — and fuses the
-two rankings (<a href="fenecql.html#hybrid"><code>fuse</code></a>). The fusion
+two rankings (<a href="fenecql-search.html#hybrid"><code>fuse</code></a>). The fusion
 adds ranks rather than scores, so <code>alpha</code> has nothing to weigh and
 is not read. <code>quant</code> is taken as the LangChain store takes it.</p>
 
@@ -259,7 +259,7 @@ text and parameters, so the query built again on every render, which is the
 natural way to write one, does not subscribe again unless it asks something
 else; the rows of the query it asked before are not handed out as this one's.
 A query that fails throws while rendering, to the nearest error boundary. A
-query that asks for <a href="fenecql.html#facets">facets</a> has them on
+query that asks for <a href="fenecql-search.html#facets">facets</a> has them on
 its rows, <code>rows.facets.brand</code>, counted over every match: a
 results list and its filter sidebar from one hook, live alike. It
 lives in <code>integrations/react</code>, with React as its one peer

@@ -1,0 +1,601 @@
+<!--
+title: Collections and types — FenecQL — fenecdb
+description: Collections and types in FenecQL: json fields and paths, points, time, collation, case-insensitive text, alter collection and describe.
+-->
+
+<h1>Collections and types</h1>
+<p class="kicker">What a collection declares and what a field holds: json and paths, points, time, collation and case.</p>
+
+<p>A collection declares its fields and their types, and the type decides
+what a field holds, how it compares and which indexes it takes:
+<code>bool</code>, <code>int</code>, <code>float</code>, <code>text</code>,
+<code>bytes</code>, <code>timestamp</code>, lists such as <code>[text]</code>,
+<code>json</code>, <code>geo</code> and the vectors.</p>
+
+<p>Run in <a href="quickstart.html#in-the-shell">the shell</a>, answers and all; the timings are from one run.</p>
+
+<pre data-lang="text">fenec&gt; create collection people (name text collate tr @sorted, email text nocase @unique, meta json);
+collection `people` created
+fenec&gt; put people [{name: "Zeynep", email: "Zeynep@Example.com", meta: {plan: "pro", seats: 3}}, {name: "Çağla", email: "cagla@example.com", meta: {plan: "free", seats: 1}}, {name: "İlker", email: "ilker@example.com", meta: {plan: "free", seats: 1}}, {name: "Irmak", email: "irmak@example.com", meta: {plan: "free", seats: 1}}, {name: "Cem", email: "cem@example.com", meta: {plan: "pro", seats: 5}}];
+5 records (1.43ms)
+fenec&gt; describe people
+people
+  name           text collate tr  @sorted
+  email          text nocase     @unique
+  meta           json          
+fenec&gt; get people select name order name
+name
+------
+Cem
+Çağla
+Irmak
+İlker
+Zeynep
+(5 rows, 112.33µs)
+fenec&gt; get people select email where email = "ZEYNEP@example.com"
+email
+------------------
+Zeynep@Example.com
+(1 rows, 148.46µs)
+fenec&gt; get people select name, meta.plan where meta.seats &gt;= 3 order meta.seats desc
+name    meta.plan
+------  ---------
+Cem     pro
+Zeynep  pro
+(2 rows, 138.71µs)
+fenec&gt; alter collection people add field city text;
+field `city` added to `people`
+fenec&gt; get people select name, city where name = "Irmak"
+name   city
+-----  ----
+Irmak  -
+(1 rows, 125.58µs)
+</pre>
+
+<p><code>describe</code> shows the schema the file holds, and the shell
+prints a null as <code>-</code>. The names come out in Turkish order because
+the field says <code>collate tr</code> (<a href="#collation">Collation</a>); the
+email compares by its case fold because it is <code>nocase</code>
+(<a href="#nocase">Case-insensitive text</a>); <code>meta.plan</code> is a path
+into a <code>json</code> field (<a href="#json">Objects and paths</a>); and the
+field added last reads null in every row written before it, with no
+document rewritten (<a href="#changing-a-collection">Changing a
+collection</a>). The grammar of <code>create collection</code> is under
+<a href="fenecql.html#statements">Statements</a>.</p>
+
+<h2 id="json">Objects and paths</h2>
+
+<p>A <code>json</code> field holds any value JSON does — an object, a list,
+a number, text, <code>true</code>, <code>false</code> or
+<code>null</code> — with no type declared for what is inside. A path
+reads into it wherever a field is read.</p>
+
+<pre data-lang="fenecql">create collection docs (title text, meta json)
+put docs {title: "a", meta: {lang: "tr", source: {site: "x", rank: 3}}}
+
+get docs where meta.lang = "tr" and meta.source.rank &gt;= 2
+get docs select title, meta.source.site order meta.source.rank desc
+set docs {meta.lang: "en"} where title = "a"
+
+create index on docs (meta.lang) @hash
+create index on docs (meta.source.rank) @sorted
+</pre>
+
+<ul>
+  <li><b>A path that leads nowhere is <code>null</code></b>: a key a
+    document does not have, or a value on the way that is not an
+    object.</li>
+  <li><b>A path takes <code>@hash</code>, <code>@unique</code> and
+    <code>@sorted</code></b>, and they answer what the scan would, row for
+    row.</li>
+  <li><b><code>set</code> with a path changes one key</b> and keeps the
+    rest of the object; it makes the object where there is none.</li>
+  <li><b>Typed fields are unchanged.</b> An <code>int</code> or a
+    <code>text</code> field still refuses an object.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>An object's keys are kept sorted and unique: a key given twice — in
+FenecQL, in a JSON body, in a parameter — refuses the write rather than
+keep one of them, since which one a reader keeps differs from reader to
+reader. Its numbers are kept as written, an integer an integer and
+<code>19.99</code> the decimal it is, everywhere one comes in: FenecQL, a
+parameter over HTTP and in the browser, a JSON body, a row
+<code>fenec import</code> reads. A list of numbers alone is read the quick way, into the
+<code>f32</code>s of the vector it nearly always is; where it is given a
+<code>json</code> field, or compared with a path into one, the statement's
+text or the parameter's JSON is read again as written, so
+<code>[0.1, 12345678901]</code> is kept as those two numbers. A vector that
+was never text — a <code>Float32Array</code> handed to the browser module,
+a vector built through the Rust API — is refused there rather than kept as
+numbers it was not given. A timestamp becomes its ISO text, as JSON writes
+one; bytes, a sparse vector and a number that is not finite have no JSON
+and are refused. A value nests at most 64 levels, and a path
+names at most 64 keys past its field: past either a write or a query is
+refused, never cut.</p>
+
+<p>A path is a field's name, a dot, and keys, each a name as a field's is
+(<code>meta.source.rank</code>); a key with a space or a dash in it cannot
+be named, and is reached by reading the whole field. It works in every
+comparison, <code>in</code>, <code>has</code>, <code>~</code> and
+<code>is null</code>, in <code>select</code> — answering under the path's
+text as its column's name — in <code>order</code>, and in
+<code>set</code> and <code>put</code>, which set the one key inside the
+field. A filter binds a path once a query, as it binds a field, and walks
+its keys over each row's bytes, passing the members before the key without
+decoding them. An aggregate and <code>group</code> read a field, not a
+path; a <code>lookup</code>'s keys are fields too. Comparisons are the
+ones every value already has: <code>3</code> equals <code>3.0</code>,
+every number orders below every text, text below a list and a list below
+an object, and <code>null</code> is equal only to <code>null</code>.</p>
+
+<p>An index on a path is a field of its own beside the fields, named by the
+path, and its kind is the field's: <code>@hash</code> keys a value as a
+typed field's does, a whole float filed as the int it equals so that
+<code>3</code> and <code>3.0</code> share a bucket; an equality or an
+<code>in</code> reaches it with null, a boolean, text and a number an
+<code>f64</code> holds exactly, and anything else — an int past
+2<sup>53</sup>, which equals floats near it that no bucket holds — is
+answered by the scan. <code>@unique</code> refuses a value held twice as a
+field's does, <code>3</code> and <code>3.0</code> the same value.
+<code>@sorted</code> orders the numbers as <code>f64</code>s and the text by
+its bytes, every number before every text; a value it has no place for —
+<code>true</code> or <code>false</code>, a list, an object, an int past
+2<sup>53</sup> — is held apart, and while the index holds one it answers
+nothing and the scan does: a wrong order is never what an index costs.
+<code>tests/json.rs</code> holds both to a twin collection without them,
+every filter, order and page, through writes and a reopen. Text, vector
+and sparse indexes stay on the fields that declare their type. On a server
+an index on a path is built under the write lock, as it reads one value a
+row: 11 ms for <code>@hash</code> and 21 for <code>@sorted</code> over
+100 000 documents.</p>
+
+<p>Renaming a <code>json</code> field renames the paths into it, indexes
+and all, and dropping it drops them. In the file a <code>json</code> field
+is type tag 14 and an object value tag 13 — not 11 or 12, which a schema
+writes for a collation and a dropped place — and each index on a path is
+written inside its field's entry, its keys and its kind: a binary from
+before them refuses the file (<i>unknown type tag 14</i>) rather than read
+it. The indexes are derived, as every hash and ordered index is: rebuilt
+from the documents by the first read after an open.</p>
+
+<p>Measured over 100 000 documents of a <code>title</code>, a
+<code>year</code>, a <code>price</code> and a <code>meta</code> object of
+three keys: <code>where meta.lang = "tr"</code> scans in 5.7 ms where the
+same comparison of a text field takes 4.2; <code>meta.source.rank &gt;=
+990</code> in 7.2; both together in 10.4; the first 20 by
+<code>meta.source.rank</code> in 7.3. With <code>@hash</code> and
+<code>@sorted</code> on the two paths: 0.025, 0.009, 0.12 and 0.010 ms. A
+scan of a collection with no <code>json</code> field takes what it took
+before them (3.47 against 3.38 ms by two numbers, 4.17 against 4.21 by a
+text, 3.06 against 3.08 by <code>~</code>, 2.72 against 2.60 for an
+ordered page), and the browser module's filter 1.67 against 1.66.</p>
+</details>
+
+<h2 id="geo">Points</h2>
+
+<p>A <code>geo</code> field holds a point on the earth, <code>[lon,
+lat]</code> in degrees. <code>distance</code> measures in metres,
+<code>within</code> tests a box, and <code>near</code> over the field puts
+rows nearest first. The recipes, and what they cost against PostGIS and
+Redis, are in <a href="/docs/geo">Points and distances</a>.</p>
+
+<pre data-lang="fenecql">create collection places (name text, loc geo @geo)
+put places {name: "Catania", loc: [15.087269, 37.502669]}
+get places select name, distance(loc, $1) as m where distance(loc, $1) &lt;= 2000
+get places where within(loc, [12, 37, 16, 39]) count
+get places select name near loc $1 limit 10
+</pre>
+
+<ul>
+  <li><b><code>distance(a, b)</code></b> is the haversine on a sphere of
+    Redis's radius, 6 372 797.56 m: Redis's <code>GEODIST</code>. PostGIS's
+    sphere, the earth's mean radius, gives 0.03% less. Either side is a
+    point field or a point; a null on either side is null.</li>
+  <li><b><code>within(p, [west, south, east, north])</code></b> holds a
+    point on the box's edge; a west east of its east crosses the
+    antimeridian.</li>
+  <li><b><code>near loc p</code></b> orders by distance, a tie by id, with
+    the metres as <code>_score</code>; <code>exact</code> measures every
+    row, and <code>ef</code>, a graph's, is refused.</li>
+  <li><b><code>@geo</code></b> narrows <code>distance(loc, p) &lt;= r</code>
+    (or <code>&lt;</code>, either way round) and <code>within(loc, box)</code>
+    in an <code>and</code> chain, and walks <code>near</code> nearest first.
+    It is derived, as <code>@sorted</code> is: built by the first read after
+    an open, nothing in the file but the field's declaration.</li>
+  <li><b>A point is refused</b> past 180 degrees of longitude or 90 of
+    latitude, and a list of other than two numbers.</li>
+</ul>
+
+<h2 id="time">Time</h2>
+
+<p>A <code>timestamp</code> field takes an ISO-8601 date or epoch
+milliseconds, and always comes back as ISO-8601 in UTC.</p>
+
+<pre data-lang="fenecql">put events {name: "login", t: "2026-09-19T12:34:56Z"}
+put events {name: "logout", t: 1758285296000}        -- epoch ms
+get events where t >= "2026-01-01" and t < now()
+</pre>
+
+<details class="deep"><summary>Details</summary>
+<p><code>timestamp</code> holds UTC epoch milliseconds as an
+<code>i64</code>. Writes accept both text and numbers; a text literal in a
+comparison is parsed.</p>
+
+<p>The representation is always ISO-8601
+(<code>2026-09-19T12:34:56.789Z</code>), in JSON and in FenecQL alike. The calendar conversion is
+integer arithmetic including leap-year and century rules — no table, no
+dependency.</p>
+
+<p>It exists as a separate type rather than an alias over <code>int</code>
+because <code>ResultSet</code> does not carry the schema, so an alias would
+show every client a raw number.</p>
+</details>
+
+<h2 id="collation">Collation</h2>
+
+<p>Text sorts by its bytes unless you ask otherwise, which is wrong in every
+language. <code>collate und</code> sorts it the way people expect in any
+language, and <code>collate tr</code> in Turkish order.</p>
+
+<pre data-lang="fenecql">get people order name collate und limit 20
+get people order city collate tr desc, name collate tr
+get people select city, count(*) group city order city collate und
+
+create collection people (name text collate und @sorted, city text)
+get people where name &gt; $1 order name limit 20   -- the page after $1
+</pre>
+
+<div class="tbl">
+<table>
+<thead><tr><th><code>order name</code></th><th><code>order name collate und</code></th><th><code>order name collate tr</code></th></tr></thead>
+<tbody>
+<tr><td>Irmak, Zeynep, cem, Çağla, İlker, ılgaz</td><td>Çağla, cem, İlker, Irmak, ılgaz, Zeynep</td><td>cem, Çağla, ılgaz, Irmak, İlker, Zeynep</td></tr>
+<tr><td>Zoë, anna, Ζωή, 山田, Борис, Émile</td><td>anna, Émile, Zoë, Ζωή, Борис, 山田</td><td>anna, Émile, Zoë, Ζωή, Борис, 山田</td></tr>
+</tbody>
+</table>
+</div>
+
+<ul>
+  <li><b>Name it on one key</b> in <code>order</code>, or <b>declare it on a
+    field</b> so every comparison of that field uses it.</li>
+  <li><b>Equality still compares bytes</b>, unless the field is
+    <code>nocase</code> (<a href="#nocase">Case-insensitive text</a>).</li>
+  <li><b>In the browser</b>, data for scripts other than Latin is fetched when
+    first needed.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>Text is ordered by its bytes unless a key says otherwise, and the bytes are
+wrong in every language: every capitalised word comes before every lowercase
+one, an accented letter lands after <code>z</code>, and every script past
+ASCII falls where its code points do. <code>collate und</code> orders the key
+as Unicode's root collation does — CLDR's, which PostgreSQL calls
+<code>und-x-icu</code> — the order every language's starts from: each script
+in a run of its own, its letters in their order, accents and case deciding
+only between words whose letters are the same. A language whose letters sort
+otherwise is a tailoring over it, and <code>collate tr</code> is Turkish,
+PostgreSQL's <code>tr-x-icu</code>: <code>ç</code> after <code>c</code>,
+<code>ğ</code> after <code>g</code>, <code>ı</code> before <code>i</code>
+with <code>I</code> as its capital and <code>İ</code> as the capital of
+<code>i</code>, <code>ö</code>, <code>ş</code> and <code>ü</code> after
+<code>o</code>, <code>s</code> and <code>u</code>.</p>
+
+<p>It compares a level at a time over the whole string, as ICU does: the
+letters, then their accents (<code>kar</code> &lt; <code>kâr</code> &lt;
+<code>kara</code>), then their case (<code>ince</code> &lt; <code>İnce</code>),
+so an accent or a capital only decides between strings whose letters are the
+same. What all three leave equal goes by its bytes, as under a deterministic
+PostgreSQL collation — the order is total, and a page never changes with the
+plan. It applies wherever <code>order</code> does: the query's rows, a
+<code>lookup</code>'s children, an aggregate's groups by their key or a
+<code>min</code> or <code>max</code> of text. A key that holds no text —
+a number, <code>id</code>, <code>count(*)</code> — refuses it rather than
+ignore it.</p>
+
+<p>A field can be declared in a collation, <code>name text collate
+und</code>, and its text is in it wherever it compares: <code>order</code>
+without naming one, <code>&lt;</code>, <code>&lt;=</code>, <code>&gt;</code>
+and <code>&gt;=</code> in <code>where</code>, <code>min</code> and
+<code>max</code>, and a <code>@sorted</code> index over it, which holds that
+order and is walked for it. So a listing pages by the last name it
+showed — <code>where name &gt; $last order name limit 20</code> — and the
+index answers as the scan does, row for row. Equality stays the bytes', since
+the collation ties no two different strings. The collation is the field's:
+it is written with the schema into the file, and <code>describe</code>
+shows it. A
+<code>@sorted</code> field without one keeps its bytes' order, so a key
+collated in the query is sorted rather than walked, and a comparison in
+<code>where</code> compares bytes.</p>
+
+<p>Over a million Turkish names (160 797 of them distinct) a comparison costs
+33.5 ns in <code>tr</code> and 35.2 in <code>und</code> where the bytes cost
+6.7, because it starts where two strings part — <code>Ahmet Yılmaz</code>
+against <code>Ahmet Kaya</code> is <code>Y</code> against <code>K</code> —
+which took it from 68 ns, and a Latin letter's weights are made once per
+collation and read, where looking each up through the tailoring and the
+root's tables took it to 41:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>1 000 000 names</th><th class="n">bytes</th><th class="n"><code>collate tr</code></th><th class="n"><code>collate und</code></th><th class="n">PostgreSQL, <code>"C"</code></th><th class="n">PostgreSQL, <code>"tr-x-icu"</code></th></tr></thead>
+<tbody>
+<tr><td>a page, <code>limit 20</code></td><td class="n">94.7 ms</td><td class="n">124 ms</td><td class="n">130 ms</td><td class="n">116 ms</td><td class="n">136 ms</td></tr>
+<tr><td>all of them in order</td><td class="n">374 ms</td><td class="n">890 ms</td><td class="n">925 ms</td><td class="n">506 ms</td><td class="n">1 208 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>fenecdb in process, PostgreSQL 17 by its own execution time with the sort
+in memory; both on one core (<code>make collate-bench</code>).</p>
+
+<div class="note">
+  <p><b>The weights are ICU's own, for every assigned code point.</b>
+  <code>tools/collate/gen.py</code> reads them out of ICU 76.1 into
+  <code>crates/fenec-core/src/collate/</code>: the root's cut into chunks by
+  script, and each tailoring as what it changes. Han ideographs sort in the
+  radical-and-stroke order ICU's root gives them, those of the other planes
+  among them; a Hangul syllable sorts as its jamo; and two or three
+  characters ICU sorts as one sort as one — a letter and a mark it composes
+  with (<code>c</code> and U+0327 is <code>ç</code>), a vowel sign written in
+  two parts, a Thai or Lao vowel written before the consonant it follows in
+  speech. An unassigned or private code point goes where ICU puts one. Checked
+  against ICU itself over 1 250 000 random pairs in every script, of which
+  five sort apart, and against <code>Intl.Collator("und")</code> over two thousand
+  words in the browser module on every test run. What it does not do is ICU's
+  normalisation: a mark that composes with its letter across another mark
+  between them, or with marks out of their canonical order, sorts as a mark
+  of its own — those five.</p>
+  <p>ICU numbers every ideograph and most alphabets' letters one by one —
+  133 535 primary weights, which no packed entry has the bits for — so
+  consecutive code points that alone give consecutive weights share a rank
+  and are told apart by their code points, and a run of them is held as one
+  range; a table's words are written as differences in LEB128 besides:
+  154 KB for every script, 324 KB plain, which a native build carries whole
+  — 161 KB of the command line's 1040.</p>
+</div>
+
+<p>The browser module carries the Latin chunk and fetches the others as a
+page first needs them, from <code>collate/</code> beside the module (<a
+href="javascript.html#collation">JavaScript</a>). A statement that would
+compare text of a script whose data it has not got is refused, the chunk
+named, rather than answered in another order; a write is refused before it
+changes anything, and an image whose collated text needs a chunk loads once
+it is there — a <code>@sorted</code> index built without it would be out of
+order.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>chunk</th><th class="n">bytes</th><th class="n">gzip</th><th class="n">brotli</th><th>holds</th></tr></thead>
+<tbody>
+<tr><td><code>latin</code></td><td class="n">9.0 KB</td><td class="n">4.9 KB</td><td class="n">4.2 KB</td><td>ASCII, Latin-1, Extended-A to -C, Vietnamese, punctuation, currency; in the module</td></tr>
+<tr><td><code>greek</code>, <code>cyrillic</code></td><td class="n">3.6, 2.1 KB</td><td class="n">1.6, 1.0 KB</td><td class="n">1.4, 0.9 KB</td><td>Greek with polytonic, Cyrillic</td></tr>
+<tr><td><code>middle-east</code></td><td class="n">7.3 KB</td><td class="n">3.6 KB</td><td class="n">3.3 KB</td><td>Armenian, Hebrew, Arabic, Syriac, Thaana, N'Ko</td></tr>
+<tr><td><code>indic</code></td><td class="n">3.0 KB</td><td class="n">1.6 KB</td><td class="n">1.5 KB</td><td>Devanagari to Sinhala</td></tr>
+<tr><td><code>southeast-asia</code></td><td class="n">8.5 KB</td><td class="n">2.2 KB</td><td class="n">2.2 KB</td><td>Thai, Lao, Tibetan, Myanmar, Khmer, Javanese …</td></tr>
+<tr><td><code>east-asia</code></td><td class="n">8.2 KB</td><td class="n">4.6 KB</td><td class="n">4.2 KB</td><td>Hangul, kana, Bopomofo, Yi, full-width forms</td></tr>
+<tr><td><code>han</code>, <code>han-ext</code></td><td class="n">31.1, 59.0 KB</td><td class="n">14.3, 27.3 KB</td><td class="n">12.7, 24.9 KB</td><td>ideographs of this plane, of planes 2 and 3</td></tr>
+<tr><td><code>symbols</code></td><td class="n">6.9 KB</td><td class="n">2.8 KB</td><td class="n">2.6 KB</td><td>arrows, mathematics, emoji, mathematical letters</td></tr>
+<tr><td><code>other</code>, <code>smp</code></td><td class="n">5.7, 9.8 KB</td><td class="n">3.0, 5.0 KB</td><td class="n">2.8, 4.8 KB</td><td>every other script, of this plane and the next</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The root and its chunks made the browser module 17.5 KB larger, 8.2 KB
+under gzip and 6.8 KB under brotli: the Latin chunk, the Turkish tailoring
+over it, and the code that reads them and has the others fetched. Every
+other chunk together is 145 KB, 67 KB gzip, 61 KB brotli. Their words are
+written as differences, which gzip and brotli take a third off: plain they
+were 102 and 90 KB. The Latin chunk alone comes out 0.3 KB larger under
+gzip that way, 0.9 KB under brotli, and 2.9 KB smaller in the module.</p>
+</details>
+
+<h2 id="nocase">Case-insensitive text: <code>nocase</code></h2>
+
+<p>A text field declared <code>nocase</code> compares by its case fold
+wherever it is compared, and keeps the text as it was written: an email
+under <code>@unique</code> takes <code>Alice@x.com</code> once, and finds it
+as <code>alice@X.COM</code>. It is PostgreSQL's <code>citext</code>, with
+Unicode's case folding where <code>citext</code> has <code>lower()</code>.</p>
+
+<pre data-lang="fenecql">create collection users (email text nocase @unique, name text collate tr nocase @sorted)
+put users {email: "Alice@Example.com", name: "İsmail"}
+
+get users where email = "alice@example.COM"    -- the row, its email as written
+put users {email: "ALICE@example.com"}          -- refused: users.email is unique
+put users {email: "alice@example.com"} if absent   -- passed over, and not counted
+get users where name = "ismail"                 -- the row: İ is the capital of i in Turkish
+get users select name order name limit 20       -- in Turkish order, case aside
+</pre>
+
+<ul>
+  <li><b>Everything that compares it folds it:</b> <code>=</code>,
+    <code>!=</code>, <code>in</code>, <code>&lt;</code> and
+    <code>&gt;</code>, <code>~</code>; <code>@hash</code>,
+    <code>@unique</code>, <code>@sorted</code> and an index over several
+    fields; <code>order</code>, <code>group</code>,
+    <code>count(distinct …)</code>, <code>facet</code>, <code>min</code>
+    and <code>max</code>; a <code>lookup</code> on it; a scoped token's
+    rules over it.</li>
+  <li><b>It is kept as written.</b> A row reads back as it was put. A group
+    or a facet value is one fold, shown as the first row holding it — in id
+    order — wrote it.</li>
+  <li><b>Unicode's full case folding:</b> <code>ß</code>, <code>ẞ</code>,
+    <code>SS</code> and <code>ss</code> are one, a final <code>ς</code> is
+    <code>σ</code>, <code>ﬁ</code> is <code>fi</code>. In <code>collate
+    tr</code>, Turkish's: <code>I</code> is the capital of <code>ı</code>,
+    <code>İ</code> of <code>i</code>.</li>
+  <li><b>Case alone.</b> Accents, width and how a text is composed are not
+    case: <code>résumé</code> is not <code>resume</code>, <code>Ａ</code> is
+    <code>ａ</code> and not <code>A</code>, and <code>é</code> as one code
+    point is not <code>e</code> and a combining accent.</li>
+  <li><b>A text field's.</b> Not a list's or a <code>json</code> field's.
+    Made <code>nocase</code> or no longer, a field is built again — the
+    schema check's <code>rebuild</code> — which a <code>@unique</code> one
+    refuses when two of its values would become one.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>The fold is Unicode's full case folding, the <code>C</code> and
+<code>F</code> mappings of CaseFolding.txt, which Python's
+<code>str.casefold()</code> is too, and it is held to that at every code
+point (<code>crates/fenec-core/tests/nocase.rs</code> reads Python's own
+fold of each). Full rather than simple folding, which maps one code point to
+one: simple folding keeps <code>straße</code> apart from
+<code>STRASSE</code>, which ICU's case-insensitive comparison and every
+German reader find equal. A field in <code>collate tr</code> folds by
+Turkish's <code>T</code> mappings over it, as a Turkish reader expects:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th></th><th><code>nocase</code></th><th><code>collate tr nocase</code></th></tr></thead>
+<tbody>
+<tr><td><code>Alice</code>, <code>ALICE</code>, <code>alice</code></td><td>one</td><td>one</td></tr>
+<tr><td><code>straße</code>, <code>STRASSE</code>, <code>STRAẞE</code></td><td>one</td><td>one</td></tr>
+<tr><td><code>ΟΔΟΣ</code>, <code>οδος</code>, <code>οδοσ</code></td><td>one</td><td>one</td></tr>
+<tr><td><code>ᏣᎳᎩ</code>, <code>ꮳꮃꭹ</code> (Cherokee)</td><td>one</td><td>one</td></tr>
+<tr><td><code>ISTANBUL</code>, <code>istanbul</code></td><td>one</td><td>apart</td></tr>
+<tr><td><code>ISTANBUL</code>, <code>ıstanbul</code></td><td>apart</td><td>one</td></tr>
+<tr><td><code>İstanbul</code>, <code>istanbul</code></td><td>apart: <code>İ</code> folds to <code>i</code> and a combining dot, as its decomposed spelling does</td><td>one</td></tr>
+<tr><td><code>ＡＢＣ</code>, <code>ａｂｃ</code> / <code>abc</code></td><td>one / apart</td><td>one / apart</td></tr>
+<tr><td><code>résumé</code>, <code>resume</code>; <code>é</code>, <code>e</code>+U+0301</td><td>apart</td><td>apart</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>A <code>nocase</code> field in a collation orders by the collation over
+the folds — <code>collate tr nocase</code> puts <code>ılık</code> before
+<code>İnce</code> and finds <code>ince</code> equal to the second — so its
+order and its equality agree: a collation tells every two different texts
+apart, and so it ties exactly the texts that fold to one, which come out
+in id order. Without a collation it orders by the folds' bytes. A query's
+<code>collate</code> orders it in another collation, still by its folds.
+<code>~</code>, which ignores case on any text by lowercasing both sides,
+asks of a <code>nocase</code> field whether its fold holds the needle's:
+<code>straße ~ "SS"</code>.</p>
+
+<p>Its indexes hold the folds: a <code>@hash</code> or <code>@unique</code>
+bucket every spelling of one text, a <code>@sorted</code> index and an
+index over several fields their order, so an equality, an
+<code>in</code>, a range and an <code>order … limit</code> walk are answered
+as the scan answers them, row for row — a test holds every filter, order,
+group, facet and unique index over mixed-case data in ASCII, Turkish,
+German, Greek, Cherokee and full width to a twin collection holding Python's
+folds in plain fields. A <code>lookup</code> finds a child by its key as the
+child's field compares: a <code>nocase</code> one by the parent's value's
+fold. The schema writes the word into the file (a binary from before refuses
+it), <code>describe</code>, <code>GET /_schema?as=fenecql</code> and the
+declared schema carry it, a replica — a server's or a synced page's —
+compares as the primary does, and <code>fenec import</code> takes
+PostgreSQL's <code>citext</code> and SQLite's <code>COLLATE NOCASE</code>
+as it.</p>
+
+<p>What folding costs, over 100 000 rows (<code>make nocase-bench</code>:
+a plain field holding one spelling and asked it, a <code>nocase</code> one
+holding a mix and asked another; names a third past ASCII):</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>100 000 rows</th><th class="n">plain</th><th class="n"><code>nocase</code></th></tr></thead>
+<tbody>
+<tr><td>a put, asking <code>@unique</code></td><td class="n">1 209 ns</td><td class="n">1 200 ns</td></tr>
+<tr><td>an email by <code>@unique</code></td><td class="n">1.08 µs</td><td class="n">1.16 µs</td></tr>
+<tr><td>a city's rows counted by <code>@hash</code></td><td class="n">3.15 µs</td><td class="n">3.27 µs</td></tr>
+<tr><td>a name by the scan</td><td class="n">5.47 ms</td><td class="n">6.79 ms</td></tr>
+<tr><td>a name's part by <code>~</code></td><td class="n">12.7 ms</td><td class="n">10.4 ms</td></tr>
+<tr><td>an order by name, a page, by the scan</td><td class="n">8.48 ms</td><td class="n">16.2 ms</td></tr>
+<tr><td>rows by city, <code>group</code></td><td class="n">7.22 ms</td><td class="n">7.23 ms</td></tr>
+<tr><td>a facet of names by the scan</td><td class="n">6.89 ms</td><td class="n">8.32 ms</td></tr>
+<tr><td><code>in</code> a list of 10 names, by the scan</td><td class="n">6.90 ms</td><td class="n">11.9 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>An index lookup folds the one value it is asked. A scan folds a row only
+as far as it differs from the value — mostly its first character — with
+nothing allocated; <code>~</code> folds it whole, and still comes out
+quicker than lowercasing both sides. An order folds each row's key once,
+then sorts the folds; a <code>@sorted</code> index holds them folded and is
+walked instead. The fold is the standard library's lowercase mapping, and
+for the 297 code points whose fold is not their lowercase — 41 runs — its
+lowercase, uppercase and lowercase again: no table of its own beyond those
+runs. The browser module grew 11.5 KB, 5.0 KB gzip, 3.7 KB brotli — the
+engine's indexes, filters, groups, facets and orders 6.4 KB of it, the fold
+and its comparisons 2.1 — and a collection without a <code>nocase</code>
+field reads and writes as it did.</p>
+</details>
+
+<h2 id="changing-a-collection">Changing a collection</h2>
+
+<p>A collection takes a field, lets one go, or renames one, and none of it
+rewrites a document: it is as quick over a million documents as over
+none.</p>
+
+<pre data-lang="fenecql">alter collection orders add field note text
+alter collection orders add field code text @unique
+alter collection orders drop field note
+alter collection orders rename field total to amount
+</pre>
+
+<ul>
+  <li><b>A field added reads <code>null</code></b> in every document
+    written before it, and cannot be <code>required</code>.</li>
+  <li><b>A field dropped is gone</b> from every read and write, and its
+    index with it. <code>compact</code> gives its space back.</li>
+  <li><b>A type does not change in place.</b> Add a field of the new type,
+    <code>set</code> it from the old one, and drop the old one.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>A document is its values one after another in field order, so what a
+change costs is what it does to that order. A field added goes last: a
+document written before it ends before the field's place, and reads
+<code>null</code> there. A rename is the schema alone. A field dropped
+leaves its place in the documents written before the drop — skipped on
+read, written as <code>null</code> after it, refused by name everywhere —
+and <code>compact</code> writes every document without it, copying each
+other value as its bytes stand. A field added under a dropped one's name is
+a new field: the old values stay in the dropped place, and the new field
+reads <code>null</code> until it is written. A change of type is the one
+thing that would rewrite every document under the write lock, and is not
+done.</p>
+
+<p>Each is a write as a <code>create index</code> is: one of a block, put
+back by its <code>ROLLBACK</code> with the writes after it, seen by a
+subscriber as a schema change, applied by a replica, carried by the change
+stream (<code>op: "alter"</code>, the documents after it read by the
+schema it made). In the file it is record kind 12, and a dropped place a
+nameless field of type tag 12, both of which a binary from before them
+refuses rather than read the fields after a dropped one a place early. The
+index of a field added is built over the documents there, every one of them
+<code>null</code>; a dropped field's goes, and a renamed one's goes with
+the name, a vector field's graph included.</p>
+
+<p>Measured over a million rows in memory: an add, a rename and a drop take
+0.025, 0.021 and 0.004 ms. Reading a field past where a document ends costs
+nothing a scan can measure: five scans of the million took 21.2 to 39.1 ms
+before the feature and 21.6 to 39.3 after, from 1.7% slower to 1.7% faster
+by the scan — as the same build with the reads written as before was,
+which makes it where the code lands, not what it does — and the browser
+module's scan of 20 000 rows 1.70 ms against 1.71. A <code>compact</code> that takes
+a dropped field out took 95 ms against 56 for one with none to take: it
+writes each document again rather than copy it. On a server it holds the
+write lock, where a compact otherwise runs beside the database.</p>
+</details>
+
+<h2 id="inspecting-the-database">Inspecting the database</h2>
+
+<pre data-lang="fenecql">collections
+describe articles
+compact articles
+</pre>
+
+<p><code>compact</code> drops deleted data and rewrites the file.</p>
+
+<details class="deep"><summary>Details</summary>
+<p><code>compact</code> drops the dead records and rewrites the file. The
+indexes stand — the documents are the same ones, and every index is keyed by
+id — except a vector graph holding tombstones, which is rebuilt: nothing else
+takes a deleted or rewritten document's node out of it. See
+<a href="limits.html#index-build-open-and-maintenance">Limits</a>.</p>
+</details>

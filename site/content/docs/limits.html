@@ -27,7 +27,7 @@ behaviour worth knowing before it surprises you.</p>
   <li><b>Typed fields, and <code>json</code> where a shape is not
     fixed.</b> A <code>json</code> field holds objects, lists and scalars,
     and a path (<code>meta.lang</code>) reads into it
-    (<a href="/docs/fenecql#json">Objects and paths</a>).</li>
+    (<a href="/docs/fenecql-schema#json">Objects and paths</a>).</li>
   <li><b>No TLS.</b> Put a TLS terminator in front of any port off the
     machine (<a href="/docs/server">Server</a>).</li>
 </ul>
@@ -36,13 +36,13 @@ behaviour worth knowing before it surprises you.</p>
 one file, multi-writer replication, a field's type changed in place (it
 would rewrite every document under the write lock). Not done yet, and
 planned: TLS, in the repository's <code>ROADMAP.md</code>. A row's
-expiry is <a href="/docs/fenecql#ttl"><code>@ttl</code></a>, a filter by
+expiry is <a href="/docs/fenecql-indexes#ttl"><code>@ttl</code></a>, a filter by
 another collection's rows is
-<a href="/docs/fenecql#subqueries"><code>in (get …)</code></a>, a unique field is
-<a href="/docs/fenecql#indexes"><code>@unique</code></a>, a field is
+<a href="/docs/fenecql-lookup#subqueries"><code>in (get …)</code></a>, a unique field is
+<a href="/docs/fenecql-indexes#indexes"><code>@unique</code></a>, a field is
 added, dropped or renamed with
-<a href="/docs/fenecql#changing-a-collection"><code>alter collection</code></a>,
-and nested objects are a <a href="/docs/fenecql#json"><code>json</code>
+<a href="/docs/fenecql-schema#changing-a-collection"><code>alter collection</code></a>,
+and nested objects are a <a href="/docs/fenecql-schema#json"><code>json</code>
 field</a>.</p>
 
 <details class="deep"><summary>Details</summary>
@@ -50,7 +50,7 @@ field</a>.</p>
 it is cheaper to read about than to discover. The few that are planned say
 so.</p>
 
-<p>Relations are <a href="/docs/fenecql#the-lookup-clause"><code>lookup</code></a>
+<p>Relations are <a href="/docs/fenecql-lookup#the-lookup-clause"><code>lookup</code></a>
 rather than JOIN: it attaches a collection's matching documents to the row they
 belong to, which is one bucket probe per parent and a <code>limit</code> that
 counts children per parent. It chains up to 8 levels, and
@@ -98,12 +98,12 @@ right; so does going past the two <code>json</code> depths.</p>
 <thead><tr><th>Limit</th><th class="n">Value</th><th>Note</th></tr></thead>
 <tbody>
 <tr><td><code>near</code>, <code>match</code>, <code>fuse</code> result (<code>limit + offset</code>)</td><td class="n"><b>10 000 rows</b></td><td>a query error when exceeded, by a number written or a parameter's (<code>limit $2</code>); without <code>limit</code>, the default top-k applies</td></tr>
-<tr><td>words one word of a <a href="/docs/fenecql#typos"><code>match ... fuzzy</code> or <code>prefix</code></a> reaches</td><td class="n"><b>10 000</b></td><td>the word itself among them; a query error naming the word past it, never some of them taken — a search box sends its second letter, or its first over a smaller vocabulary (FiQA's 80 426 words: <code>s</code> reaches 7 020)</td></tr>
+<tr><td>words one word of a <a href="/docs/fenecql-search#typos"><code>match ... fuzzy</code> or <code>prefix</code></a> reaches</td><td class="n"><b>10 000</b></td><td>the word itself among them; a query error naming the word past it, never some of them taken — a search box sends its second letter, or its first over a smaller vocabulary (FiQA's 80 426 words: <code>s</code> reaches 7 020)</td></tr>
 <tr><td>edits <code>fuzzy N</code> takes</td><td class="n"><b>2</b></td><td>and only what a word's length allows: none under 5 characters, one up to 8; past 2, a parse or query error</td></tr>
 <tr><td><code>rerank</code> candidates, <code>fuse</code> candidates a side</td><td class="n"><b>10 000</b></td><td>a query error when exceeded; never fewer than <code>limit + offset</code></td></tr>
 <tr><td>expression depth</td><td class="n"><b>512 levels</b></td><td>parentheses <i>and</i> <code>and</code>/<code>or</code> chains count</td></tr>
 <tr><td><code>lookup</code> chain depth</td><td class="n"><b>8 levels</b></td><td>a query error when exceeded; the parser, the check and the engine all recurse per level</td></tr>
-<tr><td>fields of a <a href="/docs/fenecql#the-lookup-clause"><code>lookup</code> key</a></td><td class="n"><b>8</b></td><td>as many as an index over several fields has parts, whose first ones they must be; refused past it, naming the index to declare</td></tr>
+<tr><td>fields of a <a href="/docs/fenecql-lookup#the-lookup-clause"><code>lookup</code> key</a></td><td class="n"><b>8</b></td><td>as many as an index over several fields has parts, whose first ones they must be; refused past it, naming the index to declare</td></tr>
 <tr><td><code>in (get …)</code> values</td><td class="n"><b>100 000</b></td><td>distinct values, each counted once however many rows hold it; a query error naming the bound when the inner <code>get</code> finds more; never a set cut short</td></tr>
 <tr><td>a policy rule's <a href="/docs/http#scoped-access"><code>in (get …)</code></a> values</td><td class="n"><b>1 000</b></td><td>as a list claim's: answered before each statement its token sends, so a query error naming the bound past it, never a list cut short</td></tr>
 <tr><td><code>in (get …)</code> nesting</td><td class="n"><b>4 levels</b></td><td>a query error when exceeded; each level runs a query before the one around it</td></tr>
@@ -111,7 +111,7 @@ right; so does going past the two <code>json</code> depths.</p>
 <tr><td>ranges of one <code>facet ... ranges</code></td><td class="n"><b>10 000</b></td><td>a query error past 10 001 bounds; every range answers</td></tr>
 <tr><td><code>json</code> value nesting</td><td class="n"><b>64 levels</b></td><td>objects and lists inside one another; a write or a JSON text deeper is refused, never cut</td></tr>
 <tr><td>path length</td><td class="n"><b>64 keys</b></td><td>past its field (<code>meta.a.b</code> is two); a query error, since no value nests deeper</td></tr>
-<tr><td>fields of an <a href="/docs/fenecql#composite">index over several fields</a></td><td class="n"><b>8</b></td><td>refused past it, and under 2: one field's index is its own <code>@sorted</code> or <code>@unique</code></td></tr>
+<tr><td>fields of an <a href="/docs/fenecql-indexes#composite">index over several fields</a></td><td class="n"><b>8</b></td><td>refused past it, and under 2: one field's index is its own <code>@sorted</code> or <code>@unique</code></td></tr>
 <tr><td>spans the <code>in</code> lists over an index's parts make</td><td class="n">256</td><td>the elements of each, multiplied; past it the list is tested row by row, never cut</td></tr>
 <tr><td>session stack (<code>fenec-server</code>)</td><td class="n">8 MiB</td><td>virtual; the deepest expression wants ~750 KiB in release, ~5 MiB in debug</td></tr>
 <tr><td>segment size</td><td class="n">8 MiB</td><td>sealed when full, a new one is opened</td></tr>
@@ -122,7 +122,7 @@ right; so does going past the two <code>json</code> depths.</p>
 <tr><td>parallel build threshold</td><td class="n">1024 vectors</td><td>below it, the serial path</td></tr>
 <tr><td>gap in an externally given <code>id</code></td><td class="n">4096</td><td>a larger jump falls into a sparse map rather than a dense array</td></tr>
 <tr><td><code>timestamp</code></td><td class="n">1 ms, i64</td><td>±2.9×10<sup>8</sup> years; microseconds truncated, always UTC</td></tr>
-<tr><td><a href="/docs/fenecql#functions"><code>bucket</code> by a named zone</a></td><td class="n">from 2000</td><td>IANA's rules of the build's tzdata (2026c); a time before 2000 is a query error, never answered by rules the build does not hold; an offset written out (<code>'+03:00'</code>) answers any time</td></tr>
+<tr><td><a href="/docs/fenecql-aggregates#functions"><code>bucket</code> by a named zone</a></td><td class="n">from 2000</td><td>IANA's rules of the build's tzdata (2026c); a time before 2000 is a query error, never answered by rules the build does not hold; an offset written out (<code>'+03:00'</code>) answers any time</td></tr>
 <tr><td><code>vector&lt;N, f16&gt;</code></td><td class="n">±65 504</td><td>~3 decimal digits; outside it, values silently become <code>inf</code> or 0</td></tr>
 <tr><td><code>geo</code> point</td><td class="n">±180°, ±90°</td><td>two <code>f64</code>s kept as written; past either range a write is refused, never wrapped</td></tr>
 <tr><td><code>sparse&lt;N&gt;</code> dimension</td><td class="n">10<sup>9</sup></td><td>pgvector's; the weights are <code>f32</code>, finite, and a zero is dropped</td></tr>
@@ -439,7 +439,7 @@ what you might expect.</p>
     in place. A scan over one folds each row as far as it is compared — a
     name by the scan 5.5 → 6.8 ms over 100 000 rows — and an order without a
     <code>@sorted</code> index folds each row's key once, 8.5 → 16.2 ms
-    (<a href="fenecql.html#nocase">Case-insensitive text</a>).</li>
+    (<a href="fenecql-schema.html#nocase">Case-insensitive text</a>).</li>
   <li><code>near</code> and <code>order</code> cannot be used together;
     <code>near</code> determines the ordering by similarity.</li>
   <li>A query vector can be given three ways: a vector, a list, or pgvector's

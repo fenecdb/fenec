@@ -17,7 +17,7 @@ found it, and <code>require</code> makes that count a condition of its
 its place the moment it does. And every write can be watched: a
 subscription is sent the rows of a shape as they change, and
 <code>/_changes</code> every write on disk. See <a
-href="/docs/fenecql#writes">Writes that read the row</a> for the
+href="/docs/fenecql-writing#writes">Writes that read the row</a> for the
 rules.</p>
 
 <p>Every FenecQL block on this page is run, statement by statement, by a
@@ -350,10 +350,10 @@ set docs {body: "other", version: version + 1} where id = 7 and version = 1 requ
   <li><b>In a <code>/batch</code>, add <code>require 1</code>:</b> a 0
     would let the statements after it go on, where a lost race should stop
     them. With it the write that found another version is refused (412) and
-    the batch is put back whole (<a href="/docs/fenecql#require">Writes that
+    the batch is put back whole (<a href="/docs/fenecql-writing#require">Writes that
     must find their rows</a>). A <code>get … require 1</code> guards a
     batch on a value it does not write (<a
-    href="/docs/fenecql#read-require">A read that must find its
+    href="/docs/fenecql-writing#read-require">A read that must find its
     rows</a>).</li>
   <li><b>Costs:</b> a write that wins 1.13 us, one that loses
     0.66.</li>
@@ -375,7 +375,7 @@ del sessions where token = "s-81f2"                         -- → 1: signed out
 <ul>
   <li><b>An idle session is gone at once</b> for every read, thirty
     minutes after it was last seen, and the server's sweeper deletes it
-    one to two minutes later (<a href="/docs/fenecql#ttl">Rows that
+    one to two minutes later (<a href="/docs/fenecql-indexes#ttl">Rows that
     expire</a>).</li>
   <li><b>Read and renewed in one</b> by <code>set … returning</code>: the
     row as written comes back, and a session already gone answers no

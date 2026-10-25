@@ -11,15 +11,22 @@ renamed, or a heading whose id changed, otherwise leaves links that answer
 other hundreds of times, and no one clicks them all after a rename. External
 links are not fetched: a build must not depend on the network.
 
+The fragments `docs/fenecql` once held (`moved.json`) are held to the same:
+each has to name a page and an id that were built, and none may still be an
+id of `docs/fenecql`, whose script would send a reader away from a section
+that is there.
+
 Standard library only, as `build.py` is. Exits 1 and lists every broken link.
 """
 
 import html.parser
+import json
 import os
 import sys
 import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+MOVED = os.path.join(HERE, "moved.json")
 
 
 class Page(html.parser.HTMLParser):
@@ -96,6 +103,19 @@ def main():
                 ids = pages[target].ids if target in pages else set()
                 if fragment not in ids:
                     broken.append(f"{rel}:{line}: {href} -> no id `{fragment}`")
+    old = pages.get(os.path.join(dist, "docs", "fenecql.html"))
+    with open(MOVED, encoding="utf-8") as f:
+        moved = json.load(f)
+    for fragment, target in sorted(moved.items()):
+        checked += 1
+        name, _, where = target.partition("#")
+        path = os.path.normpath(os.path.join(dist, "docs", name + ".html"))
+        if path not in pages:
+            broken.append(f"moved.json: {fragment} -> {target}: no such page")
+        elif where and where not in pages[path].ids:
+            broken.append(f"moved.json: {fragment} -> {target}: no id `{where}`")
+        if old is not None and fragment in old.ids:
+            broken.append(f"moved.json: {fragment} is an id docs/fenecql still has")
     for b in broken:
         print(b)
     print(f"{checked} internal links over {len(pages)} pages, {len(broken)} broken")

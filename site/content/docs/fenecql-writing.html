@@ -1,0 +1,422 @@
+<!--
+title: Writing data — FenecQL — fenecdb
+description: Writing with FenecQL: put, insert, set and del, upserts with if absent else set, values that read the row, require N, returning, and writes that pick their rows with order and limit.
+-->
+
+<h1>Writing data</h1>
+<p class="kicker"><code>put</code>, <code>insert</code>, <code>set</code> and <code>del</code>, and how a write says what it expects to find.</p>
+
+<p>A write names a collection and answers how many rows it wrote:
+<code>put</code> and <code>insert</code> add documents, <code>set</code> changes
+the rows a <code>where</code> keeps, and <code>del</code> removes them.</p>
+
+<p>Run in <a href="quickstart.html#in-the-shell">the shell</a>, answers and all; the timings are from one run.</p>
+
+<pre data-lang="text">fenec&gt; create collection stock (sku text @unique, qty int);
+collection `stock` created
+fenec&gt; put stock [{sku: "tea", qty: 10}, {sku: "jam", qty: 2}];
+2 records (152.00µs)
+fenec&gt; insert stock {sku: "tea", qty: 1}
+error: duplicate: `stock.sku` is unique, and document 1 holds "tea" already
+fenec&gt; put stock {sku: "tea", qty: 1} if absent;
+0 records (94.58µs)
+fenec&gt; put stock {sku: "tea", qty: 5} if absent else set {qty: qty + new.qty} returning sku, qty;
+sku  qty
+---  ---
+tea  15
+(1 rows, 157.00µs)
+fenec&gt; set stock {qty: qty - 3} where sku = "tea" and qty &gt;= 3 require 1 returning sku, qty;
+sku  qty
+---  ---
+tea  12
+(1 rows, 194.00µs)
+fenec&gt; set stock {qty: qty - 3} where sku = "jam" and qty &gt;= 3 require 1
+error: unmet: `set stock` wrote 0 rows, and requires 1
+fenec&gt; del stock where qty &lt; 3 returning sku
+sku
+---
+jam
+(1 rows, 115.71µs)
+fenec&gt; get stock select sku, qty
+sku  qty
+---  ---
+tea  12
+(1 rows, 85.21µs)
+</pre>
+
+<p><code>insert</code> never writes over a row and is refused when a
+<code>@unique</code> value or an id is taken; <code>put … if absent</code> passes
+over such a row and says it wrote none, and <code>else set</code> changes it
+instead, an upsert in one statement. A <code>set</code> can read the row it
+writes, <code>require N</code> makes the count a condition and refuses the
+statement, and the batch it is in, when it is not met, and
+<code>returning</code> answers the rows written or removed. The sections
+below take each in turn, and the last ones put several statements in one
+batch.</p>
+
+<h2 id="writes">Writes that read the row</h2>
+
+<p>A value in a <code>set</code> can be an expression over the row it
+writes: its fields, parameters and functions, with <code>+</code>
+<code>-</code> <code>*</code> <code>/</code>. Every write answers how many
+rows it changed, so a write that names what it expects to find says
+whether it found it.</p>
+
+<pre data-lang="fenecql">set hits {n: n + 1, seen: now()} where key = "ip1"      -- an increment
+set hits {n: coalesce(n, 0) + $1} where key = $2         -- from nothing, by a parameter
+set docs {body: $1, version: version + 1}
+  where id = $2 and version = $3                          -- compare-and-set: 1 or 0
+put locks {name: "nightly", owner: $1, at: now()} if absent   -- 1 if taken, 0 if held
+insert journal {entry: $1 + ":dr", amount: 0 - $2}           -- two texts joined
+</pre>
+
+<ul>
+  <li><b>An increment is atomic.</b> The row is read and written under the
+    write lock, and there is one writer, so increments from any number of
+    clients all land.</li>
+  <li><b>A field read is the row as it was.</b> In <code>{n: n + 1, m:
+    n}</code> both read the old <code>n</code>; a name on the value side is
+    a field, a quoted string a string.</li>
+  <li><b><code>null</code> stays <code>null</code>.</b> <code>n + 1</code>
+    over a row with no <code>n</code> is <code>null</code>, as in SQL; write
+    <code>coalesce(n, 0) + 1</code> to count from nothing.</li>
+  <li><b>Every write answers its count</b> — <code>{"affected": n}</code>
+    over HTTP, the <code>count</code> of the browser module's answer, and
+    the write result of every SDK.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p><b>Types.</b> The result goes through the field's type check as a
+literal would. Two <code>int</code>s make an <code>int</code>, and a result
+past 64 bits is refused, never wrapped; <code>/</code> between
+<code>int</code>s divides whole, toward zero, as PostgreSQL's does
+(<code>7 / 2</code> is <code>3</code>), and a division by zero is refused.
+An <code>int</code> and a <code>float</code> make a <code>float</code>,
+which an <code>int</code> field takes when it is whole and refuses when it
+is not — <code>n * 2.0</code> fits, <code>n + 0.5</code> does not, as the
+literal <code>2.5</code> does not. A float that is no longer finite is
+refused. A <code>timestamp</code> plus or minus an <code>int</code> is a
+timestamp that many milliseconds on (<code>now() + 30000</code>), and two
+timestamps apart are the milliseconds between them. <code>+</code> joins two
+texts (<code>$1 + ":dr"</code>), and only two texts. Anything else — text
+and a number, either way round, or <code>-</code> between texts — is a type
+error: a number turned into text without asking would hide the mistake a
+typed field is there to catch. An error refuses the statement whole, a
+block of one, so nothing of it is written; over no rows there is no error,
+as there is no row to work it out over.</p>
+
+<p><b>Precedence.</b> <code>*</code> and <code>/</code> bind tighter than
+<code>+</code> and <code>-</code>, and all four tighter than a comparison:
+<code>where n + 1 &gt; 2 * m</code>. <code>-1</code> where a value starts is
+a number; after a value, <code>n-1</code> and <code>n - 1</code> are a
+subtraction.</p>
+
+<p><b>Time.</b> <code>now()</code> is worked out once a statement, so every
+row a <code>set</code> writes holds the same time. In the browser it is the
+time the page hands the module with every statement, which has no clock of
+its own.</p>
+
+<p><b>What travels.</b> The record holds the document as written, the value
+worked out, never the expression: a replica, <code>/_changes</code>, an
+archive and a subscriber see the result, and a restore replays it as it
+was. A scoped token's rules test the document a <code>set</code> writes, as
+they test a literal's (<a href="/docs/http#scoped-access">Scoped
+access</a>). A replica of <a href="/docs/sync">Sync</a> works the
+expression out over its own row at once and sends the statement, which the
+server works out again over its own: two replicas' offline increments both
+land, and both replicas come to the server's sum.</p>
+
+<p><b>How it runs.</b> The pairs are bound to the collection once a
+statement, as a filter is: each field written and read by its position, and
+a value that reads no field — a literal, a parameter, <code>now()</code> —
+worked out once rather than a row. Each row is read once: a
+<code>set</code> read it twice before, once for the values and once for the
+indexes it takes out.</p>
+
+<p><b><code>if absent</code></b> passes over a document whose
+<code>id</code>, or whose <code>@unique</code> value, a live row holds,
+where <code>insert</code> refuses the statement: the others are written,
+and the answer counts those alone. That is Redis's <code>SET NX</code> in
+one statement, and it neither aborts a <code>/batch</code> nor makes an
+error a client has to catch. A row past its <code>@ttl</code> holds
+nothing — it is out of every read — so a write takes its place.</p>
+
+<div class="note">
+  <p><b>What it costs, measured</b> (<code>make counters-bench</code>, in
+  process over 100 000 rows of a text, an int and a note). A
+  <code>set</code> of a constant over every row took 65.0 ms against 85.5
+  before expressions — the row read once instead of twice — and
+  <code>{n: n + 1}</code> 66.6 ms; one row by id 1.07 us against 1.26, and
+  1.18 for <code>n + 1</code>. Sixteen threads incrementing one key 10 000
+  times each ended at 160 000, 320 000 increments a second, and sixteen HTTP
+  clients the same against <code>fenec-server</code>, 102 000 a second.</p>
+</div>
+</details>
+
+<h2 id="require">Writes that must find their rows</h2>
+
+<p>A write that matches no row is no error: it answers
+<code>{"affected": 0}</code>, and a <code>/batch</code> goes on to the next
+statement. <code>require N</code> after a <code>set</code>, a
+<code>del</code>, a <code>put</code> or an <code>insert</code> makes the
+count a condition: unless the statement wrote exactly <code>N</code> rows
+it is refused, and the block it is in — a <code>/batch</code>, a run of
+several in the page, a keyed write — is put back whole, as on any other
+error.</p>
+
+<pre data-lang="fenecql">set accounts {balance: balance - $1} where name = $2 and balance &gt;= $1 require 1
+del holds where order_ref = $1 and state = "held" require 1
+put locks {name: "nightly", owner: $1} if absent require 1      -- refused while it is held
+</pre>
+
+<ul>
+  <li><b>Refused over HTTP with 412</b>, the error naming the statement:
+    <code>`set accounts` wrote 0 rows, and requires 1</code>. A
+    <code>/batch</code> also says which statement stopped it
+    (<code>"at"</code>, from 0). Every SDK has its own kind for it
+    (<code>unmet</code>), and every builder an option:
+    <code>.update(patch, { require: 1 })</code>.</li>
+  <li><b>The count is the write's own</b>, taken under the write lock that
+    made it, so nothing can come between the check and the write. A scoped
+    token's count is of the rows its rules let it write.</li>
+  <li><b><code>require 0</code></b> asserts that nothing matches.</li>
+</ul>
+
+<h3 id="read-require">A read that must find its rows</h3>
+
+<p><code>require N</code> after a <code>get</code> guards a read the same
+way: unless the <code>get</code> answers exactly <code>N</code> rows it is
+refused (412, <code>"at"</code> naming it) and its batch put back. In a
+<code>/batch</code> it reads under the batch's write lock, after the
+statements before it and before those after, so what it saw is what the
+writes around it see: "the price is still 12", "the coupon is still
+good".</p>
+
+<pre data-lang="fenecql">get products where sku = $1 and price = $2 and stock &gt; 0 require 1
+get coupons where code = $1 and uses &lt; max_uses limit 1 require 1     -- one is enough
+get holds where order_ref = $1 and state = "held" require 0           -- none may be held
+</pre>
+
+<ul>
+  <li><b>It counts the rows the <code>get</code> answers</b>, after
+    <code>offset</code> and <code>limit</code>: <code>limit 1 require 1</code>
+    asks that one exists, and reads no further. A <code>lookup</code>'s
+    children are not counted, and <code>require</code> goes before the
+    <code>lookup</code>, whose clauses are the children's.</li>
+  <li><b>Not with <code>count</code></b> or an aggregate without
+    <code>group</code>, which answer one row whatever matched; over groups
+    it counts the groups. An inner <code>get</code> of <code>in (get
+    …)</code> takes none.</li>
+  <li><b>On its own</b> it is a read like any other, refused with 412 when
+    the count is not met. A scoped token's count is of the rows it may
+    read.</li>
+  <li><b>Every builder</b> has it as a step, <code>.require(1)</code>; a
+    write takes it as its option instead. A replica's sync refuses one in a
+    batch of synced writes: it would count the replica's rows, and the
+    server, which lands the batch, would never see it — send a guarded
+    batch to the server itself.</li>
+</ul>
+
+<h3 id="transfers">Transfers</h3>
+
+<p>Moving money between two accounts is a debit where the money is, a
+credit where the account is, and a journal of both, as one
+<code>/batch</code>. Without <code>require</code> an overdraft's debit
+matched nothing, answered 0, and the credit went ahead: the sum of the
+balances grew with every refused transfer. With it, a debit that finds too
+little money or a credit that finds no account puts the whole transfer
+back, journal and all:</p>
+
+<pre data-lang="fenecql">create collection accounts (name text @unique, balance int)
+create collection journal (tx text @hash, account text @hash, amount int)
+
+set accounts {balance: balance - $3} where name = $1 and balance &gt;= $3 require 1
+set accounts {balance: balance + $3} where name = $2 require 1
+insert journal [{tx: $4, account: $1, amount: 0 - $3}, {tx: $4, account: $2, amount: $3}]
+</pre>
+
+<pre data-lang="bash">printf '%s\n' \
+  '{"query":"set accounts {balance: balance - $3} where name = $1 and balance &gt;= $3 require 1","params":["ada","bob",30,"t1"]}' \
+  '{"query":"set accounts {balance: balance + $3} where name = $2 require 1","params":["ada","bob",30,"t1"]}' \
+  '{"query":"insert journal [{tx: $4, account: $1, amount: 0 - $3}, {tx: $4, account: $2, amount: $3}]","params":["ada","bob",30,"t1"]}' |
+curl -s -X POST localhost:8080/batch -H "Idempotency-Key: t1" --data-binary @-
+# an overdraft: 412 {"error":"unmet: `set accounts` wrote 0 rows, and requires 1","completed":0,"at":0}
+</pre>
+
+<ul>
+  <li><b>Amounts are whole minor units</b> in an <code>int</code>, so a
+    sum is exact.</li>
+  <li><b>An <code>Idempotency-Key</code></b> makes a retry after a timeout
+    answer what the first try did, rather than move the money twice
+    (<a href="/docs/http#idempotency">Retrying a write</a>).</li>
+  <li><b>Who may move what is the app's.</b> The credit is another user's
+    row, which a scoped token may not write: transfers go through an app
+    server holding the server's token.</li>
+  <li><b>A read can guard it too.</b> A client that showed a balance and
+    moves money only while it is still that puts <code>get accounts where
+    name = $1 and balance = $5 require 1</code> first; changed meanwhile, the
+    transfer stops there, 412 with <code>"at":0</code>.</li>
+  <li><b>Held to it:</b> eight threads making 4 800 random transfers among
+    six accounts in process, and eight clients making 2 400 as
+    <code>/batch</code>es over HTTP, an eighth of them to an account that
+    is not there, leave the sum where it started, no balance below zero,
+    and a journal that accounts for every balance
+    (<code>crates/fenec-core/tests/require.rs</code>,
+    <code>crates/fenec-http/tests/require.rs</code>).</li>
+  <li><b>A whole ledger</b> built this way — refunds, holds, an
+    append-only journal, reconciliation, a change-stream sink, scoped
+    tokens — is
+    <a href="https://github.com/fenecdb/fenecdb/tree/main/examples/ledger">examples/ledger</a>.</li>
+</ul>
+
+<h3 id="checkout">Checkout</h3>
+
+<p>An order is placed at the price the shopper saw, against stock that is
+there, with a coupon that is still good — or not at all. Each condition is
+a <code>require</code>: the price and the coupon read, the stock taken, the
+coupon's use counted and the order written, as one <code>/batch</code>.</p>
+
+<pre data-lang="fenecql">create collection products (sku text @unique, price int, stock int)
+create collection coupons (code text @unique, off int, uses int, max_uses int)
+create collection orders (ref text @unique, sku text @hash, paid int)
+
+get products where sku = $1 and price = $2 require 1
+get coupons where code = $3 and uses &lt; max_uses require 1
+set products {stock: stock - 1} where sku = $1 and stock &gt; 0 require 1
+set coupons {uses: uses + 1} where code = $3 require 1
+insert orders {ref: $4, sku: $1, paid: $2 - $5}
+</pre>
+
+<ul>
+  <li><b>A price that moved</b> stops the batch at its first line, 412 with
+    <code>"at":0</code>: the shopper is shown the new price, and nothing was
+    written.</li>
+  <li><b>A coupon used up</b> stops it at the second, <b>no stock</b> at the
+    third; the order's <code>@unique</code> <code>ref</code> refuses the
+    same checkout twice (409), and an <code>Idempotency-Key</code> answers a
+    retry what the first try did.</li>
+  <li><b>Under the write lock</b>, every line sees the ones before it: two
+    shoppers taking the last one cannot both pass the stock line.</li>
+</ul>
+
+<h2 id="pick">Writes that pick their rows</h2>
+
+<p><code>order</code> and <code>limit</code> after a <code>set</code> or a
+<code>del</code> pick the rows it writes: the page a <code>get</code> with
+the same <code>where</code>, <code>order</code> and <code>limit</code> would
+answer, found and written under the one writer's lock.
+<code>returning</code> answers them rather than their count — a
+<code>set</code>'s rows as it wrote them, a <code>del</code>'s as they were,
+in the order they were picked. A job queue's claim is one statement:</p>
+
+<pre data-lang="fenecql">create collection jobs (payload json, run_at timestamp @sorted, owner text, attempts int)
+put jobs [{payload: {"to": "ada"}, run_at: now(), attempts: 0}, {payload: {"to": "bo"}, run_at: now(), attempts: 0}]
+set jobs {owner: "w1", run_at: now() + 30000, attempts: attempts + 1} where run_at &lt;= now() order run_at limit 10 returning *
+del jobs where id = 1 and owner = "w1" require 1
+del jobs where run_at &lt;= now() order run_at limit 10 returning id, payload.to
+</pre>
+
+<ul>
+  <li><b>The page is a <code>get</code>'s.</b> <code>order</code> over an
+    <code>@sorted</code> field walks its index and stops at the page;
+    <code>limit</code> without <code>order</code> takes the first matches by
+    <code>id</code>; <code>order</code> without <code>limit</code> writes
+    every match, in that order. <code>offset</code> is a read's
+    alone.</li>
+  <li><b>Two writers never pick the same row.</b> The rows are found and
+    written under the write lock, where PostgreSQL's <code>UPDATE … WHERE id
+    IN (SELECT … FOR UPDATE SKIP LOCKED) RETURNING *</code> locks rows and
+    skips those another holds. A client that reads the page and then writes
+    it loses the race whenever another read the same page.</li>
+  <li><b><code>returning *</code></b> answers the id and every field, as
+    <code>select *</code> does; a list answers those named, paths among
+    them. Over HTTP the answer is the rows, as a <code>get</code>'s.</li>
+  <li><b><code>require N</code></b> counts the rows answered: <code>limit 1
+    require 1</code> is one row or a refusal.</li>
+  <li><b>A scoped token</b> picks among the rows its rules let it update or
+    delete, and what it answers is held to its read rules as well — a
+    <code>set</code>'s rows as it writes them, so a worker that reads only
+    the jobs it holds is answered the job it claims, and a
+    <code>set</code> that would leave a row it may not read is refused
+    whole (403). Every row it writes is held to its rules after the write,
+    its fields to an <code>update(…)</code> grant's and its change to a
+    transition's (<a href="/docs/http#scoped-access">Scoped
+    access</a>). A row answered shows the fields of the read rules
+    admitting it, and a value, a <code>where</code> or an
+    <code>order</code> reads a field a rule withholds only as a read may
+    (<a href="/docs/http#field-grants">Fields a read shows</a>).</li>
+  <li><b>A sync replica refuses one</b> on a synced collection: it would
+    pick and answer the replica's rows, and the server, sent the text, its
+    own.</li>
+  <li><b>Every builder</b> writes it: <code>order</code> and
+    <code>limit</code> before an <code>update</code> or a
+    <code>delete</code>, and <code>{ returning: true }</code> — or the
+    fields — as its option. See <a href="/docs/queues">Job queues</a> for
+    the whole queue: ack, extend, backoff, dead letters, priorities.</li>
+  <li><b>An <code>order</code> key may be an expression</b>, so the
+    nearest ready job is one claim too:
+    <code>set jobs {owner: $1} where run_at &lt;= now() order
+    distance(pickup, $2) limit 1 returning *</code>
+    (<a href="fenecql-reading.html#order-by-expression">Ordering by an expression</a>). A write
+    takes no <code>near</code>: the distance is a key of
+    <code>order</code> there, or an inner <code>get</code>'s
+    <code>near</code> picks the id — <code>where id in (get jobs select id
+    where run_at &lt;= now() near pickup $2 limit 1)</code>, run first under
+    the same lock.</li>
+</ul>
+
+<h3 id="insert-returning">The rows an insert made</h3>
+
+<p><code>returning</code> after a <code>put</code> or an
+<code>insert</code> answers the rows it wrote rather than their count,
+ids and all, in the order of its documents — what a client needs to know
+the id of the row it made, without reading it back by a key of its
+own:</p>
+
+<pre data-lang="fenecql">create collection orders (item text, customer text, n int)
+insert orders {item: "tea", customer: "ada"} returning id
+insert orders [{item: "pie", customer: "ada"}, {item: "jam", customer: "bo", n: 2}] returning *
+put orders {item: "tea", customer: "ada"} if absent else set {n: coalesce(n, 0) + 1} returning id, n
+</pre>
+
+<ul>
+  <li><b>Each row as the statement left it</b>: a row <code>if
+    absent</code> passed over is not answered, the row <code>else set</code>
+    set is, and a document written twice in one statement is answered
+    twice, as it ended. <code>require N</code> counts the rows
+    answered.</li>
+  <li><b>Over HTTP</b> the answer is the rows, with the change it left the
+    database at in <code>Fenec-Seq</code>; <code>POST
+    /orders?returning=id</code> answers a REST insert's rows (201) where it
+    otherwise answers <code>{"inserted": n}</code>.</li>
+  <li><b>A scoped token</b> is answered only rows its read rules let it
+    read, as a <code>set</code>'s are: each row written is held to them as
+    written — a row made as an insert, a row set as an update — and one they
+    leave out refuses the write, put back whole (403). An append to a stream
+    the token may write and not read is written without
+    <code>returning</code>.</li>
+  <li><b>Every builder</b> takes it: <code>insert(docs, { returning: ['id']
+    })</code> and <code>upsert(docs, patch, { returning: true })</code>,
+    Python's <code>returning=</code>, Go's <code>Returning(...)</code> among
+    the documents, .NET's <code>returning:</code>, Swift's, Kotlin's and
+    Dart's <code>insertReturning</code> and <code>upsertReturning</code>. A
+    sync replica refuses it on a synced collection, as a claim: its ids are
+    the replica's until the server answers.</li>
+</ul>
+
+<h2 id="bulk-loading">Bulk loading</h2>
+
+<p>For a bulk load, build the index afterwards. The write path becomes a pure
+append and the graph is built in one parallel pass.</p>
+
+<pre data-lang="fenecql">create collection docs (title text, embed vector&lt;768&gt;)
+put docs [ ... 100 000 documents ... ]
+create index on docs (embed) @hnsw(cosine)
+</pre>
+
+<h2 id="update-and-delete">Update and delete</h2>
+
+<pre data-lang="fenecql">set articles {year: 2025} where id = 42
+set articles {views: coalesce(views, 0) + 1} where id = 42   -- an increment
+del articles where year &lt; 2000
+</pre>

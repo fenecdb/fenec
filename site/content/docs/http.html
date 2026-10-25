@@ -178,9 +178,9 @@ collection called <code>_metrics</code> cannot be read over
 <tr><td><b>Negation</b></td><td>the <code>not.</code> prefix — <code>?summary=not.is.null</code>, <code>?year=not.eq.1999</code></td></tr>
 <tr><td><b>Shorthand</b></td><td>an unrecognised prefix makes the whole value an equality: <code>?year=2024</code></td></tr>
 <tr><td><b>List</b></td><td><code>?year=in.(1999,2023)</code></td></tr>
-<tr><td><b>Paths</b></td><td>a path into a <code>json</code> field where a field goes: <code>?meta.lang=tr</code>, <code>?meta.source.rank=gte.2</code>, <code>?select=title,meta.source.site</code>, <code>?order=meta.source.rank.desc</code>; the value is read as JSON reads it — a number, <code>true</code>, <code>null</code>, a quoted string — and as the text it is otherwise. A body's object is a <code>json</code> field's value, every number in it as written, and <code>PATCH</code> with <code>{"meta.lang": "en"}</code> sets one key inside the field (<a href="fenecql.html#json">Objects and paths</a>)</td></tr>
+<tr><td><b>Paths</b></td><td>a path into a <code>json</code> field where a field goes: <code>?meta.lang=tr</code>, <code>?meta.source.rank=gte.2</code>, <code>?select=title,meta.source.site</code>, <code>?order=meta.source.rank.desc</code>; the value is read as JSON reads it — a number, <code>true</code>, <code>null</code>, a quoted string — and as the text it is otherwise. A body's object is a <code>json</code> field's value, every number in it as written, and <code>PATCH</code> with <code>{"meta.lang": "en"}</code> sets one key inside the field (<a href="fenecql-schema.html#json">Objects and paths</a>)</td></tr>
 <tr><td><b>Clauses</b></td><td><code>select</code> <code>order</code> <code>limit</code> <code>offset</code> <code>count</code> <code>where</code> <code>lookup</code></td></tr>
-<tr><td><b>Ordering</b></td><td><code>?order=year.desc,title.asc</code>; a collation among the modifiers puts text in its order — <code>?order=name.und.desc</code> is <code>order name collate und desc</code>, <code>name.tr</code> Turkish (<a href="fenecql.html#collation">Collation</a>)</td></tr>
+<tr><td><b>Ordering</b></td><td><code>?order=year.desc,title.asc</code>; a collation among the modifiers puts text in its order — <code>?order=name.und.desc</code> is <code>order name collate und desc</code>, <code>name.tr</code> Turkish (<a href="fenecql-schema.html#collation">Collation</a>)</td></tr>
 <tr><td><b>Free expression</b></td><td><code>?where=year >= 2024 and tags has "rust"</code> — full FenecQL</td></tr>
 </tbody>
 </table>
@@ -238,11 +238,11 @@ the one <code>f32</code> an <code>f64</code> would round away,
 
 <p>A <code>"match"</code> makes it hybrid: BM25 over the collection's
 <code>@text</code> field ranks the same request, and the two rankings are
-fused by reciprocal rank (<a href="fenecql.html#hybrid">fuse</a>).
+fused by reciprocal rank (<a href="fenecql-search.html#hybrid">fuse</a>).
 <code>match_field</code> names the text field when there are several;
 <code>match_fuzzy</code> (<code>true</code>, or 0 to 2 edits) and
 <code>match_prefix</code> read its words as <a
-href="fenecql.html#typos"><code>match ... fuzzy</code> and
+href="fenecql-search.html#typos"><code>match ... fuzzy</code> and
 <code>prefix</code></a> do; <code>fuse_k</code> and <code>candidates</code>
 are the rank offset and how many candidates each side ranks.</p>
 
@@ -268,13 +268,13 @@ Parameters stay parameters.</p>
   <li><b>A text is parsed once.</b> <code>/query</code> keeps what it
     parsed by the text, so the values go as parameters — a page's
     <code>limit</code> and <code>offset</code> too (<a
-    href="/docs/fenecql#paging">Pages by parameters</a>): written into the
+    href="/docs/fenecql-reading#paging">Pages by parameters</a>): written into the
     text, every page was a statement of its own.</li>
   <li><b>The answer is the rows</b>, a JSON array — or, when the query asks
-    for <a href="/docs/fenecql#facets">facets</a>,
+    for <a href="/docs/fenecql-search#facets">facets</a>,
     <code>{"rows": [...], "facets": {"brand": [{"value": "acme", "count":
     12}, ...]}}</code>. A write answers <code>{"affected": n}</code>, and
-    one with <a href="/docs/fenecql#pick"><code>returning</code></a> the
+    one with <a href="/docs/fenecql-writing#pick"><code>returning</code></a> the
     rows it wrote, as a read does, with its <code>Fenec-Seq</code>: a job
     queue's claim (<a href="/docs/queues">Job queues</a>).</li>
   <li><b>From Python:</b> <code>pip install fenecdb</code> gives a client
@@ -293,7 +293,7 @@ href="#subscriptions">subscription</a> keeps a shape's rows and carries no
 facets; a live query over the server (<code>live</code> on
 <code>connect()</code>, <code>useLiveQuery</code>) runs its query again
 after each write, facets and all. A <a
-href="/docs/fenecql#highlights"><code>highlight()</code></a> is a column
+href="/docs/fenecql-search#highlights"><code>highlight()</code></a> is a column
 like any other, under its label.</p>
 
 <p>From Python, <code>pip install fenecdb</code> — the standard library
@@ -390,7 +390,7 @@ answer says so.</p>
 make a count a condition, end the write with <code>require N</code>: unless
 it wrote exactly <code>N</code> rows the batch stops with
 <b>412</b> and is put back, a transfer's debit and its credit together
-(<a href="/docs/fenecql#transfers">Transfers</a>).</p>
+(<a href="/docs/fenecql-writing#transfers">Transfers</a>).</p>
 
 <pre data-lang="json">{"error":"unmet: `set accounts` wrote 0 rows, and requires 1","completed":0,"at":1}
 </pre>
@@ -482,7 +482,7 @@ waits for it as after the first answer.</p>
   it. An answer over 64 KB is kept as its status and a note.</li>
   <li>Keys are kept for <code>--idempotency-ttl</code> seconds, a day unless
   given, in a <code>_idempotency</code> collection the change stream leaves
-  out. Its <code>at</code> is <a href="/docs/fenecql#ttl"><code>@ttl</code></a>:
+  out. Its <code>at</code> is <a href="/docs/fenecql-indexes#ttl"><code>@ttl</code></a>:
   a key past its time is gone at once, and the sweeper deletes it.</li>
 </ul>
 
@@ -1044,7 +1044,7 @@ fenec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":189
     field of the token's notes and the title of anyone's. A token may insert into a collection it cannot read, such as an event
     stream: its reads of it are refused with 403 and it is not listed.
     <code>expired</code> grants the rows past their <code>@ttl</code>, which
-    <code>expired()</code> reads (<a href="/docs/fenecql#reaper">the
+    <code>expired()</code> reads (<a href="/docs/fenecql-indexes#reaper">the
     reaper</a>): a statement asking it is held to the filters of the rules
     granting <code>expired</code> beside the ones its operation needs, and
     neither <code>write</code> nor <code>*</code> grants it — a lapsed hold

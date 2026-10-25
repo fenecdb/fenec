@@ -1,0 +1,422 @@
+<!--
+title: Text search — FenecQL — fenecdb
+description: Text search in FenecQL: match ranks by BM25, rerank, fuzzy and prefix for typos and words begun, highlight() and snippet(), facets, and fuse for words and meaning in one ranking.
+-->
+
+<h1>Text search</h1>
+<p class="kicker">Ranked words, typos, highlights and facets, then words and meaning in one ranking.</p>
+
+<p><code>match</code> ranks a collection's documents by how well their text
+matches your words, and the rest of a search box hangs off it:
+<code>fuzzy</code> and <code>prefix</code> for typos and words begun,
+<code>highlight()</code> and <code>snippet()</code> for where the words are,
+and <code>facet</code> for counts beside the page.</p>
+
+<p>Run in <a href="quickstart.html#in-the-shell">the shell</a>, answers and all; the timings are from one run.</p>
+
+<pre data-lang="text">fenec&gt; create collection articles (title text @text, body text @text, year int @sorted, topic text @hash);
+collection `articles` created
+fenec&gt; put articles [{title: "Ownership in Rust", body: "Ownership and borrowing keep memory safe without a garbage collector", year: 2023, topic: "rust"}, {title: "A tour of borrowing", body: "Borrowing lets a function read a value without taking ownership of it", year: 2024, topic: "rust"}, {title: "Garbage collection pauses", body: "A collector that pauses the program trades latency for convenience", year: 2021, topic: "runtime"}, {title: "Indexes for search", body: "An inverted index maps each word to the documents that hold it", year: 2024, topic: "search"}];
+4 records (143.88µs)
+fenec&gt; get articles select title match body "borrowing"
+title                _score
+-------------------  ------
+Ownership in Rust    0.7053
+A tour of borrowing  0.6814
+(2 rows, 377.67µs)
+fenec&gt; get articles select title where year &gt;= 2024 match body "ownership"
+title                _score
+-------------------  ------
+A tour of borrowing  0.6814
+(1 rows, 503.92µs)
+fenec&gt; get articles select title match title "ownrship" fuzzy
+title              _score
+-----------------  ------
+Ownership in Rust  1.2218
+(1 rows, 345.96µs)
+fenec&gt; get articles select title, highlight(body) match body "borrowing"
+title                highlight(body)  _score
+-------------------  ---------------  ------
+Ownership in Rust    [[14, 23]]       0.7053
+A tour of borrowing  [[0, 9]]         0.6814
+(2 rows, 450.00µs)
+fenec&gt; get articles select title match body "collector" facet topic
+title                      _score
+-------------------------  ------
+Ownership in Rust          0.7053
+Garbage collection pauses  0.7053
+(2 rows, 432.21µs)
+facet topic: runtime 1, rust 1
+</pre>
+
+<p><code>match</code> needs a <code>@text</code> index and adds a
+<code>_score</code> column. A <code>where</code> narrows the rows while they are
+ranked; <code>fuzzy</code> finds <code>ownrship</code>'s word; <code>highlight</code>
+answers the offsets of the words in a row's text; and <code>facet</code> counts
+the values of a field over every matched row, beside the rows (the shell prints
+them on the last line). Words and meaning in one ranking, <code>fuse</code>, are
+under <a href="#hybrid">Hybrid search</a>; the vectors are on
+<a href="fenecql-vector.html">Vector search</a>.</p>
+
+<h2 id="the-text-clause">The text clause</h2>
+
+<p><code>match</code> ranks documents by how well their text matches your
+words. <code>rerank</code> then reorders the best of them by vector
+distance.</p>
+
+<pre data-lang="fenecql">get articles match body $1 limit 10
+get articles where year >= 2024 match body $1 limit 10
+get articles match body $1 rerank embed $2 candidates 500 limit 10
+</pre>
+
+<ul>
+  <li><b><code>match</code> needs a <code>@text</code> index</b> and adds a
+    <code>_score</code> column.</li>
+  <li><b><code>rerank</code> needs no vector index.</b> It reads the vectors
+    of the matched rows directly.</li>
+  <li><b>Reranking cannot find what the words missed.</b> For that, use <a
+    href="#hybrid">hybrid search</a>.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p><code>match</code> ranks by BM25 over a <code>@text</code> index and adds a
+<code>_score</code> column. Like <code>near</code> it decides the ordering, so
+it combines with neither <code>order</code> nor <code>near</code> — unless
+<code>fuse</code> says how the two rankings make one (<a
+href="#hybrid">below</a>). A
+<code>where</code> filter is applied while the postings are merged, so it costs
+no second pass.</p>
+
+<p><code>rerank</code> reorders what <code>match</code> found by exact vector
+distance. It needs <code>match</code> — there is nothing to reorder without it
+— but it does <b>not</b> need an <code>@hnsw</code> index: the vectors are read
+straight out of the store, so this path builds, holds and validates no graph at
+all. <code>candidates</code> sets how many of the matched rows are rescored
+(default 200); it is never allowed below <code>limit + offset</code>.</p>
+
+<div class="note">
+  <p><b>The two stages answer different questions.</b> <code>match</code> is
+  recall and knows nothing about meaning; <code>rerank</code> is precision but
+  only over what the first stage handed it. Measured on BEIR: on SciFact
+  50 candidates score nDCG@10 0.656 against 0.645 for a full dense scan of the
+  same vectors, and on FiQA 1 000 candidates come within 0.0001 of the full scan —
+  each while scoring under 2% of the corpus. If the lexical stage cannot find
+  the answer at all, no amount of reranking will.</p>
+</div>
+</details>
+
+<h2 id="typos">Typos and words begun</h2>
+
+<p><code>fuzzy</code> lets a word of a <code>match</code> find the words a
+typo or two away from it, and <code>prefix</code> lets the last word find
+the words it begins — what a search box needs as someone types into it.</p>
+
+<pre data-lang="fenecql">get products match title $1 fuzzy limit 10             -- "databse" finds "database"
+get products match title $1 prefix limit 10            -- "datab" finds "database", "databases"
+get products match title $1 fuzzy prefix limit 10      -- both, the last word a misspelt beginning
+get products match title $1 fuzzy 1 limit 10           -- one edit at most
+</pre>
+
+<ul>
+  <li><b>A word's length decides its edits</b>: none under 5 characters,
+    one from 5 to 8, two from 9. <code>fuzzy 1</code> allows one at most,
+    <code>fuzzy 0</code> none.</li>
+  <li><b>A word as typed ranks first.</b> A document holding the word
+    itself scores more from it than one holding only a word near it.</li>
+  <li><b>A word reaches 10 000 words of the index at most</b>, and the query
+    is refused past that rather than cut — a prefix of one letter over a
+    large vocabulary is.</li>
+  <li><b><code>highlight()</code> and <code>snippet()</code> mark what was
+    found</b>: <code>databse</code> marks <code>database</code>.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>An edit is a letter added, dropped, changed, or two letters next to
+each other swapped — Damerau's distance in its restricted form, as Lucene,
+Elasticsearch and Meilisearch count it: the four are what Damerau found
+four misspellings in five to be, and a swap counted as two edits would put
+a five-letter word with one out of reach. An edit that touches a word's first letter counts two, as
+Meilisearch counts it: a first letter is rarely the mistyped one, and
+letting it be multiplies what is found by words no one meant. The bounds by
+length are Meilisearch's too: a short word has too many neighbours —
+<code>cart</code> is one letter from <code>card</code>, <code>care</code>,
+<code>cars</code>, <code>cat</code> and <code>art</code>. Words are folded
+as the index folds them before they are compared, so
+<code>İSTANBL</code> finds <code>istanbul</code>. Only the last word is a
+prefix; the words before it are whole.</p>
+
+<p>The words a word reaches count as one term of the query, a document's
+counts of them summed, so BM25's saturation holds over them as over a word
+written three times, and the term's rarity is theirs together — a rare
+misspelling in the corpus ranks no higher than the word it misspells. A
+word one edit away, or one a prefix begins, counts as the word would; two
+edits away, a quarter as much. Where the index holds the word as typed,
+its variants together are kept below the least it adds to a document, so a
+one-word query ranks every document holding it above every document
+holding only what is near it. Measured on BEIR with one typo put into each
+query, a word one edit away was the word meant and two edits away as often
+another word, which the weights follow.</p>
+
+<p>The words are found in a sorted copy of the index's words, made the
+first time a <code>match</code> asks for <code>fuzzy</code> or
+<code>prefix</code> and kept up by every write after it, as the index is:
+derived, never in the file. A prefix is a range of it; the words within a
+few edits are found by walking it as the tree of prefixes it is, giving a
+branch up once no word below it can be near enough. Over 100 000 documents
+of 60 000 words, sorting them took 6 ms and 1.3 MB; finding a word's
+neighbours over FiQA's 135 500 words, 14 µs at one edit and 120 at two, its
+completions 4 µs.</p>
+
+<div class="note">
+  <p><b>Measured on BEIR</b>, nDCG@10 (<code>make beir</code>), one
+  realistic typo put into a word of each query — a letter dropped, a key
+  beside it typed as well or instead, or two letters swapped, the first
+  letter 7% of the time:
+  SciFact's queries as written score 0.662 and 0.665 with
+  <code>fuzzy</code>; with the typo 0.636, and 0.663 with
+  <code>fuzzy</code>. FiQA's 0.232 and 0.233; with the typo 0.213, and
+  0.229. With each query's last word half typed, <code>prefix</code> takes
+  SciFact from 0.616 to 0.655 and FiQA from 0.188 to 0.208, and leaves the
+  queries written whole where they were. See <a
+  href="benchmarks.html#typos">the whole table</a>.</p>
+</div>
+</details>
+
+<h2 id="hybrid">Hybrid search</h2>
+
+<p><code>fuse</code> combines a text search and a vector search into one
+ranking. Use it when some answers share your words and others only your
+meaning.</p>
+
+<pre data-lang="fenecql">get articles match body $1 near embed $2 fuse limit 10
+get articles where year >= 2024 match body $1 near embed $2 fuse limit 10
+get articles match body $1 near embed $2 fuse k 60 candidates 50 limit 10
+</pre>
+
+<ul>
+  <li><b>It adds ranks, not scores</b>, so there is no weight to tune.</li>
+  <li><b>It needs an <code>@hnsw</code> index</b> for the vector side.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p><code>fuse</code> lets <code>match</code> and <code>near</code> rank the
+same query together. Each side takes its own first <code>candidates</code> —
+20 unless given, never fewer than <code>limit + offset</code> — with the
+<code>where</code> filter applied to both, and a document scores
+<code>1 / (k + rank)</code> from each list it is on, <code>k</code> being 60
+unless given. The sum is the <code>_score</code>; ties go to the lower id.</p>
+
+<p>Ranks rather than scores, because the two have no scale in common: a BM25
+score grows with the length of the query and the rarity of its words, a
+cosine distance does neither, and a weighted sum would need its weight tuned
+again for every corpus. Where <code>rerank</code> can only reorder what the
+words found, <code>fuse</code> also takes what they missed — at the price of
+the <code>@hnsw</code> graph <code>near</code> walks.</p>
+
+<div class="note">
+  <p><b>Measured on BEIR</b>, nDCG@10, all-MiniLM-L6-v2 vectors (<a
+  href="benchmarks.html#retrieval-quality">the whole table</a>). On SciFact,
+  where a claim shares its words with the evidence, <code>fuse</code> scores
+  0.700 against 0.662 for <code>match</code> and 0.645 for <code>near</code>
+  alone. On FiQA, where a question shares few words with its answer, it scores
+  0.366 against 0.232 and 0.366: the weak side does not drag the strong one
+  down. Up to 61 candidates a side at <code>k = 60</code>, a document both
+  searches found outranks every document only one found; deeper, agreement in
+  the middle of both lists starts to outvote the top of one, and at 100 a side
+  the two scores fall to 0.688 and 0.359.</p>
+</div>
+</details>
+
+<h2 id="highlights">Highlights and snippets</h2>
+
+<p><code>highlight()</code> and <code>snippet()</code> in the select list
+show where the words of a <code>match</code> are in a row's text, so a
+results page can mark them.</p>
+
+<pre data-lang="fenecql">get articles select title, highlight(body) match body $1 limit 10
+get articles select title, highlight(body, "&lt;mark&gt;", "&lt;/mark&gt;") match body $1 limit 10
+get articles select title, snippet(body, 20, "…") match body $1 limit 10
+get articles select title, snippet(body, 20, $2, $3, $4) match body $1 limit 10
+</pre>
+
+<ul>
+  <li><b>Without tags you get positions</b>: <code>highlight(body)</code> is a
+    list of <code>[start, end]</code> pairs; <code>snippet(body, 20)</code> is
+    <code>{"text": …, "marks": [[start, end], …]}</code>.</li>
+  <li><b>With tags you get the marked text</b>, each mark between the two
+    values you pass — literals or parameters. The engine adds no markup of
+    its own and escapes nothing.</li>
+  <li><b>Offsets count UTF-16 code units</b>, what a JavaScript, Java,
+    Kotlin, C#, Dart or Swift <code>NSString</code> index counts:
+    <code>text.slice(start, end)</code> is the marked word.</li>
+  <li><b>They need <code>match</code></b>, and go with <code>fuse</code> and
+    <code>rerank</code>; a query without <code>match</code> has no words to
+    mark, and is refused.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>A row's text is read again at query time by the tokenizer of the
+<code>@text</code> index the <code>match</code> searched — the same splitting,
+the same folding (<code>İstanbul</code>, <code>ISTANBUL</code> and
+<code>istanbul</code> are one word), the same prefixes and runs of
+characters — and every span a term of the query was read from is marked. So
+a mark is exactly what the index matched: a word; the whole word a prefix
+of <code>@text(prefix=N)</code> was cut from (<code>kitapların</code> for
+<code>kitap</code>); the characters of a pair or a triple of Han, kana,
+Hangul or Thai, overlapping pairs made one mark (<code>東京都</code> for
+<code>東京都</code>). Nothing is kept in the index for it, and the file does
+not change. Marks come in order and never overlap; a mark never ends inside
+a character, and takes the marks that belong to the characters at its ends
+— a combining accent, a Thai tone mark, the variation selector and keycap
+after a digit — so tagged text never splits a letter from its accent.</p>
+
+<p>Any <code>text</code> field can be marked, read by the tokenizer of the
+field <code>match</code> searched: <code>select highlight(title)</code>
+beside <code>match body $1</code> marks the title's words the query holds.
+Under <code>fuse</code> a row only <code>near</code> found holds no word of
+the query and has no marks; a null field is <code>null</code>. Each item
+answers under its label, <code>highlight(body)</code> or
+<code>snippet(body)</code>, after the fields <code>select</code> names, where
+the list puts it — and after every field with <code>select *,
+highlight(body)</code>. The same item twice is refused: the two columns would
+answer to one name.</p>
+
+<p>A snippet is the window of <code>N</code> words holding the most marks,
+centred on the first and the last of them — the first <code>N</code> words
+when none is marked — each character of a run of Han, kana or Hangul counted
+a word. The ellipsis, when given, stands for what it leaves out at either
+end; a window holding the start or the end of the text has none there. Its
+marks count from the start of its <code>text</code>, the ellipsis
+included.</p>
+
+<div class="note">
+  <p><b>The text is not escaped.</b> A page that puts a marked text into
+  HTML lets the text's own <code>&lt;</code> through. Build the page from the
+  offsets instead — the text as text nodes, each mark a
+  <code>&lt;mark&gt;</code> element — or escape the text first and the tags
+  after.</p>
+</div>
+
+<p>Over 100 000 documents of 30 words, a mark costs a row about
+1 to 3 µs (2 to 4 for a snippet) on top of the <code>match</code>; a
+query that asks none runs as it did, <code>match</code> 0.06 ms either way
+(<code>make search-bench</code>).</p>
+</details>
+
+<h2 id="facets">Facets</h2>
+
+<p><code>facet</code> counts the values of a field over every row the query
+matches — not only the page — for a filter sidebar: how many results each
+brand, color or tag has.</p>
+
+<pre data-lang="fenecql">get products where price &lt; 500 facet brand, color limit 20
+get products match title $1 where price &lt; 500 facet brand top 10, tags limit 20
+get products where category = "phones" count facet brand
+get products facet meta.origin top 5 limit 0
+</pre>
+
+<pre data-lang="json">{"rows": [ ... ],
+ "facets": {"brand": [{"value": "acme", "count": 12}, {"value": "nova", "count": 7}],
+            "color": [{"value": "red", "count": 9}, {"value": null, "count": 2}]}}</pre>
+
+<ul>
+  <li><b>Most first</b>, ties by value; <code>top N</code> keeps the
+    commonest <code>N</code>.</li>
+  <li><b>A list counts each value it holds</b>: a row tagged
+    <code>["sale", "new"]</code> counts once under each.</li>
+  <li><b><code>null</code> is a value</b>, so a field's counts add up to the
+    rows.</li>
+  <li><b>They come back beside the rows</b>, never in one: the answer is
+    <code>{"rows": [...], "facets": {...}}</code> when a query asks for
+    facets, and the bare list of rows when it does not.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>The rows counted are the rows the query selects before
+<code>offset</code> and <code>limit</code>: those the <code>where</code>
+keeps, and with <code>match</code>, those holding a word of the query
+(<code>rerank</code> reorders them and counts the same). A
+<code>lookup ... required</code> decides who is counted, as it decides who
+is on the page; with <code>count</code> the facets go beside the number.
+<code>near</code> ranks every row the filter passes rather than selecting
+some, so counts beside it would be the filter's alone whatever the vector:
+a facet with <code>near</code> or <code>fuse</code> is refused. Ask them
+without <code>near</code>, in the same <code>/batch</code>.</p>
+
+<p>A field is a field or a path into a <code>json</code> one. The counts are
+<code>group ... count</code>'s over the same filter, value for value
+(<code>tests/facets.rs</code> holds them to it), but for a list, counted a
+value at a time, and a path, which <code>group</code> does not read. A
+<code>@hash</code> field of text, int, bool or timestamp is counted from its
+buckets — over every row a bucket's length, under a filter how many of a
+bucket's rows the set holds — and anything else reads the field of every
+matched row. Without <code>top</code> a facet answers every value it found,
+and one holding more than 10 000 is refused rather than cut: a list cut where
+it happened to stop is a wrong answer believed right.</p>
+
+<p>Over 100 000 rows (<code>make search-bench</code>): a <code>@hash</code>
+field over every row 0.01 ms, read from every row 6.1 ms
+(a list of tags 17); under a filter keeping half, 5.8
+and 9.3 ms against the filter's own 5.9 ms
+for a <code>count</code>. Beside a <code>match</code> reaching about
+16 667 rows, two facets took a query from 0.06 to 1.6 ms.</p>
+</details>
+
+<h3 id="disjunctive-facets">Counted without its own filter</h3>
+
+<p>With a brand chosen, a sidebar's "Brand" should still list the other
+brands to add, each with the count it would have. <code>disjunctive</code>
+counts a facet over the rows the query selects with the filter's own
+conditions on that field left out; the page, and every other facet, stay
+the query's.</p>
+
+<pre data-lang="fenecql">get products where category = "tents" and brand in ["acme", "nova"] and color = "red"
+  facet brand disjunctive, color disjunctive, material
+  order price limit 24
+</pre>
+
+<p>Here <code>brand</code> counts over the red tents of every brand,
+<code>color</code> over the acme and nova tents of every colour, and
+<code>material</code> over the page's rows. A condition left out is a term
+of the <code>where</code>'s <code>and</code> chain that reads the field
+alone — <code>brand = ...</code>, <code>brand in [...]</code>, <code>(brand =
+"a" or brand = "b")</code>, a range — and one reading the field beside
+another (<code>brand = "a" or sale</code>) is refused rather than guessed
+at. A token's rules and a collection's expiry are never left out: they are
+ANDed into each facet's own filter too.</p>
+
+<h3 id="range-facets">Ranges</h3>
+
+<p><code>ranges [b1, b2, ...]</code> counts the rows whose number falls in
+each range — from a bound, included, to the next, excluded — rather than by
+value: every range, in order, an empty one with 0, its value the
+<code>[from, to]</code> pair. A null, a <code>NaN</code> and a number
+outside every range count in none; a list counts once in each range a value
+of it falls in.</p>
+
+<pre data-lang="fenecql">get products where category = "tents" limit 24
+  facet price ranges [0, 2500, 5000, 10000, 25000] disjunctive
+</pre>
+
+<pre data-lang="json">"price": [{"value": [0, 2500], "count": 31}, {"value": [2500, 5000], "count": 112},
+          {"value": [5000, 10000], "count": 204}, {"value": [10000, 25000], "count": 96}]</pre>
+
+<p>The bounds are numbers written out, rising, two to 10 001 of them, and no
+<code>top</code> goes with them. A <code>@sorted</code> field counts them from
+its index when every bound is a key it holds exactly — over every row two
+searches a range and the lengths of the chunks between, under a filter its
+entries walked against the filter's rows — and anything else reads the field
+of every row (<code>12.5</code> against an <code>int</code> field is read).</p>
+
+<details class="deep"><summary>Measured</summary>
+<p>Over 100 000 rows (<code>make search-bench</code>, an M1 Air): six ranges
+of a <code>@sorted</code> price over every row 0.004 ms against 4.7 ms read
+from every row; under a filter keeping 3%, 0.15 against 0.19 ms; keeping
+half, 5.1 against 8.1. A category page with a brand and a colour chosen,
+its page and two disjunctive facets beside a range facet in one statement,
+took 0.75 ms in process against 0.75 ms for the three statements it was
+before; over HTTP 0.95 ms against 1.19 for the three in turn and 0.61 for
+the three at once on three connections. What one statement buys is one
+request, one connection and counts read under one lock — the same rows
+every facet counted — not less work.</p>
+</details>

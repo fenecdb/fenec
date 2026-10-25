@@ -14,7 +14,7 @@ expression — <code>px * qty</code>, or an aggregate of one,
 keys, and <code>bucket(at, 1m)</code> makes a time one. <code>count(distinct
 user)</code> counts values, exactly. And <code>first(px by at)</code> and
 <code>last(px by at)</code> take the value of the earliest and latest row of
-a group. See <a href="/docs/fenecql#aggregates">Aggregates</a> for the
+a group. See <a href="/docs/fenecql-aggregates#aggregates">Aggregates</a> for the
 rules.</p>
 
 <p>Every FenecQL block on this page is run, statement by statement, by a
@@ -165,7 +165,7 @@ get events select count(distinct user) where name = "buy" and user in (get event
 
 <p>The inner <code>get</code> is a list of up to 100 000 values; past that
 ask from the users' side with <code>lookup … required</code> (<a
-href="/docs/fenecql#subqueries">Subqueries</a>). An ordered funnel — a
+href="/docs/fenecql-lookup#subqueries">Subqueries</a>). An ordered funnel — a
 view, then a buy within the hour — compares each user's first of each:
 <code>having</code> keeps the groups a condition holds for, over their
 keys, the list's columns by name and any aggregate, and
