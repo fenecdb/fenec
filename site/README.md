@@ -184,8 +184,21 @@ each a document -- `title`, `heading`, `url` with the heading's anchor,
 `kind` (doc, compare or benchmark) -- and hands them to
 `search-index.mjs`, which writes them into a database through
 `web/fenec.wasm` and its image into `dist` as `search.<hash>.fenec.gz`.
-Both texts are `@text(prefix=12)`, so a word half typed finds the words it
-begins.
+Both texts are `@text(prefix=12)`: besides each word the index holds its
+first 3 to 12 letters, and a query is cut the same way, so a word half typed
+finds the words it begins (`compac` and `compaction` share `compa`) and an
+inflected word its stem (`replikasyon` and `replication` share `repli`).
+
+**What a prefix scores.** Each prefix is a term of its own, with its own idf.
+A section holding the word itself matches the word and every prefix of it; a
+section holding only a longer word that begins like it matches the prefixes
+the two share and no more. So a match by prefix alone is worth less than the
+whole word's with no weight to say so, and the longer the prefix they share
+the more terms and the rarer ones it adds: `tel` alone is in 31 sections and
+`ver` in 55. Over 624 single words of the docs, asked alone, the best hit holds
+the word itself for 97% and a word of its stem (`attacks` finding `attack`)
+for the other 3%. What a prefix cannot do is say nothing: see "The words vote
+beside the meaning only when they found a word", below.
 
 The page loads nothing of it until the search is opened -- the button,
 `/`, or Cmd/Ctrl+K. Then `search.js` fetches the module, the engine and the
@@ -197,13 +210,18 @@ chips. A snippet and a heading go into the page as text, and only the spans
 the engine names are wrapped in `<mark>`.
 
 The image is gzipped by the build because a `.fenec` is a type the edge does
-not know, and serves as it lies: 524 KB, against 178 KB gzipped.
+not know, and serves as it lies: 1.1 MB, against 367 KB gzipped (283 KB with
+brotli; the build prints all three).
 
 The build fails if the index cannot be written, is empty, or holds fewer
 documents than it was handed, and runs `search.test.mjs` over the image:
 "compact" must find `docs/server#compaction` first, "facet" the facets
 section, and so on. Change a heading those queries rely on and the test
-says so.
+says so. Words half typed, mistyped or written as the docs write them
+(`replic`, `compacton`, `Idempotency-Key`) must find their page within three;
+the Turkish questions, which hold no word of the docs, are ranked by their
+meaning alone, so their bounds are the vectors' and move with no change of
+prose.
 
 ## Search by meaning
 
@@ -217,6 +235,43 @@ only the first time a vector comes back. The words' list is on screen
 meanwhile and stays whenever the meaning does not come: no endpoint, a
 refusal, 800 ms gone by, no network. One or two words are looked up by the
 words alone, which find a section named for them first.
+
+**The words vote beside the meaning only when they found a word.** `fuse`
+adds `1 / (60 + rank)` from each list and cannot tell a list that found
+something from one that found chance. A question with no word of the docs in
+it -- Turkish against English pages -- has only prefixes to match
+(`telefonda` reaches `tell`, `veri` `version`, `durdurmak` `durable`), and
+that list voted as much as the meaning: the page it should find stood 3rd,
+4th, 5th and 6th as docs gained or lost a `tell`, and a page the meaning
+puts 7th stood 2nd by a `durable`. So `search-query.js` asks first
+(`holdsWord`): among the 5 best hits of the words' list, does one mark a word
+of the question, of 3 letters or more, that is the same word or shares its
+first 5 letters? (`highlight(body)` marks the whole word a prefix hit
+begins.) If so, the lists are fused as before. If not, `near` ranks alone:
+every hit is by meaning, shown with the opening of its text and nothing
+marked, and the footer says "by meaning". Five letters are a stem
+(`replikasyon`, `replica`); three or four are chance; a word of two (`ne`,
+Turkish, and a stray token in the docs' code) is no evidence. A script written
+without spaces is indexed in grams, so no span of it is the question's word,
+and it is not judged. The verdict is asked of every section, not of the group
+a chip chose. The probe reads the best hits one at a time and stops at the
+first that holds a word, usually the first: 0.1 to 0.5 ms more than the fuse
+alone, and 0.4 to 1.5 ms less where the words do not vote, since nothing is
+fused. It is asked once per question, after the pause, and not per
+keystroke; one or two words, and every query without a vector, take the path
+they always took.
+
+Measured over the 14 questions the fixture holds: 12 hold a word of the docs
+and rank as before; of the two Turkish ones, mobile goes 4th to 1st and
+compaction 2nd to 7th, where its meaning puts it. Over seven edits of the
+docs' prose (a `tell` more or less, a section longer) mobile stood 1st to 6th
+before and 1st every time after. Down-weighting the words was measured and
+refused: at a fifth of a vote mobile stands 1st or 2nd and compaction 2nd, at
+0.3 mobile 2nd to 5th, and a weight fitted to two questions only trades one's
+luck for the other's. So was a longer `prefix_min`, which costs the typist:
+with 4, `stud` and `mobi` no longer find the studio and the mobile page;
+with 5, `compa`, `highl`, `colla`, `grafa`, `vecto`, `looku` and `tenan` do
+not.
 
 The sections' vectors are kept in `search-embeddings.json`, committed, by a
 hash of the model and the text embedded: a build embeds only the sections
