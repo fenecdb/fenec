@@ -224,8 +224,8 @@ code 0, `checkpoints`) and exits holding the write lock. A new way down
 sets that flag and never exits on its own. What fails before anything
 writes the file or runs beside it -- a flag, the open, a port, both
 listeners bound straight after the open -- exits where it fails, having
-written only what the open does: a file or a node's directory made where
-none was, a torn tail cut.
+written only `<file>.lock` and what the open does: a file or a node's
+directory made where none was, a torn tail cut, a sync log written back.
 
 ### Replication and archives
 

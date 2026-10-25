@@ -1127,6 +1127,9 @@ fn main() {
             file.as_deref().unwrap_or("in memory"),
             sync.describe()
         );
+        // Before the thread that says it listens: a stop asked for after its
+        // line is a supervisor's answer to a server that served.
+        let asked = durability::shutdown_requested();
         std::thread::Builder::new()
             .name("fenec-http".into())
             .spawn(move || {
@@ -1136,7 +1139,9 @@ fn main() {
                 }
             })
             .map_err(|e| format!("could not start the HTTP thread: {e}"))?;
-        durability::serving();
+        if !asked {
+            durability::serving();
+        }
 
         // `--warm`: the derived indexes built beside the first queries,
         // which otherwise build each on its first read. Once the endpoint is
@@ -1249,6 +1254,8 @@ fn serve_dir(
             durability::exit_on_stdin_close()
                 .map_err(|e| format!("could not start the stdin thread: {e}"))?;
         }
+        // Before the thread that says it listens, as a file server reads it.
+        let asked = durability::shutdown_requested();
         std::thread::Builder::new()
             .name("fenec-http".into())
             .spawn(move || {
@@ -1258,7 +1265,9 @@ fn serve_dir(
                 }
             })
             .map_err(|e| format!("could not start the HTTP thread: {e}"))?;
-        durability::serving();
+        if !asked {
+            durability::serving();
+        }
         Ok(())
     })();
     // 2, as these exited before they went through the shutdown.
@@ -1274,6 +1283,16 @@ fn serve_dir(
             // The write locks come back held: nothing is accepted between
             // the last sync and exit.
             fenec_http::trace::flush(Duration::from_secs(2));
+            if checkpoint && !durability::checkpoints() {
+                fenec_http::log!(
+                    "no checkpoint: the node {}",
+                    if durability::served() {
+                        "stops on a failure"
+                    } else {
+                        "stopped before it served"
+                    }
+                );
+            }
             let open = tenants.shutdown_with(durability::checkpoints());
             fenec_http::log!("\nshutting down: {open} open tenant(s) synced");
             std::process::exit(durability::exit_code());

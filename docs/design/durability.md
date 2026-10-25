@@ -123,7 +123,10 @@ The mirror stores its code (`exit_with`), then tells that wait it has
 stopped, so the wait is not its `STOP_WAIT` and the exit cannot come before
 the code, and only then asks for the shutdown. A shutdown writes a
 checkpoint only once the HTTP thread started (`serving`, unless a stop was
-already asked for) and only when it exits 0 (`checkpoints`), a server's or
+asked for before that thread was: read after it, the flag was a
+supervisor's answer to the thread's own `listening on` line 1 time in 200
+beside 16 busy loops, and a server that had served kept no graph) and only
+when it exits 0 (`checkpoints`), a server's or
 a node's (`Tenants::shutdown_with`): a checkpoint rewrites the whole file,
 and the review of #383 measured a file server of 100 000 64-dimension
 vectors whose port was held log `checkpoint written` at every failed start,
@@ -148,8 +151,12 @@ address without a token is refused with the flags, exit 2, before the open
 before anything writes the file or runs beside it -- a flag, the lock, the
 open, a port -- exits where it fails, with the exit codes it had: 1 for a
 file server's HTTP port, 2 for a node's and for `--metrics`'. It has
-written what the open writes and no more: a file, or a node's directory,
-made where none was (an empty file is 8 bytes), and a torn tail cut. Taken
+written `<file>.lock` (`fenec_abi::lock::hold`, taken before the open and
+left on disk, as every server leaves it) and what the open writes, no
+more: a file, or a node's directory, made where none was (an empty file is
+8 bytes), a torn tail cut, and on Linux and Android a sync log's entries
+written back into the file (`synclog::recover`), the writes an earlier
+process had made durable. Taken
 before the tenants open, a node's port queues the connections that come
 while they do: a standby of 400 vector tenants took 1.36 to 1.67 s to
 answer, macOS kept 128 connections in its backlog and the rest of a burst

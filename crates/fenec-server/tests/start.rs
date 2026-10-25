@@ -135,38 +135,52 @@ fn a_standby_that_cannot_listen_opens_no_tenant() {
 }
 
 /// A server that stops on a failure once it served writes no checkpoint:
-/// `--follow` to a PostgreSQL that refuses it serves first, then its mirror
+/// `--follow` to a PostgreSQL that drops it serves first, then its mirror
 /// fails, at every try a supervisor makes -- and each rewrote the whole
-/// file while it checkpointed.
+/// file while it checkpointed. The "PostgreSQL" is a listener this test
+/// holds, which drops the mirror's connection only once the server says it
+/// listens: the failure comes after the server served, every run.
 #[test]
 fn a_server_that_stops_on_a_failure_writes_no_checkpoint() {
-    let path = tmp("start", "refused-source.fenec");
+    let path = tmp("start", "dropped-source.fenec");
     let p = path.to_str().unwrap();
     vectors(&["--file", p], false);
     let before = as_it_is(&path);
-    for _ in 0..2 {
-        let (code, log) = ended(
-            command(&[
-                "--file",
-                p,
-                "--http",
-                "127.0.0.1:0",
-                "--follow",
-                "postgres://fenec@127.0.0.1:1/none",
-                "--follow-table",
-                "t",
-            ]),
-            EXIT,
-        );
-        assert_eq!(code, 1, "{log}");
-        assert!(log.contains("listening on"), "{log}");
-        assert!(log.contains("the mirror of t stopped"), "{log}");
-        assert!(!log.contains("checkpoint written"), "{log}");
-        assert!(
-            as_it_is(&path).0 == before.0,
-            "the file was rewritten\n{log}"
-        );
-    }
+
+    let source = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("postgres://fenec@{}/none", source.local_addr().unwrap());
+    let mut server = start(&["--file", p, "--follow", &url, "--follow-table", "t"]);
+    // `start` returned on the `listening on` line; the mirror connects, if
+    // it has not yet, and waits for an answer it never gets until this
+    // drops it. The shutdown that follows runs on the thread that marked
+    // the server serving, after the mark.
+    source.set_nonblocking(true).unwrap();
+    let deadline = std::time::Instant::now() + EXIT;
+    let mirror = loop {
+        match source.accept() {
+            Ok((stream, _)) => break stream,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the mirror never came"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => panic!("{e}"),
+        }
+    };
+    drop(mirror);
+    let (code, log) = server.exited(EXIT).expect("the server went on");
+    assert_eq!(code, 1, "{log}");
+    assert!(log.contains("the mirror of t stopped"), "{log}");
+    assert!(
+        log.contains("no checkpoint: the server stops on a failure"),
+        "{log}"
+    );
+    assert!(
+        as_it_is(&path).0 == before.0,
+        "the file was rewritten\n{log}"
+    );
     assert_eq!(documents(&path, "v"), 1000);
 }
 

@@ -154,14 +154,18 @@ pub fn exit_with(code: i32) {
 /// Whether the server got as far as serving: its HTTP thread started.
 static SERVED: AtomicBool = AtomicBool::new(false);
 
-/// Marks the server as serving, once its HTTP thread is started, unless a
-/// stop was asked for meanwhile -- stdin already closed, the app gone while
-/// a standby's tenants opened: that start never served either. A shutdown
+/// Marks the server as serving, once its HTTP thread is started. A shutdown
 /// before it writes no checkpoint ([`checkpoints`]).
+///
+/// The caller reads [`shutdown_requested`] before it starts that thread and
+/// marks nothing if a stop was already asked for -- stdin already closed,
+/// the app gone while a standby's tenants opened -- since that start never
+/// served. Read after, the flag could be a supervisor's answer to the
+/// thread's own `listening on` line: beside 16 busy loops 1 SIGTERM in 200
+/// came between the line and the mark, and a server that had served exited
+/// with no checkpoint.
 pub fn serving() {
-    if !shutdown_requested() {
-        SERVED.store(true, Ordering::SeqCst);
-    }
+    SERVED.store(true, Ordering::SeqCst);
 }
 
 /// Whether [`serving`] was reached.
