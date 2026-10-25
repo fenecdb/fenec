@@ -44,8 +44,8 @@ fenecdb is at version {{version}}, and is alpha software.</p>
     (<a href="mobile.html">Mobile and native apps</a>).</li>
   <li><b>You search with nothing to install:</b> BM25 with typos,
     highlights and facets, and by meaning too, the two fused by rank
-    (<a href="fenecql.html#typos">Typos and words begun</a>,
-    <a href="fenecql.html#hybrid">Hybrid search</a>).</li>
+    (<a href="fenecql-search.html#typos">Typos and words begun</a>,
+    <a href="fenecql-search.html#hybrid">Hybrid search</a>).</li>
 </ul>
 
 <h2 id="features">Feature by feature</h2>
@@ -61,7 +61,7 @@ fenecdb is at version {{version}}, and is alpha software.</p>
   <td>IndexedDB, or a file of the origin private file system in a worker, Safari included (<a href="javascript.html#keeping">Keeping a database</a>)</td>
   <td>IndexedDB, recommended; an OPFS file system in a worker that does not work in Safari (<a href="https://pglite.dev/docs/filesystems">file systems</a>)</td></tr>
 <tr><td>Data model</td>
-  <td>Typed documents in collections, <code>json</code> fields (<a href="fenecql.html#json">Objects and paths</a>)</td>
+  <td>Typed documents in collections, <code>json</code> fields (<a href="fenecql-schema.html#json">Objects and paths</a>)</td>
   <td>PostgreSQL's tables and types</td></tr>
 <tr><td>Query language</td>
   <td>FenecQL and a typed query builder (<a href="javascript.html#the-query-builder">The query builder</a>)</td>
@@ -82,22 +82,22 @@ fenecdb is at version {{version}}, and is alpha software.</p>
   <td>Tables declared in code, Drizzle's way, checked at every open (<a href="javascript.html#schema">Schema in code</a>)</td>
   <td>PostgreSQL's DDL; Drizzle and other ORMs (<a href="https://orm.drizzle.team/docs/connect-pglite">Drizzle</a>)</td></tr>
 <tr><td>Full text</td>
-  <td>BM25, built in (<a href="fenecql.html#the-text-clause">The text clause</a>)</td>
+  <td>BM25, built in (<a href="fenecql-search.html#the-text-clause">The text clause</a>)</td>
   <td>BM25 through the pg_textsearch extension (<a href="https://pglite.dev/extensions/">extensions</a>)</td></tr>
 <tr><td>Highlights and facets</td>
-  <td><code>highlight()</code>, <code>snippet()</code> and <code>facet</code> (<a href="fenecql.html#highlights">Highlights</a>, <a href="fenecql.html#facets">Facets</a>)</td>
+  <td><code>highlight()</code>, <code>snippet()</code> and <code>facet</code> (<a href="fenecql-search.html#highlights">Highlights</a>, <a href="fenecql-search.html#facets">Facets</a>)</td>
   <td>PostgreSQL's <code>ts_headline</code> over a <code>tsquery</code>; a facet is a <code>GROUP BY</code> of its own</td></tr>
 <tr><td>Vector index</td>
-  <td>HNSW, built in (<a href="fenecql.html#the-vector-clause">The vector clause</a>)</td>
+  <td>HNSW, built in (<a href="fenecql-vector.html#the-vector-clause">The vector clause</a>)</td>
   <td>pgvector's HNSW and IVFFlat, an extension (<a href="https://pglite.dev/extensions/">extensions</a>, <a href="https://github.com/pgvector/pgvector">pgvector</a>)</td></tr>
 <tr><td>Quantization</td>
-  <td><code>f16</code> storage; <code>int8</code> and <code>bit</code> codes, re-ordered by the full vectors (<a href="fenecql.html#quantized">Quantized indexes</a>)</td>
+  <td><code>f16</code> storage; <code>int8</code> and <code>bit</code> codes, re-ordered by the full vectors (<a href="fenecql-vector.html#quantized">Quantized indexes</a>)</td>
   <td><code>halfvec</code>, <code>bit</code>, binary quantization by expression index (<a href="https://github.com/pgvector/pgvector">pgvector</a>)</td></tr>
 <tr><td>Filtered vector search</td>
   <td>Planned with the filter, an exact fallback when the filter leaves too few (<a href="concepts.html#a-filter-and-a-vector-together">A filter and a vector together</a>)</td>
   <td>pgvector's iterative index scans (<a href="https://github.com/pgvector/pgvector">pgvector</a>)</td></tr>
 <tr><td>Hybrid search</td>
-  <td><code>fuse</code>, reciprocal rank fusion (<a href="fenecql.html#hybrid">Hybrid search</a>)</td>
+  <td><code>fuse</code>, reciprocal rank fusion (<a href="fenecql-search.html#hybrid">Hybrid search</a>)</td>
   <td>No operator; written in SQL</td></tr>
 <tr><td>Download, brotli</td>
   <td>273 KB (<a href="#size">below</a>)</td>
@@ -259,7 +259,7 @@ a PostgreSQL server holding the same tables,
 network.</p>
 
 <p>What does not carry over: a join becomes <code>lookup</code> or
-<code>in (get …)</code> (<a href="fenecql.html#the-lookup-clause">The
+<code>in (get …)</code> (<a href="fenecql-lookup.html#the-lookup-clause">The
 lookup clause</a>), a <code>.transaction()</code> that reads between its
 writes becomes a <code>run</code> of several statements, which lands whole
 but cannot branch on what it read, and an extension has no counterpart

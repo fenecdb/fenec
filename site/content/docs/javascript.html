@@ -570,7 +570,7 @@ the third argument; two on one field are refused as the table is declared,
 as is anything FenecQL cannot hold. An index over several fields is
 <code>.on()</code> with several columns, each <code>.desc()</code> or
 <code>.asc()</code> as Drizzle writes it, beside a field's own
-(<a href="/docs/fenecql#composite">Indexes over several fields</a>), and
+(<a href="/docs/fenecql-indexes#composite">Indexes over several fields</a>), and
 <code>dropIndex(table, ...fields)</code> is the migration that takes one
 off.</p>
 
@@ -746,7 +746,7 @@ await db.collation('all');                  // every script's: 145 KB, 67 KB gzi
 
 <details class="deep"><summary>Details</summary>
 <p><code>collate und</code> and <code>collate tr</code> need the weights of
-the scripts they compare (<a href="fenecql.html#collation">Collation</a>).
+the scripts they compare (<a href="fenecql-schema.html#collation">Collation</a>).
 The module carries the Latin ones and is handed the others as a page first
 needs them, a chunk a group of scripts, from <code>collate/</code> beside the
 module — or from where <code>Fenec.open(src, { collation })</code> says: a
@@ -906,7 +906,7 @@ articles.where({ year: { gte: 2024 }, tags: { has: 'rust' } });
 articles.where('meta.lang', '=', 'tr');                      // a path into a json field
 </pre>
 
-<p>A path into a <a href="fenecql.html#json"><code>json</code> field</a>
+<p>A path into a <a href="fenecql-schema.html#json"><code>json</code> field</a>
 goes wherever a field does — <code>where</code>, <code>select</code>,
 <code>order</code>, and the keys of <code>update</code>, which sets one key
 inside the field — and a plain object is a <code>json</code> field's value:
@@ -922,12 +922,12 @@ types take <code>'meta.lang'</code> as a path of it.</p>
 <tr><td><b>Null</b></td><td><code>{ summary: null }</code> becomes <code>is null</code>; <code>{ summary: { not: null } }</code> becomes <code>is not null</code></td></tr>
 <tr><td><b>Combining</b></td><td><code>or(...)</code> <code>not(...)</code> <code>and(...)</code> — <code>where</code> already <code>and</code>s</td></tr>
 <tr><td><b>Escape hatch</b></td><td><code>raw('cosine(embed, ?) > ?', vector, 0.5)</code></td></tr>
-<tr><td><b>Ordering</b></td><td><code>order('year','desc').order('title')</code> — successive calls add keys; <code>order('name', 'asc', { collate: 'und' })</code> puts text in Unicode's order for every language, <code>{ collate: 'tr' }</code> in Turkish order (<a href="fenecql.html#collation">Collation</a>)</td></tr>
-<tr><td><b>Ranking</b></td><td><code>near('embed', v, { ef, exact })</code>, <code>match('body', text)</code>, <code>rerank('embed', v, { candidates })</code> after a <code>match</code>, and <code>match(...).near(...).fuse({ k, candidates })</code> to rank by both (<a href="fenecql.html#hybrid">Hybrid search</a>)</td></tr>
+<tr><td><b>Ordering</b></td><td><code>order('year','desc').order('title')</code> — successive calls add keys; <code>order('name', 'asc', { collate: 'und' })</code> puts text in Unicode's order for every language, <code>{ collate: 'tr' }</code> in Turkish order (<a href="fenecql-schema.html#collation">Collation</a>)</td></tr>
+<tr><td><b>Ranking</b></td><td><code>near('embed', v, { ef, exact })</code>, <code>match('body', text)</code>, <code>rerank('embed', v, { candidates })</code> after a <code>match</code>, and <code>match(...).near(...).fuse({ k, candidates })</code> to rank by both (<a href="fenecql-search.html#hybrid">Hybrid search</a>)</td></tr>
 <tr><td><b>Relations</b></td><td><code>lookup('reviews', { on: 'product_id', limit: 3 })</code> — children per row, chainable</td></tr>
-<tr><td><b>Endpoints</b></td><td><code>rows()</code> <code>first()</code> <code>count()</code> <code>run()</code>, and <code>explain()</code>: the path the query took, one line a step (<a href="fenecql.html#explain">Explain</a>)</td></tr>
+<tr><td><b>Endpoints</b></td><td><code>rows()</code> <code>first()</code> <code>count()</code> <code>run()</code>, and <code>explain()</code>: the path the query took, one line a step (<a href="fenecql-reading.html#explain">Explain</a>)</td></tr>
 <tr><td><b>Writes</b></td><td><code>insert(doc|docs)</code> <code>update(object)</code> <code>delete()</code>, each resolving to the rows it changed; <code>insert(doc, { ifAbsent: true })</code> passes over a held id or <code>@unique</code> value (<code>put … if absent</code>); <code>order(...)</code> and <code>limit(n)</code> before an <code>update</code> or a <code>delete</code> pick its rows, and <code>{ returning: true }</code> resolves to them — a job queue's claim (<a href="queues.html">Job queues</a>)</td></tr>
-<tr><td><b>Values worked out</b></td><td><code>update({ n: inc(1) })</code> renders <code>n: coalesce(n, 0) + $1</code>, and <code>expr('price * ?', 1.2)</code> any expression over the row — see <a href="fenecql.html#writes">Writes that read the row</a> and <a href="redis.html">Instead of Redis</a></td></tr>
+<tr><td><b>Values worked out</b></td><td><code>update({ n: inc(1) })</code> renders <code>n: coalesce(n, 0) + $1</code>, and <code>expr('price * ?', 1.2)</code> any expression over the row — see <a href="fenecql-writing.html#writes">Writes that read the row</a> and <a href="redis.html">Instead of Redis</a></td></tr>
 </tbody>
 </table>
 </div>
@@ -1070,7 +1070,7 @@ async function search(words: string, brand: string | null = null) {
     word within a typo or two, <code>prefix</code> the last word as the
     start of one — <code>databse</code> and <code>datab</code> both find
     <code>database</code>, and the marks fall on it (<a
-    href="/docs/fenecql#typos">Typos and words begun</a>).</li>
+    href="/docs/fenecql-search#typos">Typos and words begun</a>).</li>
   <li><b>The offsets are a JavaScript string's own</b> (UTF-16), so
     <code>text.slice(start, end)</code> is the marked word, past an emoji
     or an accent.</li>
@@ -1085,17 +1085,17 @@ async function search(words: string, brand: string | null = null) {
 <p><code>.highlight(field, { pre, post })</code> answers the marked text
 instead of the offsets, and <code>.snippet(field, words, { ellipsis, pre,
 post })</code> a window of that many words around the marks — see <a
-href="/docs/fenecql#highlights">Highlights and snippets</a>. Text with
+href="/docs/fenecql-search#highlights">Highlights and snippets</a>. Text with
 tags is not escaped, which is why the page above builds its nodes from the
 offsets. <code>.facet(field, { top })</code> takes a field or a path into a
 <code>json</code> one, and <code>run()</code> hands the counts as its
-<code>facets</code> too — see <a href="/docs/fenecql#facets">Facets</a>.
+<code>facets</code> too — see <a href="/docs/fenecql-search#facets">Facets</a>.
 A facet beside <code>near</code> is refused: <code>near</code> ranks every
 row rather than selecting some, so the counts would be the filter's alone.
 <code>{ disjunctive: true }</code> counts a facet without the filter's own
 conditions on its field, and <code>{ ranges: [0, 2500, 5000] }</code> counts
-a number by range (<a href="/docs/fenecql#disjunctive-facets">
-Counted without its own filter</a>, <a href="/docs/fenecql#range-facets">Ranges</a>).</p>
+a number by range (<a href="/docs/fenecql-search#disjunctive-facets">
+Counted without its own filter</a>, <a href="/docs/fenecql-search#range-facets">Ranges</a>).</p>
 
 <p>A query built in steps keeps the type it was declared with, so a facet
 asked after the declaration is typed as any facet: <code>rows.facets</code>

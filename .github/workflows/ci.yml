@@ -579,6 +579,56 @@ jobs:
       - name: The failover drill
         run: make drill
 
+  # The ways to install a release other than the registries: the installer
+  # the site serves (site/install.sh) against a release of its own made on
+  # localhost, the Homebrew formula the release job writes, and the .deb and
+  # .rpm, made by the release's own scripts from the latest release's tarball
+  # and installed in a Debian and a Fedora container. Nothing is published.
+  packaging:
+    name: packaging (installer, Homebrew formula, .deb and .rpm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: shellcheck
+        run: shellcheck --shell=sh site/install.sh site/test_install.sh tools/install-nfpm.sh tools/linux-packages.sh tools/linux-packages-check.sh
+
+      - name: The installer, its checksum and its refusals
+        run: sh site/test_install.sh
+
+      # The formula a maintainer copies into the tap: written by the script
+      # (--check, which also needs the repository to be this one), and its four
+      # sums the real tarballs' of the release it names (--verify).
+      - name: The Homebrew formula
+        run: |
+          python3 tools/test_homebrew_formula.py
+          python3 tools/homebrew-formula.py --check packaging/homebrew/Formula/fenecdb.rb
+          python3 tools/homebrew-formula.py --verify packaging/homebrew/Formula/fenecdb.rb
+
+      # The latest release's tarball, packed as it is and again named as a
+      # pre-release (0.2.0-rc1 is 0.2.0~rc1 in a package), which the first
+      # release of a series would otherwise be the first to meet.
+      - name: The .deb and .rpm of the latest release's tarball
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tools/install-nfpm.sh "$RUNNER_TEMP/nfpm"
+          export PATH="$RUNNER_TEMP/nfpm:$PATH"
+          gh release download -R "$GITHUB_REPOSITORY" -p 'fenec-v*-x86_64-unknown-linux-musl.tar.gz' -D "$RUNNER_TEMP/tarballs"
+          file=$(basename "$RUNNER_TEMP"/tarballs/*.tar.gz)
+          version=${file#fenec-v}
+          version=${version%%-x86_64*}
+          tools/linux-packages.sh "$version" "$RUNNER_TEMP/tarballs" "$RUNNER_TEMP/packages" amd64
+          tools/linux-packages-check.sh "$version" "$RUNNER_TEMP/packages" amd64
+          pre="$version-rc1"
+          mkdir "$RUNNER_TEMP/pre" "$RUNNER_TEMP/pre-tarballs"
+          tar -xzf "$RUNNER_TEMP/tarballs/$file" -C "$RUNNER_TEMP/pre"
+          mv "$RUNNER_TEMP/pre/fenec-v$version-x86_64-unknown-linux-musl" "$RUNNER_TEMP/pre/fenec-v$pre-x86_64-unknown-linux-musl"
+          tar -czf "$RUNNER_TEMP/pre-tarballs/fenec-v$pre-x86_64-unknown-linux-musl.tar.gz" -C "$RUNNER_TEMP/pre" "fenec-v$pre-x86_64-unknown-linux-musl"
+          tools/linux-packages.sh "$pre" "$RUNNER_TEMP/pre-tarballs" "$RUNNER_TEMP/pre-packages" amd64
+          FENEC_BINARY_VERSION="$version" tools/linux-packages-check.sh "$pre" "$RUNNER_TEMP/pre-packages" amd64
+
   build:
     name: build (release + cli profile)
     runs-on: ubuntu-latest

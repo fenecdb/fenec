@@ -46,14 +46,14 @@ and is alpha software.</p>
     syncs, 516 a second from 16 writers against SQLite's 258, and readers
     keep reading beside them (<a href="#measured">measured below</a>).</li>
   <li><b>A search box needs typos and facets</b> in the query that ranks
-    the words (<a href="fenecql.html#typos">Typos and words
-    begun</a>, <a href="fenecql.html#facets">Facets</a>).</li>
+    the words (<a href="fenecql-search.html#typos">Typos and words
+    begun</a>, <a href="fenecql-search.html#facets">Facets</a>).</li>
   <li><b>You want an approximate vector index:</b> HNSW with
     quantization and filtered search
-    (<a href="fenecql.html#the-vector-clause">The vector clause</a>).
+    (<a href="fenecql-vector.html#the-vector-clause">The vector clause</a>).
     sqlite-vec's approximate indexes are in its alpha releases.</li>
   <li><b>You search by meaning and by words in one query,</b> fused by
-    rank (<a href="fenecql.html#hybrid">Hybrid search</a>).</li>
+    rank (<a href="fenecql-search.html#hybrid">Hybrid search</a>).</li>
 </ul>
 
 <h2 id="features">Feature by feature</h2>
@@ -69,7 +69,7 @@ and is alpha software.</p>
   <td>IndexedDB, or a file of the origin private file system in a worker (<a href="javascript.html#keeping">Keeping a database</a>)</td>
   <td><code>kvvfs</code> (localStorage), <code>opfs</code> (a worker and COOP/COEP headers), <code>opfs-sahpool</code> (<a href="https://sqlite.org/wasm/doc/trunk/persistence.md">persistence</a>)</td></tr>
 <tr><td>Data model</td>
-  <td>Typed documents in collections, <code>json</code> fields (<a href="fenecql.html#json">Objects and paths</a>)</td>
+  <td>Typed documents in collections, <code>json</code> fields (<a href="fenecql-schema.html#json">Objects and paths</a>)</td>
   <td>Relational tables</td></tr>
 <tr><td>Query language</td>
   <td>FenecQL; builders in JS, Python, Go, .NET, Swift, Kotlin, Dart (<a href="fenecql.html">FenecQL</a>)</td>
@@ -90,25 +90,25 @@ and is alpha software.</p>
   <td>Typed schema, <code>alter collection</code>, a schema declared in code and checked at every open (<a href="javascript.html#schema">Schema in code</a>)</td>
   <td>SQL DDL; migrations by your own code or tools</td></tr>
 <tr><td>Full text</td>
-  <td>BM25 (<a href="fenecql.html#the-text-clause">The text clause</a>)</td>
+  <td>BM25 (<a href="fenecql-search.html#the-text-clause">The text clause</a>)</td>
   <td>FTS5 with <code>bm25()</code>; unicode61, ascii, porter and trigram tokenizers (<a href="https://sqlite.org/fts5.html">FTS5</a>)</td></tr>
 <tr><td>Highlights and snippets</td>
-  <td><code>highlight()</code> and <code>snippet()</code>, as UTF-16 offsets or between tags, by the index's own tokenizer (<a href="fenecql.html#highlights">Highlights and snippets</a>)</td>
+  <td><code>highlight()</code> and <code>snippet()</code>, as UTF-16 offsets or between tags, by the index's own tokenizer (<a href="fenecql-search.html#highlights">Highlights and snippets</a>)</td>
   <td>FTS5's <code>highlight()</code> and <code>snippet()</code>, the marked text between tags (<a href="https://sqlite.org/fts5.html">FTS5</a>)</td></tr>
 <tr><td>Facets</td>
-  <td><code>facet</code>, each value's count over every match, beside the page (<a href="fenecql.html#facets">Facets</a>)</td>
+  <td><code>facet</code>, each value's count over every match, beside the page (<a href="fenecql-search.html#facets">Facets</a>)</td>
   <td>None built in; a <code>GROUP BY</code> a facet, a query each</td></tr>
 <tr><td>Vector index</td>
-  <td>HNSW (<a href="fenecql.html#the-vector-clause">The vector clause</a>)</td>
+  <td>HNSW (<a href="fenecql-vector.html#the-vector-clause">The vector clause</a>)</td>
   <td>sqlite-vec's <code>vec0</code>; ANN indexes (rescore, DiskANN) in the v0.1.10 alpha releases, "pre-v1, so expect breaking changes" (<a href="https://github.com/asg017/sqlite-vec/releases">releases</a>, <a href="https://github.com/asg017/sqlite-vec">README</a>)</td></tr>
 <tr><td>Quantization</td>
-  <td><code>f16</code> storage; <code>int8</code> and <code>bit</code> codes, re-ordered by the full vectors (<a href="fenecql.html#quantized">Quantized indexes</a>)</td>
+  <td><code>f16</code> storage; <code>int8</code> and <code>bit</code> codes, re-ordered by the full vectors (<a href="fenecql-vector.html#quantized">Quantized indexes</a>)</td>
   <td>float, int8 and binary vectors (<a href="https://github.com/asg017/sqlite-vec">README</a>)</td></tr>
 <tr><td>Filtered vector search</td>
   <td>Planned with the filter, an exact fallback when the filter leaves too few (<a href="concepts.html#a-filter-and-a-vector-together">A filter and a vector together</a>)</td>
   <td>Up to 16 metadata columns and 4 partition keys, filtered inside the KNN query (<a href="https://alexgarcia.xyz/sqlite-vec/features/vec0.html">vec0</a>)</td></tr>
 <tr><td>Hybrid search</td>
-  <td><code>fuse</code>, reciprocal rank fusion (<a href="fenecql.html#hybrid">Hybrid search</a>)</td>
+  <td><code>fuse</code>, reciprocal rank fusion (<a href="fenecql-search.html#hybrid">Hybrid search</a>)</td>
   <td>None built in; FTS5's page has no vector search (<a href="https://sqlite.org/fts5.html">FTS5</a>)</td></tr>
 <tr><td>Browser module, brotli</td>
   <td>273 KB (<a href="#size">below</a>)</td>
@@ -136,7 +136,7 @@ tabs reach it through the one that holds it, or share a synced replica
 b = 0.75 (<a href="https://sqlite.org/fts5.html">FTS5</a>). fenecdb's
 <code>@text</code> also splits Chinese, Japanese, Korean and Thai text into
 character runs and can index word prefixes
-(<a href="fenecql.html#the-text-clause">The text clause</a>).</p>
+(<a href="fenecql-search.html#the-text-clause">The text clause</a>).</p>
 
 <p>sqlite-vec's first stable release, v0.1.0, searched by brute force
 (<a href="https://alexgarcia.xyz/blog/2024/sqlite-vec-stable-release/index.html">announcement</a>).
@@ -312,7 +312,7 @@ from the first 1 000 rows. A table with no equivalent type is refused until
 <code>--cast</code> says what to do (<a href="import.html#type-mapping">Type
 mapping</a>). A join
 becomes <code>lookup</code> or <code>in (get …)</code>
-(<a href="fenecql.html#the-lookup-clause">The lookup clause</a>), and a
+(<a href="fenecql-lookup.html#the-lookup-clause">The lookup clause</a>), and a
 transaction becomes a batch that lands whole
 (<a href="http.html#batches">Batches</a>).</p>
 </details>

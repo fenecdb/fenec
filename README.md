@@ -163,7 +163,27 @@ browser, React, Node, Python, Go, .NET, Rust, SwiftUI, Jetpack Compose and
 Flutter -- each a folder to open and run, with a live list, filters, and
 full-text and vector search.
 
-**Shell.** `cargo build --release -p fenec-cli`, then:
+**Binaries.** `fenec`, the shell, and `fenec-server`, the HTTP server, for macOS
+and Linux on arm64 and x86_64 (not Windows yet; the image runs anywhere):
+
+```bash
+brew install fenecdb/tap/fenecdb               # Homebrew
+curl -fsSL https://fenecdb.com/install.sh | sh # ~/.fenecdb/bin, no sudo
+sudo apt install ./fenecdb_X.Y.Z-1_amd64.deb   # or: sudo dnf install ./fenecdb-X.Y.Z-1.x86_64.rpm
+```
+
+The script downloads the release from GitHub and checks the tarball against
+the release's `SHA256SUMS` before it unpacks it; it touches no shell startup
+file, only prints the `PATH` line to add. Read it first with
+`curl -fsSL https://fenecdb.com/install.sh | less`
+([`site/install.sh`](site/install.sh)). The `.deb` and `.rpm` are attached to
+each release after 0.1.11, for amd64 and arm64, with their checksums in
+`SHA256SUMS`. The [Quickstart](https://fenecdb.com/docs/quickstart) has each
+with its first run; the tap's formula is
+[`packaging/homebrew`](packaging/homebrew).
+
+**Shell.** Installed as above, `fenec data.fenec`; from a clone,
+`cargo build --release -p fenec-cli`, then:
 
 ```bash
 ./target/release/fenec data.fenec              # interactive
@@ -333,7 +353,7 @@ query; it is not a join and is not trying to be one.
 | [Quickstart](https://fenecdb.com/docs/quickstart) | Install a release, a package or the image, write a row and query it: in a browser tab, on a server from your language, or in the shell |
 | [Build from source](https://fenecdb.com/docs/build) | Clone, build the shell, the server and the browser module, run the tests and build the site |
 | [How it works](https://fenecdb.com/docs/concepts) | Segments, the offset index, the mapped file, why there is no page cache and exactly one writer, and HNSW with a filter |
-| [FenecQL](https://fenecdb.com/docs/fenecql) | Statements, types, indexes, operators, parameters, functions |
+| [FenecQL](https://fenecdb.com/docs/fenecql) | A tour from the first write to a lookup and a total, the grammar, and a reference page for each family of statements: [reading](https://fenecdb.com/docs/fenecql-reading), [writing](https://fenecdb.com/docs/fenecql-writing), [collections and types](https://fenecdb.com/docs/fenecql-schema), [indexes](https://fenecdb.com/docs/fenecql-indexes), [lookup and subqueries](https://fenecdb.com/docs/fenecql-lookup), [aggregates](https://fenecdb.com/docs/fenecql-aggregates), [text search](https://fenecdb.com/docs/fenecql-search) and [vector search](https://fenecdb.com/docs/fenecql-vector) |
 | [From SQL](https://fenecdb.com/docs/sql) | The SQL FenecQL reads as written — tables, joins, subqueries, pgvector's distances — what it refuses and what to write instead, where the meaning is not SQL's: nulls, double quotes, text, joins |
 | [JavaScript client](https://fenecdb.com/docs/javascript) | The browser client, the immutable query builder, binding it to a transport, live queries as an app's state, a schema declared in code |
 | [Mobile and native apps](https://fenecdb.com/docs/mobile) | Swift, Kotlin and Dart/Flutter: a file on the device, the builder, live queries driving the UI, syncing with a server, TLS and the background, where the file lives, durability |

@@ -26,7 +26,7 @@ WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --fe
 	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down grafana-check deploy-check drill memory clean \
-	site site-serve site-deploy
+	site site-serve site-deploy packaging-test
 
 all: test wasm
 
@@ -938,6 +938,17 @@ site: wasm wasm-lite wasm-min
 ## Same, on http://localhost:8788
 site-serve: wasm wasm-lite wasm-min
 	python3 site/build.py --serve --port $(SITE_PORT)
+
+## The ways to install a release that are not a registry: site/install.sh
+## against a release of its own served from localhost (its checksum, its
+## refusals, a copy cut short), and the Homebrew formula held to its script.
+## CI's `packaging` job also makes the .deb and .rpm of the latest release
+## and installs them in Debian and Fedora containers (tools/linux-packages-
+## check.sh, which needs Docker).
+packaging-test:
+	sh site/test_install.sh
+	python3 tools/test_homebrew_formula.py
+	python3 tools/homebrew-formula.py --check packaging/homebrew/Formula/fenecdb.rb
 
 ## Publishes to Cloudflare Workers (fenecdb.com). Needs `wrangler login`
 ## or CLOUDFLARE_API_TOKEN; CI does the same thing on a push to main.

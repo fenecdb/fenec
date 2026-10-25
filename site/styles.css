@@ -836,6 +836,9 @@ tbody tr:last-child td { border-bottom: 0; }
 }
 .cards a { font-weight: 600; font-size: 17px; text-decoration: none; color: var(--sun-hot); }
 .cards p { margin: 6px 0 0; color: var(--sand-dim); font-size: 15px; max-width: none; }
+/* `.doc ul`'s padding is more specific than the reset above, so the grid sat
+   22px in from the text it follows. */
+.doc ul.cards { padding-left: 0; }
 
 /* The docs index's map of every page, a column a group of the sidebar's
    (build.py writes it from the same list). */

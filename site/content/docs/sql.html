@@ -86,7 +86,7 @@ last expression.</p>
 <tr data-same><td><code>SELECT k, count(*) AS n FROM t GROUP BY k HAVING count(*) &gt; 1</code></td><td><code>get t select k, count(*) as n group k having count(*) &gt; 1</code></td><td></td></tr>
 <tr data-same><td><code>SELECT * FROM t WHERE x IN (1, 2, 3)</code></td><td><code>get t where x in [1, 2, 3]</code></td><td>through <code>@hash</code> as <code>in [..]</code> is</td></tr>
 <tr data-same><td><code>SELECT * FROM t WHERE x NOT IN ('a', 'b')</code></td><td><code>get t where not (x in ["a", "b"])</code></td><td>a null <code>x</code> is taken in (<a href="#nulls">below</a>)</td></tr>
-<tr data-same><td><code>SELECT * FROM t WHERE x IN (SELECT y FROM u WHERE z = 1)</code></td><td><code>get t where x in (get u select y where z = 1)</code></td><td>a <a href="/docs/fenecql#subqueries">subquery</a>, run once</td></tr>
+<tr data-same><td><code>SELECT * FROM t WHERE x IN (SELECT y FROM u WHERE z = 1)</code></td><td><code>get t where x in (get u select y where z = 1)</code></td><td>a <a href="/docs/fenecql-lookup#subqueries">subquery</a>, run once</td></tr>
 <tr data-same><td><code>SELECT * FROM t WHERE x IN (SELECT DISTINCT y FROM u)</code></td><td><code>get t where x in (get u select y)</code></td><td><code>DISTINCT</code> changes nothing there</td></tr>
 <tr data-same><td><code>SELECT * FROM t WHERE x BETWEEN 1 AND 3 AND y = 2</code></td><td><code>get t where x &gt;= 1 and x &lt;= 3 and y = 2</code></td><td>both bounds in; the first <code>AND</code> is <code>BETWEEN</code>'s</td></tr>
 <tr data-same><td><code>SELECT * FROM t WHERE x NOT BETWEEN 1 AND 3</code></td><td><code>get t where not (x &gt;= 1 and x &lt;= 3)</code></td><td></td></tr>
@@ -121,14 +121,14 @@ last expression.</p>
 <tr data-same><td><code>CREATE INDEX ON orders USING hash (user_id)</code></td><td><code>create index on orders (user_id) @hash</code></td><td></td></tr>
 <tr data-same><td><code>CREATE INDEX ON posts (owner, created DESC)</code></td><td><code>create index on posts (owner, created desc) @sorted</code></td><td>over several columns, an index over several fields</td></tr>
 <tr data-same><td><code>CREATE INDEX ON docs USING hnsw (emb vector_cosine_ops) WITH (m = 16)</code></td><td><code>create index on docs (emb) @hnsw(cosine, m=16)</code></td><td>pgvector's operator class names the distance</td></tr>
-<tr data-same><td><code>CREATE INDEX ON docs USING gin (to_tsvector('english', body))</code></td><td><code>create index on docs (body) @text</code></td><td>full text, for <a href="/docs/fenecql#the-text-clause"><code>match</code></a></td></tr>
+<tr data-same><td><code>CREATE INDEX ON docs USING gin (to_tsvector('english', body))</code></td><td><code>create index on docs (body) @text</code></td><td>full text, for <a href="/docs/fenecql-search#the-text-clause"><code>match</code></a></td></tr>
 </tbody>
 </table>
 </div>
 
 <h2 id="joins">Joins</h2>
 
-<p>A <code>JOIN</code> on a key is a <a href="/docs/fenecql#the-lookup-clause"><code>lookup</code></a>
+<p>A <code>JOIN</code> on a key is a <a href="/docs/fenecql-lookup#the-lookup-clause"><code>lookup</code></a>
 from each row of the first table to its matches in the next, answered as
 SQL answers it: flat rows, a row a pair — and, for a <code>LEFT
 JOIN</code>, a row of <code>null</code>s where nothing matched — the
@@ -228,7 +228,7 @@ FenecQL text asks for.</p>
 <tr data-refused><td><code>ALTER TABLE t ADD COLUMN a int</code></td><td><code>alter collection t add field a int</code></td><td></td></tr>
 <tr data-refused><td><code>DROP TABLE t</code></td><td><code>drop collection t</code></td><td></td></tr>
 <tr data-refused><td><code>TRUNCATE t</code></td><td><code>del t</code></td><td></td></tr>
-<tr data-refused><td><code>BEGIN</code></td><td>a <code>/batch</code></td><td>no transaction is held open across requests; a <a href="/docs/http#batches"><code>/batch</code></a> lands whole or not at all, and <a href="/docs/fenecql#require"><code>require</code></a> makes a count its condition</td></tr>
+<tr data-refused><td><code>BEGIN</code></td><td>a <code>/batch</code></td><td>no transaction is held open across requests; a <a href="/docs/http#batches"><code>/batch</code></a> lands whole or not at all, and <a href="/docs/fenecql-writing#require"><code>require</code></a> makes a count its condition</td></tr>
 <tr data-refused><td><code>CREATE TABLE t (n int DEFAULT 0, u int REFERENCES users(id))</code></td><td><code>create collection t (n int, u int @hash)</code></td><td>no default, foreign key or <code>CHECK</code>: dropped, the collection would take writes SQL refuses (<a href="#create-table">below</a>)</td></tr>
 <tr data-refused><td><code>CREATE TABLE t (price numeric(10, 2))</code></td><td><code>create collection t (price_cents int)</code></td><td>no decimal: an <code>int</code> of the smallest unit keeps it exact</td></tr>
 <tr data-refused><td><code>CREATE TABLE t (id uuid PRIMARY KEY, n int)</code></td><td><code>create collection t (uuid text required @unique, n int)</code></td><td>a row's <code>id</code> is an int the database makes</td></tr>
@@ -241,7 +241,7 @@ FenecQL text asks for.</p>
 <tr data-refused><td><code>SELECT (SELECT name FROM products p WHERE p.id = l.product_id) AS name FROM lines l</code></td><td><code>select p.name from lines l join products p on p.id = l.product_id</code></td><td>another table's row beside each row is a join</td></tr>
 <tr data-refused><td><code>SELECT * FROM t WHERE meta-&gt;&gt;'source' = 'web'</code></td><td><code>get t where meta.source = 'web'</code></td><td>a json field's member is a path; <code>json_extract(meta, '$.source')</code> is answered so too</td></tr>
 <tr data-refused><td><code>SELECT id, emb &lt;-&gt; $1 AS d FROM docs ORDER BY emb &lt;-&gt; $1 LIMIT 5</code></td><td><code>get docs select id near emb $1 limit 5</code></td><td>each row's <code>_score</code> holds what the distance is turned into: the L2 distance, the cosine similarity, the inner product (<a href="#pgvector">below</a>)</td></tr>
-<tr data-refused><td><code>SELECT * FROM docs WHERE to_tsvector(body) @@ to_tsquery('rust')</code></td><td><code>get docs match body "rust"</code></td><td>full text is <a href="/docs/fenecql#the-text-clause"><code>match</code></a> over an <code>@text</code> field; MySQL's <code>MATCH … AGAINST</code> too</td></tr>
+<tr data-refused><td><code>SELECT * FROM docs WHERE to_tsvector(body) @@ to_tsquery('rust')</code></td><td><code>get docs match body "rust"</code></td><td>full text is <a href="/docs/fenecql-search#the-text-clause"><code>match</code></a> over an <code>@text</code> field; MySQL's <code>MATCH … AGAINST</code> too</td></tr>
 <tr data-refused><td><code>SELECT * FROM users WHERE email ~ '@example\.org$'</code></td><td><code>get users where email like '%@example.org'</code></td><td><code>~</code> is <i>contains</i>, not a regular expression (<a href="#tilde">below</a>)</td></tr>
 <tr data-refused><td><code>SELECT * FROM t ORDER BY x NULLS LAST</code></td><td><code>get t order x is null, x</code></td><td>a null comes first ascending</td></tr>
 <tr data-refused><td><code>INSERT INTO t VALUES (1, 'x')</code></td><td><code>insert into t (a, b) values (1, 'x')</code></td><td>the fields are named (<a href="#insert">below</a>)</td></tr>
@@ -359,7 +359,7 @@ that ends in its escape is refused.</p>
 <p>A <code>nocase</code> field compares by its case fold wherever it is
 compared, <code>LIKE</code> too, as PostgreSQL's <code>citext</code> does.
 <code>ILIKE</code> compares the case folds — Unicode's full fold, the one
-<a href="/docs/fenecql#nocase"><code>nocase</code></a> uses — so
+<a href="/docs/fenecql-schema#nocase"><code>nocase</code></a> uses — so
 <code>'Straße' ILIKE 'STRASSE'</code>, and <code>_</code> stands for one
 character of the fold. Its escape takes no character with a case. A
 collated field's <code>LIKE</code> compares its bytes, as its
@@ -410,7 +410,7 @@ refused.</p>
   <li><b>Text compares by its bytes</b>, as <code>COLLATE "C"</code> does.
     A field declared <code>collate tr</code> or <code>und</code> orders by
     that collation, and its <code>=</code> and <code>LIKE</code> compare
-    bytes — see <a href="/docs/fenecql#collation">Collation</a>.</li>
+    bytes — see <a href="/docs/fenecql-schema#collation">Collation</a>.</li>
   <li><b>Division between integers is whole</b>, toward zero:
     <code>7 / 2</code> is <code>3</code>, as in PostgreSQL and SQLite
     (MySQL's is <code>3.5</code>); an integer and a float make a

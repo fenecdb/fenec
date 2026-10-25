@@ -205,7 +205,7 @@ get couriers count   -- → 1
     and time set after, one statement whichever it is.</li>
   <li><b>Gone at once:</b> a row past its <code>@ttl</code> is out of every
     read the moment it is, and the server's sweeper deletes it one to two
-    minutes later (<a href="/docs/fenecql#ttl">Rows that expire</a>).</li>
+    minutes later (<a href="/docs/fenecql-indexes#ttl">Rows that expire</a>).</li>
 </ul>
 
 <h2 id="dispatch">The nearest job</h2>
@@ -215,7 +215,7 @@ worker that is ready, taken in one statement under the write lock, so two
 workers never take the same one. <code>order</code> takes the distance as
 its key in a <code>set</code> that picks its rows, and
 <code>returning</code> answers what was taken
-(<a href="/docs/fenecql#pick">Writes that pick their rows</a>):</p>
+(<a href="/docs/fenecql-writing#pick">Writes that pick their rows</a>):</p>
 
 <pre data-lang="fenecql">create collection deliveries (pickup geo @geo, run_at timestamp @sorted, courier text)
 put deliveries [{pickup: [15.0912, 37.5047], run_at: now()}, {pickup: [15.0855, 37.5076], run_at: now()}, {pickup: [15.0880, 37.5031], run_at: now() + 600000}]   -- → 3

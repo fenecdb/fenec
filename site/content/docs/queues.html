@@ -23,7 +23,7 @@ lock, so two workers never take the same one — what PostgreSQL's
 later for a delayed one, and while a worker holds it, the end of its lease.
 So a worker that dies holds nothing for long: its lease lapses, the job is
 ready again, and the next claim takes it. See
-<a href="/docs/fenecql#pick">Writes that pick their rows</a> for the
+<a href="/docs/fenecql-writing#pick">Writes that pick their rows</a> for the
 rules.</p>
 
 <p>This is Redis's <code>LPUSH</code> and <code>BRPOP</code>, with a lease

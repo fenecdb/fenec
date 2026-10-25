@@ -359,8 +359,9 @@ fn concurrent_transfers_neither_make_nor_lose_money() {
     }
 }
 
-/// The checkout of `fenecql.html#checkout`, as written there: a moved price,
-/// a used-up coupon and no stock each stop it at their line, nothing written.
+/// The checkout of `fenecql-writing.html#checkout`, as written there: a
+/// moved price, a used-up coupon and no stock each stop it at their line,
+/// nothing written.
 #[test]
 fn the_docs_checkout_stops_at_the_line_that_fails() {
     let mut db = Database::new();
