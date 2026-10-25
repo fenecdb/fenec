@@ -466,7 +466,7 @@ open "integrations/studio-desktop/build/stable-macos-arm64/fenec studio.app"
     <code>xattr -cr "fenec studio.app"</code> first.</li>
 </ul>
 
-<details class="deep"><summary>Details</summary>
+<details class="deep"><summary>How the token is kept, and what the build needs</summary>
 <p>A token is never in a URL or on a command line: a file's server is given
 a random one in its environment, and the window hands it to the studio as
 <a href="#host"><code>window.fenecHost</code></a>, frozen and never stored,
