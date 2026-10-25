@@ -166,7 +166,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "{{ $value }} tenants of {{ $labels.region }} on {{ $labels.instance }} have no copy to fail over to"
+          summary: "{{ $value }} tenants on {{ $labels.instance }}{{ if $labels.region }} in {{ $labels.region }}{{ end }} have no copy to fail over to"
           runbook: deploy/RUNBOOK.md#tenants-without-a-replica
       - alert: FenecSameZoneCopies
         expr: fenec_router_same_zone_copies > 0 and on (instance) fenec_router_following == 0

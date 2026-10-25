@@ -159,8 +159,9 @@ image:</p>
 <tr><td><code>GET /_admin/open</code></td><td>the open tenants: name, memory, frozen</td></tr>
 <tr><td><code>GET /_admin/tenants</code></td><td>names on disk</td></tr>
 <tr><td><code>GET /_admin/sizes</code></td><td>each tenant's bytes on disk, which the router's <code>GET /_shard/tenants?bytes</code> joins into its list</td></tr>
-<tr><td><code>PUT /_admin/tenants/&lt;t&gt;</code></td><td>create an empty tenant (409 if it exists)</td></tr>
+<tr><td><code>PUT /_admin/tenants/&lt;t&gt;</code></td><td>create an empty tenant (409 if it exists); the answer names its <code>lineage</code> and <code>seq</code>, the change it stands at, as <code>PUT .../file</code>'s does</td></tr>
 <tr><td><code>DELETE /_admin/tenants/&lt;t&gt;</code></td><td>end its streams, close it, remove the file</td></tr>
+<tr><td><code>POST /_admin/tenants/&lt;t&gt;/take-back</code></td><td>remove a file the router left here, <code>{"lineage", "seq"}</code> as it left it: only where the file follows a node, or is of that lineage at a change no later than <code>seq</code> (a file of no lineage named: one holding no write). Otherwise 409, <code>"outcome": "kept"</code>; <code>"outcome": "deleted"</code> or <code>"absent"</code> where it is gone</td></tr>
 <tr><td><code>POST /_admin/tenants/&lt;t&gt;/schema</code></td><td>a schema description, applied as <code>/_schema/apply</code> applies it: what the router sends for a tenant created with a schema</td></tr>
 <tr><td><code>POST /_admin/tenants/&lt;t&gt;/query</code></td><td>a read, <code>{query, params}</code> as <code>/query</code> takes it, answered as <code>/query</code> answers it; a statement that writes is refused (403). What the router sends each tenant for a <a href="#across-tenants">query across tenants</a></td></tr>
 <tr><td><code>POST /_admin/tenants/&lt;t&gt;/freeze</code></td><td>refuse writes and wait for the ones in flight</td></tr>
@@ -953,7 +954,7 @@ over, and nothing of theirs is left lying there.</p>
 <pre data-lang="bash">curl -X POST localhost:8090/_shard/nodes/n1/failover
 {"node":"n1","promoted":[{"tenant":"acme","to":"n2"},{"tenant":"beta","to":"n3"}],"failed":[],"unreplicated":["gamma"]}
 curl -X POST localhost:8090/_shard/replicas
-{"replicated":[{"tenant":"acme","replica":"n1"},{"tenant":"beta","replica":"n1"},{"tenant":"gamma","replica":"n1"}],"taken_back":[],"failed":[]}
+{"replicated":[{"tenant":"acme","replica":"n1"},{"tenant":"beta","replica":"n1"},{"tenant":"gamma","replica":"n1"}],"taken_back":[],"kept":[],"failed":[]}
 </pre>
 
 <p>A replica that did not take is tried again. A create, a move or a repair
@@ -972,13 +973,24 @@ tried again: add a node, then <code>POST /_shard/replicas</code>.</p>
 
 <p>A file the router made on a node, or meant to take off one, that no
 placement names — a create taken back (its schema refused, say) whose
-<code>DELETE</code> the node did not take, a move undone whose target kept
-the copy, a copy a failed try left, a deleted tenant's copy that stayed —
-is noted in the directory and taken off by those
-repairs once nothing places its tenant there, and a create of the name on
-that node takes it off first rather than answer 409. A repair names what it
-took off in <code>taken_back</code>. Tenants left without a copy are counted
-by <code>fenec_router_tenants_unreplicated{region}</code>, which
+<code>DELETE</code> the node did not take, a create whose <code>PUT</code>
+went unanswered, a move undone whose target kept the copy, a copy a failed
+try made or found, a deleted tenant's copy that stayed — is noted in the
+directory and taken back by those repairs once nothing places its tenant
+there, and a create of the name on that node takes it back first rather
+than answer 409. The node judges: it deletes such a file only where the
+file follows a node, or stands exactly where the router left it, of the
+lineage and at the change the node said as it made the file
+(<code>POST /_admin/tenants/&lt;t&gt;/take-back</code>). A file holding
+writes the router did not leave — a tenant made there since, which a
+standby router promoted behind its primary would not know of, or a file put
+there by hand — stays, and a repair names it in <code>kept</code>, as it
+does a file on a node that did not answer, which it tries again. A node
+from before take-backs answers 404 and deletes nothing. A repair names what
+it took back in <code>taken_back</code>; only a tenant left without its
+replica makes it 502. Without <code>--replicas</code> the router's own
+tries take files back and place no replica. Tenants left without a copy are
+counted by <code>fenec_router_tenants_unreplicated{region}</code>, which
 <code>FenecTenantsWithoutReplica</code> in <code>deploy/alerts/</code>
 reads.</p>
 

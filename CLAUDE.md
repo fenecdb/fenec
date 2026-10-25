@@ -323,14 +323,13 @@ promotes only a copy of the tenant's lineage and history
 (`tenants::Expected`, 409) unless `force`d.
 
 **[A replica whose attach failed is tried again, and a file the router left on a node is taken off.](docs/design/tenants.md#replicas-tried-again)**
-A failed attach -- a create's, a move's, a repair's -- has a repair run
-again (`repair_later`, 2 s doubling to 60, eight times), which asks again
-under the tenant's claim and adopts a copy whose follow landed late, its
-node first within the zone rule; a node silent at the repair's look gets
-no replica. A file the router made or meant to take off that no placement
-records is noted in the directory (`leftovers`), taken off by a repair once
-nothing places its tenant there, or by a create of the name meeting it,
-409. `fenec_router_tenants_unreplicated{region}` counts tenants with no copy.
+A failed attach or a held tenant has `try_again` run a repair again,
+rechecked under the claim, a copy's node first within the zone rule, none
+on a node silent at the look. A file the router made, or failed to remove,
+that no placement records is a `leftovers` row, removed under the claim
+once nothing places its tenant there or a create meets it -- never one
+holding writes it did not leave. `fenec_router_tenants_unreplicated`
+counts the uncopied.
 
 ### Regions and the global entry
 

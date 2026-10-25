@@ -26,7 +26,8 @@ tests:
   # A region of two nodes after one was lost: every tenant on the other,
   # none with a copy, counted by region -- and the standby router's count
   # of the same directory alerting nothing, nor a region with every tenant
-  # replicated, its count 0.
+  # replicated, its count 0. A directory naming no region sends the count
+  # unlabelled, and the summary names none.
   - interval: 1m
     input_series:
       - series: 'fenec_router_tenants_unreplicated{instance="r1:8090",region="eu"}'
@@ -39,14 +40,42 @@ tests:
         values: '6x20'
       - series: 'fenec_router_following{instance="r2:8090"}'
         values: '1x20'
+      - series: 'fenec_router_tenants_unreplicated{instance="r3:8090"}'
+        values: '3x20'
+      - series: 'fenec_router_following{instance="r3:8090"}'
+        values: '0x20'
     alert_rule_test:
       - eval_time: 16m
         alertname: FenecTenantsWithoutReplica
         exp_alerts:
           - exp_labels: {severity: warning, instance: "r1:8090", region: eu}
             exp_annotations:
-              summary: "6 tenants of eu on r1:8090 have no copy to fail over to"
+              summary: "6 tenants on r1:8090 in eu have no copy to fail over to"
               runbook: deploy/RUNBOOK.md#tenants-without-a-replica
+          - exp_labels: {severity: warning, instance: "r3:8090"}
+            exp_annotations:
+              summary: "3 tenants on r3:8090 have no copy to fail over to"
+              runbook: deploy/RUNBOOK.md#tenants-without-a-replica
+
+  # A count that held 16 minutes fires, and clears as the count does: the
+  # router's own try gave the replica, or an operator's repair did.
+  - interval: 1m
+    input_series:
+      - series: 'fenec_router_tenants_unreplicated{instance="r1:8090",region="eu"}'
+        values: '1x16 0x10'
+      - series: 'fenec_router_following{instance="r1:8090"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: FenecTenantsWithoutReplica
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "r1:8090", region: eu}
+            exp_annotations:
+              summary: "1 tenants on r1:8090 in eu have no copy to fail over to"
+              runbook: deploy/RUNBOOK.md#tenants-without-a-replica
+      - eval_time: 20m
+        alertname: FenecTenantsWithoutReplica
+        exp_alerts: []
 
   # A replica that did not take, given one by the router's own try after
   # two minutes: never 15 minutes without, so nothing. Nor a count that

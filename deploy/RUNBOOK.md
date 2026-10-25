@@ -528,8 +528,10 @@ counted tenants with no copy a failover could promote -- no replica of
 their own, no standby on their node
 (`fenec_router_tenants_unreplicated{region}`). Such a tenant whose primary
 dies stays on it, writing nothing, until the node is back. Find them with
-`GET /_shard/tenants?region=<r>` on the region's router (the entries with
-no `"replica"`) and the router's log, which says why each has none:
+`GET /_shard/tenants?region=<r>` on the region's router -- the entries with
+no `"replica"` whose node has no standby in `GET /_shard/nodes` (a paired
+node's tenants have their copy on the standby) -- and the router's log,
+which says why each has none:
 
 - **A node failed over** (`FenecNodeFailedOver`). Its own tenants were
   promoted on their replicas, and the replicas it held are gone: none of
@@ -551,18 +553,36 @@ no `"replica"`) and the router's log, which says why each has none:
 
 ```sh
 curl -X POST http://10.1.0.21:8090/_shard/replicas -H "Authorization: Bearer $ROOT"
-# {"replicated":[{"tenant":"acme","replica":"eu-b"}],"taken_back":[],"failed":[]}
+# {"replicated":[{"tenant":"acme","replica":"eu-b"}],"taken_back":[],"kept":[],"failed":[]}
 ```
 
-A repair answers what it did, and why it did not, tenant by tenant. It
-also takes off the files the router left on nodes that no placement names
--- a create taken back (its schema refused) whose `DELETE` the node did
-not take, a move undone whose target kept the copy, a copy a failed try
-made, a deleted tenant's copy that stayed -- in `taken_back`; one it
-cannot take off is in `failed`, and tried again.
-Those files are noted in the directory, so a router restarted or promoted
-still knows them, and a create of the name on that node takes it off first
-rather than answer 409.
+A repair answers what it did, and why it did not, tenant by tenant; only a
+tenant left without its replica makes it 502. It also takes back the files
+the router left on nodes that no placement names -- a create taken back
+(its schema refused) whose `DELETE` the node did not take, a create whose
+`PUT` went unanswered, a move undone whose target kept the copy, a move's
+source that would not go, a copy a failed try made or found, a deleted or
+detached tenant's copy that stayed -- in `taken_back`. Those files are
+noted in the directory, so a router restarted or promoted still knows them,
+and a create of the name on that node takes one back first rather than
+answer 409. The node deletes such a file only where it follows a node or
+stands exactly where the router left it (`POST
+/_admin/tenants/<t>/take-back`): never one holding writes the router did
+not leave -- a tenant made there since, a file put there by hand, a standby
+router promoted behind its primary taking back what the primary went on to
+use. One that does not come off is named in `kept` with why:
+
+- **the node does not answer**, or a read replica of it is being placed
+  there: tried again by itself, a minute apart at most, eight times;
+- **it holds writes the router did not leave**: the node keeps it, and so
+  does every repair after. It is an old primary's file -- its node silent
+  as its tenant was given its replica elsewhere -- or a file someone put
+  there: look at what it holds, then remove it on the node by hand
+  (`DELETE /_admin/tenants/<t>` with the node's admin token) once nothing
+  in it is wanted;
+- **the node takes no file back**: a `fenec-server` from before take-backs.
+  The router deletes nothing on it; upgrade the node and the next repair
+  takes the file back.
 
 ## A lease late
 
@@ -672,7 +692,11 @@ placements it writes, so a standby from before it promoted in the middle
 of an upgrade over a directory a newer router wrote can have the routers
 following it end a move's requests as a failover's, a 502 for a write that
 may have landed: upgrade the standbys first, as step 2 does, and promote
-none older than the router it replaces. Files go one way: a binary refuses record
+none older than the router it replaces. A node from before take-backs
+answers a router's `POST /_admin/tenants/<t>/take-back` 404 and keeps the
+file, which the router names `kept` and deletes in no other way until the
+node is upgraded; a router from before them notes no file it leaves, and
+reads past the `seq` a node's answers name. Files go one way: a binary refuses record
 kinds newer than it, so once an upgraded
 node has written a tenant, that node cannot go back to the older binary --
 and an older node may not follow a newer primary's replication stream where

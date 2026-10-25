@@ -87,13 +87,37 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
         (Method::Put, ["tenants", t]) => tenants.create(t).map(|tenant| {
             Response::json(
                 201,
-                format!(
-                    "{{\"created\":\"{t}\",\"lineage\":{}}}",
-                    lineage_json(&tenant)
-                ),
+                format!("{{\"created\":\"{t}\",{}}}", stands_json(&tenant)),
             )
         }),
         (Method::Delete, ["tenants", t]) => tenants.delete(t).map(|_| Response::empty(204)),
+        // A file the router left here, deleted only where it holds nothing
+        // the router did not leave ([`Tenants::take_back`]). A path of its
+        // own, not a parameter on `DELETE`: a node from before it answers
+        // this 404 and deletes nothing, where it would have read past an
+        // unknown parameter and deleted whatever stood under the name.
+        (Method::Post, ["tenants", t, "take-back"]) => {
+            taken_back(&req.body).and_then(|(lineage, seq)| {
+                match tenants.take_back(t, lineage, seq) {
+                    Ok(crate::tenants::TakenBack::Deleted) => {
+                        Ok(Response::json(200, r#"{"outcome":"deleted"}"#))
+                    }
+                    Ok(crate::tenants::TakenBack::Absent) => {
+                        Ok(Response::json(200, r#"{"outcome":"absent"}"#))
+                    }
+                    // Its judgment, which waiting does not change. A
+                    // refusal of the moment -- the tenant in use -- names
+                    // no outcome, and the router asks again.
+                    Ok(crate::tenants::TakenBack::Kept(why)) => {
+                        let mut body = String::from("{\"outcome\":\"kept\",\"error\":");
+                        fenec_core::json::escape_into(&mut body, &why);
+                        body.push('}');
+                        Ok(Response::json(409, body))
+                    }
+                    Err(e) => Err(e),
+                }
+            })
+        }
         // The node's admin token, which the router holds, rather than its
         // data token, which reaches every tenant: an app creating tenants
         // needs the router's token alone.
@@ -155,10 +179,7 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
             .map(|tenant| {
                 Response::json(
                     201,
-                    format!(
-                        "{{\"imported\":\"{t}\",\"lineage\":{}}}",
-                        lineage_json(&tenant)
-                    ),
+                    format!("{{\"imported\":\"{t}\",{}}}", stands_json(&tenant)),
                 )
             }),
         // The failover, tenant by tenant: what a replica's file needs to
@@ -276,6 +297,47 @@ fn expected(body: &[u8]) -> Result<crate::tenants::Expected, Refused> {
         }
     }
     Ok(want)
+}
+
+/// A take-back's body (`{"lineage": "<8 hex>" | null, "seq": <n>}`): the
+/// lineage the router knows the file was made of, if it knows one, and
+/// the change it left it at, 0 where it knows none -- a file holding no
+/// write.
+fn taken_back(body: &[u8]) -> Result<(Option<u32>, u64), Refused> {
+    use fenec_core::prelude::Value;
+    let fields = fenec_core::json::parse_object(&String::from_utf8_lossy(body))
+        .map_err(|e| Refused(400, format!("the body is not a JSON object: {e}")))?;
+    let (mut lineage, mut seq) = (None, None);
+    for (k, v) in fields {
+        match (k.as_str(), v) {
+            ("lineage", Value::Text(l)) => {
+                lineage = Some(
+                    crate::replication::parse_lineage(&l)
+                        .ok_or_else(|| Refused(400, "`lineage` is 8 hex digits".into()))?,
+                )
+            }
+            ("lineage", Value::Null) => {}
+            ("lineage", _) => return Err(Refused(400, "`lineage` is 8 hex digits".into())),
+            ("seq", Value::Int(n)) if n >= 0 => seq = Some(n as u64),
+            ("seq", _) => return Err(Refused(400, "`seq` is a change, 0 or more".into())),
+            _ => {}
+        }
+    }
+    let seq =
+        seq.ok_or_else(|| Refused(400, "a take-back names the change it left: `seq`".into()))?;
+    Ok((lineage, seq))
+}
+
+/// Where a tenant just made or installed stands, as JSON members: its
+/// lineage and its change, which a router taking the file back later asks
+/// it to stand at still ([`Tenants::take_back`]).
+fn stands_json(tenant: &crate::tenants::Tenant) -> String {
+    let seq = tenant
+        .db
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .change_seq();
+    format!("\"lineage\":{},\"seq\":{seq}", lineage_json(tenant))
 }
 
 /// A tenant's lineage as JSON: 8 hex digits, or `null` for one that never

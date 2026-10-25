@@ -315,7 +315,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "{{ $values.A.Value }} tenants of {{ $labels.region }} on {{ $labels.instance }} have no copy to fail over to"
+          summary: "{{ $values.A.Value }} tenants on {{ $labels.instance }}{{ if $labels.region }} in {{ $labels.region }}{{ end }} have no copy to fail over to"
           runbook: deploy/RUNBOOK.md#tenants-without-a-replica
       - uid: fenec-same-zone-copies
         title: FenecSameZoneCopies
