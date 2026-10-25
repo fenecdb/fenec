@@ -176,6 +176,22 @@ fn filters() -> Vec<String> {
             "where s > \"\" and tag in [\"a\", \"c\"]",
             "where n is null",
             "where n >= 3 and n != 42",
+            // A value of another kind than the field's orders by kind: true
+            // of every row (no bound) or of none (no row), the range exact.
+            "where n > true",
+            "where n <= 42 and n > true",
+            "where n >= -7 and n < \"\"",
+            "where n <= 42 and n >= \"\"",
+            "where n = \"x\" or n > 3",
+            "where f <= 1.5 and f > true",
+            "where f >= 0 and f > \"\"",
+            "where t <= \"2026-06-01\" and t > true",
+            "where t >= \"2026-01-01\" and t < \"\"",
+            "where t <= \"2026-06-01\" and t >= \"\"",
+            "where s >= \"k\" and s > 5",
+            "where s >= \"k\" and s < 5",
+            "where s < \"zzz\" and s >= true",
+            "where not (n > true)",
             // Filters no index narrows: an ordered walk tests them row by
             // row, and gives up on one that matches too little to fill the
             // page within its budget.
@@ -301,6 +317,9 @@ fn nan_rows_match_what_the_scan_says_they_match() {
         "where f = 0",
         "where f <= 1.5 and f >= -1",
         "where f < 2",
+        "where f <= 1.5 and f > true",
+        "where f >= 1 and f < \"\"",
+        "where f >= 1 and f >= \"\"",
     ] {
         for o in ["", "order f desc limit 5", "order f limit 5 offset 2"] {
             let q = format!("get c select n, f {f} {o}");

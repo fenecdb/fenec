@@ -17,6 +17,7 @@ mod idempotency;
 mod lease_answers;
 mod mcp;
 mod node_archive;
+mod ordered_claims;
 mod prepared;
 mod reach;
 mod replication;

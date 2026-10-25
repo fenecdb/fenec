@@ -266,7 +266,8 @@ waits for it as after the first answer.</p>
   first and is handed its answer.</li>
   <li>A write that failed keeps no key: sent again, it runs again.</li>
   <li>A key is for one request: the same key with another method, path or
-  body is refused (422).</li>
+  body is refused (422). A key is 1 to 255 bytes and holds no control
+  character (400).</li>
   <li>Under a scoped token the keys are its subject's (<code>sub</code>), so
   no user is handed another's answer; a token with no subject, or a
   <code>sub</code> that is not a text or is <code>""</code>, is refused a

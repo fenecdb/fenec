@@ -159,16 +159,53 @@ over the server token's was +2.2-4.4 us a `set`, +2.5-4.4 a row and
 +2.5-4.7 a page on main, +2.2-4.6, +2.5-3.9 and +2.7-4.8 with it (six
 runs each in turns, the machine loaded: the spread is the load's).
 
-**Known open: an ordered comparison against a claim of another kind.**
-Values of two kinds order by kind (`cmp_value`'s type rank), every number
-below every text, so `level <= $jwt.clearance` given the text `"top"`
-reads every row of an `int` level, and `name >= $jwt.from` given `5`
-every name; a claim inside a call (`lower($jwt.c)`, `coalesce($jwt.c,
-0)`, `least(level, $jwt.c)`) does the same. A token's issuer types its
-claims, and `=`, `in` and `has` are not touched by it, but an ordered rule
-is held to the claim's kind in a follow-up of #408 ("ordered comparisons
-against a claim"), which has to keep the guard right under `not`, a time
-field's ISO claims and `@sorted`'s exact ranges.
+**An ordered comparison against a claim holds the other side to the
+claim's kind** (`kind_held`, `claims_held`). Values of two kinds order by
+kind (`cmp_value`'s type rank), every bool below every number and every
+number below every text, so `level <= $jwt.clearance` given the text
+`"top"` read every row of an `int` level, and `name >= $jwt.from` given `5`
+every name. The scope is bound per token with no schema at hand, and a
+`compare` ordering nothing across kinds would part the scan from
+`@sorted`'s ranges, so `bind` ANDs in the edges of the claim's kind, past
+which every other kind ranks: `> true` and `< ""` for a number, `>= ""` and
+`<` the byte `0xFF` for a text (above every text, whose UTF-8 never holds
+it, and below every kind ranked above texts, bytes ranking with them; a
+vector literal, the next kind, is refused beside a json field), `>= false`
+and `<= true` for a bool. A value of another kind is then neither below the
+claim nor above it, which `=`, `!=` and `in` already hold, `cmp_value`
+being `Equal` across no two kinds. Polarity: ANDed in under a `not`, the
+guard became an `or` -- `not (score > $jwt.max)` admitted every text and
+list over a json field, which the bare comparison left out -- so under an
+odd number of `not`s it is `cmp or not (both edges)`, which the `not` turns
+into `not cmp and both edges` (`bind_held`); under an even number the edge
+on the side the comparison leaves open is enough. An inner `get`'s filter
+stands where its `in` does, so under `not ... in` a row of another kind is
+in its list and held out. A comparison is held only where it is a
+condition, under `and`, `or` and `not`, so one used as a value -- `(level
+<= $jwt.c) = false`, a `case`'s condition -- is refused at startup, and so
+is a claim inside a call or arithmetic, whose result's kind no rule can know
+until it runs: `least(level, "top")` is the level (every number ranking
+below every text), so `least(level, $jwt.c) = level` admitted every row,
+and `lower(5)` hands the comparison whatever it hands. Folding a call over
+claims alone at bind was the other way, not taken: the functions are the
+database's, plugins among them, and a mixed one (`least(level, ...)`) would
+be refused anyway. Times: a text claim that reads as a time is a time's
+kind too, as `cmp_value` compares a time with a text by reading it, so its
+lower edge is `"0000-01-01"` rather than `""`, which no time passed -- `at
+<= $jwt.until` given `"2026-07-01T00:00:00Z"` matched nothing; a time field
+orders against it by time, its key exact, a text field as text from that
+year on, and a text that reads as no time leaves a time field nothing. A
+typed field's edges are true or false of every value, which `@sorted`'s
+range takes as no bound or none (`SortedIndex::by_kind`, indexes.md), so
+the range stays exact: without it a scoped count over 20 001 of 200 000
+rows went 44 us -> 790 us in process, 216 us -> 1 ms over HTTP; with it the
+rule costs +0.35 us a read over main's, what any second comparison costs
+(`level > -1` the same), and a `get` no longer copies its rules' filter a
+second time to see that there was one (`Scope::filtered`), which the rewrite
+had paid with every rule (`make policy-bench ARGS=ranges`, three runs in
+turns). `tests/ordered_claims.rs` holds it: the review of #408's wrapped
+claims, ISO claims, json, `nocase` and collated indexes against a scan,
+plans, counts, `not`s and deny lists.
 
 ## Field lists
 

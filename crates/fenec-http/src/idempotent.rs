@@ -43,6 +43,16 @@ pub fn key(req: &Request, who: &Who) -> std::result::Result<Option<Key>, Respons
     if given.is_empty() || given.len() > 255 {
         return Err(Response::error(400, "an Idempotency-Key is 1 to 255 bytes"));
     }
+    // A key is kept as its owner, `U+001F` and the key: one holding that
+    // character, beside a subject holding it too, named another subject's
+    // key -- `sub` "a\u{1f}b" with key "c" is `sub` "a" with key "b\u{1f}c".
+    // Without one in the key, the last `U+001F` parts the two.
+    if given.chars().any(char::is_control) {
+        return Err(Response::error(
+            400,
+            "an Idempotency-Key holds no control character",
+        ));
+    }
     // Keys are the subject's: two users' keys never meet. A scoped token
     // with no subject has no one to keep them for.
     let owner = match who {
