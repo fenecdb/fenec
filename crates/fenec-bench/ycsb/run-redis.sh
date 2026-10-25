@@ -1,7 +1,7 @@
 #!/bin/sh
 # YCSB with Redis beside fenec-server -- on the Mac and in Docker --,
 # PostgreSQL and MongoDB, in turns, three runs: the lines
-# benchmarks.html#ycsb-redis is written from once they are in
+# benchmarks-ycsb.html#ycsb-redis is written from once they are in
 # results.tsv. Hours long (about nine on the M1 Air: 33 cells a system a
 # run, Redis's 48 with its snapshot mode, each 45 s with its idle gap, the
 # loads, three idle minutes between systems), so it runs in the background

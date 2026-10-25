@@ -1,4 +1,28 @@
 {
+  "docs/benchmarks": {
+    "against-sqlite-and-pgvector": "benchmarks-vector#against-sqlite-and-pgvector",
+    "binary-size": "benchmarks-size#binary-size",
+    "build-side-tuning": "benchmarks-vector#build-side-tuning",
+    "concurrency": "benchmarks-requests#concurrency",
+    "half-precision": "benchmarks-vector#half-precision",
+    "how-to-read-the-numbers": "benchmarks-vector#how-to-read-the-numbers",
+    "loading": "benchmarks-requests#loading",
+    "memory": "benchmarks-size#memory",
+    "method": "benchmarks-vector#method",
+    "million": "benchmarks-vector#million",
+    "module-features": "benchmarks-size#module-features",
+    "module-parts": "benchmarks-size#module-parts",
+    "requests": "benchmarks-requests#requests",
+    "retrieval-quality": "benchmarks-text#retrieval-quality",
+    "round-trip": "benchmarks-requests#round-trip",
+    "scale": "benchmarks-vector#scale",
+    "scale-measurement": "benchmarks-vector#scale-measurement",
+    "text-search": "benchmarks-text#text-search",
+    "the-ef-and-recall-trade-off": "benchmarks-vector#the-ef-and-recall-trade-off",
+    "typos": "benchmarks-text#typos",
+    "ycsb": "benchmarks-ycsb#ycsb",
+    "ycsb-redis": "benchmarks-ycsb#ycsb-redis"
+  },
   "docs/fenecql": {
     "a-hybrid-query": "fenecql-vector#a-hybrid-query",
     "a-key-over-several-fields": "fenecql-lookup#a-key-over-several-fields",
@@ -46,6 +70,24 @@
     "update-and-delete": "fenecql-writing#update-and-delete",
     "worked-examples": "fenecql",
     "writes": "fenecql-writing#writes"
+  },
+  "docs/http": {
+    "changes": "http-reference#changes",
+    "consumers": "http-reference#consumers",
+    "embedding-a-collection": "http-reference#embedding-a-collection",
+    "field-grants": "http-access#field-grants",
+    "filters": "http-reference#filters",
+    "jwt-keys": "http-access#jwt-keys",
+    "polling": "http-reference#polling",
+    "read": "http-reference#read",
+    "routes": "http-reference#routes",
+    "scoped-access": "http-access#scoped-access",
+    "security": "http-access#security",
+    "statuses": "http-reference#statuses",
+    "subscriptions": "http-reference#subscriptions",
+    "the-data-ceiling": "http-reference#the-data-ceiling",
+    "vector-search": "http-reference#vector-search",
+    "wait": "http-reference#wait"
   },
   "docs/sharding": {
     "a-file-per-tenant": "sharding-design#a-file-per-tenant",

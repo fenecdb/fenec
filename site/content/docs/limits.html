@@ -105,7 +105,7 @@ right; so does going past the two <code>json</code> depths.</p>
 <tr><td><code>lookup</code> chain depth</td><td class="n"><b>8 levels</b></td><td>a query error when exceeded; the parser, the check and the engine all recurse per level</td></tr>
 <tr><td>fields of a <a href="/docs/fenecql-lookup#the-lookup-clause"><code>lookup</code> key</a></td><td class="n"><b>8</b></td><td>as many as an index over several fields has parts, whose first ones they must be; refused past it, naming the index to declare</td></tr>
 <tr><td><code>in (get …)</code> values</td><td class="n"><b>100 000</b></td><td>distinct values, each counted once however many rows hold it; a query error naming the bound when the inner <code>get</code> finds more; never a set cut short</td></tr>
-<tr><td>a policy rule's <a href="/docs/http#scoped-access"><code>in (get …)</code></a> values</td><td class="n"><b>1 000</b></td><td>as a list claim's: answered before each statement its token sends, so a query error naming the bound past it, never a list cut short</td></tr>
+<tr><td>a policy rule's <a href="/docs/http-access#scoped-access"><code>in (get …)</code></a> values</td><td class="n"><b>1 000</b></td><td>as a list claim's: answered before each statement its token sends, so a query error naming the bound past it, never a list cut short</td></tr>
 <tr><td><code>in (get …)</code> nesting</td><td class="n"><b>4 levels</b></td><td>a query error when exceeded; each level runs a query before the one around it</td></tr>
 <tr><td>values of one <code>facet</code></td><td class="n"><b>10 000</b></td><td>a query error when a facet without <code>top</code> finds more, and for <code>top</code> past it, written or a parameter's; never a list cut where it stopped</td></tr>
 <tr><td>ranges of one <code>facet ... ranges</code></td><td class="n"><b>10 000</b></td><td>a query error past 10 001 bounds; every range answers</td></tr>
@@ -502,7 +502,7 @@ encryption of its own.</p>
 
 <p>The HTTP endpoint runs inside <code>fenec-server</code> and keeps to a plain
 subset of HTTP. Its routes, filters and statuses are on <a
-href="http.html">HTTP endpoint</a>; this is what it leaves out.</p>
+href="http-reference.html">HTTP reference</a>; this is what it leaves out.</p>
 
 <ul>
   <li><b>No TLS.</b> Without a token it binds only to the local
@@ -521,7 +521,7 @@ href="http.html">HTTP endpoint</a>; this is what it leaves out.</p>
   <li>No TLS. Without a token it will not bind a non-loopback address. The
     server's own token, <code>--http-token</code>, is a single shared secret
     with full access; per-user access with scopes and expiry is a JSON Web
-    Token held to a policy (<a href="/docs/http#scoped-access">Scoped
+    Token held to a policy (<a href="/docs/http-access#scoped-access">Scoped
     access</a>).</li>
   <li><code>Transfer-Encoding: chunked</code> is unsupported (411). The body is
     capped at 64 MiB and the header block at 64 KiB; above that, 413 or

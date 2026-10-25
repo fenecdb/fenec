@@ -93,7 +93,7 @@ a burst of writes runs it once after the run under way, and a stream that
 ends is opened again, its seed running the query, since writes may have
 come between. <code>useLiveQuery</code> takes the endpoint as it takes a
 replica. Under a scoped token the server tells such a stream of the writes
-to rows the token may read, and of no other (<a href="/docs/http#subscriptions">HTTP</a>).
+to rows the token may read, and of no other (<a href="/docs/http-reference#subscriptions">HTTP</a>).
 A token refused, or lapsed under an open stream -- the server ends a stream
 at its token's <code>exp</code> -- is a <code>FenecError</code> of status
 401 to <code>onError</code>, and the live query stops there, for the app to
@@ -200,7 +200,7 @@ const stop = db.live(stock.select('available').where('sku', 'TENT-1'), (rows) =>
     <code>seq</code>, and the client keeps the last as <code>db.seq</code>.</li>
   <li><b><code>{ poll }</code> is for a page many view:</b> a stream is a
     server thread and a wake-up at every write, a poll holds nothing between
-    rounds (<a href="/docs/http#polling">Polling a read</a>).</li>
+    rounds (<a href="/docs/http-reference#polling">Polling a read</a>).</li>
   <li><b><code>{ wait: ms }</code> holds a claim at the server</b> until a
     job comes, on <code>update</code>, <code>delete</code>,
     <code>run</code> and <code>batch</code>, and <code>{ signal }</code>
@@ -825,7 +825,7 @@ a page that uses fewer can load one built without the rest:
 <code>language</code> each group. The release and <code>@fenecdb/web</code>
 carry <code>fenec.wasm</code> alone; another set is a <code>make wasm</code>
 away. What each feature weighs is in <a
-href="benchmarks.html#module-features">Benchmarks</a>. The builds without
+href="benchmarks-size.html#module-features">Benchmarks</a>. The builds without
 the indexes and without anything are also tests: CI builds them
 (<code>make wasm-lite</code>, <code>make wasm-min</code>) and opens the
 full module's files in them.</p>

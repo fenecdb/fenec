@@ -2,7 +2,7 @@
 //!
 //! The file's contents are in *the same format* as the engine's in-memory
 //! byte image. A write = append to the file. Open = a single replay pass.
-//! No separate WAL + data file pair, no checkpoint, no page cache.
+//! No separate WAL + data file pair, no checkpoint, no buffer pool of its own.
 
 use crate::engine::{Database, Durability, ImageOut, Sink, MAGIC};
 use crate::error::Result;

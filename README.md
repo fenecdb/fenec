@@ -5,8 +5,8 @@
 An embedded document database for an app's data, from the page to the
 server: state its screens follow live, a replica on the device that syncs
 with the server, many clients writing into one file through one writer
-and sharing their disk syncs, a server with no cache in front of it, a file
-per tenant in every region, and search built in --
+and sharing their disk syncs, a server that usually needs no cache in front of it,
+a file per tenant in every region, and search built in --
 BM25 over text with typos, highlights and facets, and vectors for meaning.
 Written in Rust with no dependencies, it runs inside a web page as 330 KB of
 gzipped WebAssembly, in an iOS, Android or Flutter app as a file on the
@@ -117,8 +117,8 @@ get articles select title
 **fenecdb** makes sense when the database should run beside the code that uses
 it — in the browser, in the process, or as one small server — and search
 belongs in it rather than in a second system: an app whose screens follow
-its data and keep it offline, a server many clients read and write with no
-cache in front, a service with a file per tenant in one region or several,
+its data and keep it offline, a server many clients read and write that usually
+needs no cache in front, a service with a file per tenant in one region or several,
 and search over its own rows, a store's, a docs site's or an agent's
 memory. The scale limit is **the indexes fitting in memory**: the documents
 stay in the mapped file, so a server's memory follows its indexes, not its
@@ -138,11 +138,11 @@ The numbers behind the comparison, and the method that produced them, are in
 [Benchmarks](https://fenecdb.com/docs/benchmarks). On YCSB's
 workloads in process, fenecdb does B with 16 threads at 545 k operations a
 second against SQLite's 47.9 k, and C on one thread at 438 k against
-279 k, its file compacted on its own as updates grow it ([YCSB](https://fenecdb.com/docs/benchmarks#ycsb));
+279 k, its file compacted on its own as updates grow it ([YCSB](https://fenecdb.com/docs/benchmarks-ycsb#ycsb));
 over HTTP, `fenec-server` does B at 16 clients, durable, at 18.2 k against
 PostgreSQL's 13.0 k, both in Docker. At a million vectors it answers the
 nearest ten at 99.1% recall in 0.141 ms, against pgvector's 98.6% in 2.076
-([At scale](https://fenecdb.com/docs/benchmarks#scale)).
+([At scale](https://fenecdb.com/docs/benchmarks-vector#scale)).
 
 ---
 
@@ -317,6 +317,7 @@ let db = try await Fenec.sync(url: "https://api.example.com", token: jwt,
 | **Text search** | `match` ranked by BM25 over `@text` · `fuzzy` for a word typed wrong and `prefix` for one half typed · `highlight()` and `snippet()` marking what matched · `facet` counts beside the page, disjunctive and by ranges · Chinese, Japanese, Korean and Thai split into runs of characters |
 | **Places** | `distance(loc, p) <= 500` and `within(loc, [w, s, e, n])` over a `geo` field, through `@geo`, nearest first with `near` (in metres) — Redis's `GEOSEARCH`, the metres its `GEODIST`'s ([Points and distances](https://fenecdb.com/docs/geo)) |
 | **Instead of Redis** | counters (`set c {n: n + 1}`), rate limits (fixed and sliding windows, token buckets), locks with fencing tokens, sessions and caches under `@ttl`, leaderboards, sets, HyperLogLog, job queues with leases and a claim held until a job comes, delayed jobs, streams, pub/sub, idempotency keys — each a statement or two a test runs; no LRU eviction, no Lua ([Instead of Redis](https://fenecdb.com/docs/redis)) |
+| **No cache in front** | the file is mapped, so the operating system keeps the pages in use in memory and fenecdb copies none into a buffer pool of its own: a separate cache in front of `fenec-server` is usually unnecessary while the working set fits in memory. On YCSB in Docker against Redis 7.4, the same durability mode against the same, Redis does more operations a second in none of the 33 cells measured both ways (A to F at 1, 4 and 16 clients, durable and buffered; C, which writes nothing, buffered alone): fenec-server's C at 16 clients, buffered, is 18.4 k against Redis's 14.0 k, and its B, durable, 18.2 k against 9.25 k (one node over Docker's network, 1 KB records; a cache nearer the app than the database is not measured; about a database's reads, not an HTTP or CDN response cache — [the figures and their conditions](https://fenecdb.com/docs/redis#cache-in-front)) |
 | **Functions** | `lower upper len coalesce now timestamp cosine l2 dot norm normalize distance within` + plugins |
 | **Vector search** | `near` over `vector<N[, f16]>` (HNSW, with `int8` and `bit` codes; exact by dot product over a `sparse<N>` such as SPLADE's), by `cosine`, `l2` or `dot` · `rerank` (exact vector reordering of `match` candidates, no graph needed) · `fuse` (`match` and `near` ranking together, by reciprocal rank) |
 | **Interfaces** | FenecQL · a query builder in seven languages · REST/JSON + SSE · WASM C ABI · a native C ABI for apps · change data capture (`/_changes`, every write on disk as a JSON line, resumable) · import from SQLite and PostgreSQL |
@@ -352,12 +353,12 @@ query; it is not a join and is not trying to be one.
 |---|---|
 | [Quickstart](https://fenecdb.com/docs/quickstart) | Install a release, a package or the image, write a row and query it: in a browser tab, on a server from your language, or in the shell |
 | [Build from source](https://fenecdb.com/docs/build) | Clone, build the shell, the server and the browser module, run the tests and build the site |
-| [How it works](https://fenecdb.com/docs/concepts) | Segments, the offset index, the mapped file, why there is no page cache and exactly one writer, and HNSW with a filter |
+| [How it works](https://fenecdb.com/docs/concepts) | Segments, the offset index, the mapped file, why there is no buffer pool of its own and exactly one writer, and HNSW with a filter |
 | [FenecQL](https://fenecdb.com/docs/fenecql) | A tour from the first write to a lookup and a total, the grammar, and a reference page for each family of statements: [reading](https://fenecdb.com/docs/fenecql-reading), [writing](https://fenecdb.com/docs/fenecql-writing), [collections and types](https://fenecdb.com/docs/fenecql-schema), [indexes](https://fenecdb.com/docs/fenecql-indexes), [lookup and subqueries](https://fenecdb.com/docs/fenecql-lookup), [aggregates](https://fenecdb.com/docs/fenecql-aggregates), [text search](https://fenecdb.com/docs/fenecql-search) and [vector search](https://fenecdb.com/docs/fenecql-vector) |
 | [From SQL](https://fenecdb.com/docs/sql) | The SQL FenecQL reads as written — tables, joins, subqueries, pgvector's distances — what it refuses and what to write instead, where the meaning is not SQL's: nulls, double quotes, text, joins |
 | [JavaScript client](https://fenecdb.com/docs/javascript) | The browser client, the immutable query builder, binding it to a transport, live queries as an app's state, a schema declared in code |
 | [Mobile and native apps](https://fenecdb.com/docs/mobile) | Swift, Kotlin and Dart/Flutter: a file on the device, the builder, live queries driving the UI, syncing with a server, TLS and the background, where the file lives, durability |
-| [HTTP endpoint](https://fenecdb.com/docs/http) | REST/JSON derived from the schema, raw FenecQL, batches, SSE, vector search over POST, a read marked for a replica |
+| [HTTP endpoint](https://fenecdb.com/docs/http) | Start a server and send it FenecQL from curl or any language's standard library: REST/JSON derived from the schema, raw FenecQL, batches, writes safe to retry; then the [reference](https://fenecdb.com/docs/http-reference) (every route, filter, header and status, SSE, vector search over POST, a read marked for a replica) and [security and scoped access](https://fenecdb.com/docs/http-access) |
 | [Server](https://fenecdb.com/docs/server) | Running `fenec-server`: flags, durability, tokens and policies, the audit log, limits, containers |
 | [Replication](https://fenecdb.com/docs/replication) | Read replicas fed the writes on the primary's disk, promotion by hand, what a failover loses, backups and restoring to a moment, every tenant of a node archived over one connection |
 | [Integrations](https://fenecdb.com/docs/integrations) | `useLiveQuery` for React, the Go and .NET SDKs, and LangChain and LlamaIndex vector stores over HTTP |
@@ -375,7 +376,7 @@ query; it is not a join and is not trying to be one.
 | [Import](https://fenecdb.com/docs/import) | Build a collection from SQLite or a live PostgreSQL server in one command, and keep it following the table's changes |
 | [Embedded Rust](https://fenecdb.com/docs/embedding) | `fenec-core` as a library: opening a file, executing parsed statements |
 | [File format](https://fenecdb.com/docs/file-format) | One file, replayed in a single pass; record kinds, and the crate layout |
-| [Benchmarks](https://fenecdb.com/docs/benchmarks) | YCSB against SQLite, PostgreSQL, MongoDB and Redis, writers beside readers, a request over HTTP and text search; then vectors, against SQLite and pgvector in process and fenec-server against pgvector at scale |
+| [Benchmarks](https://fenecdb.com/docs/benchmarks) | An overview and a page for each family: [YCSB](https://fenecdb.com/docs/benchmarks-ycsb) against SQLite, PostgreSQL, MongoDB and Redis, [writers beside readers and a request over HTTP](https://fenecdb.com/docs/benchmarks-requests), [text search](https://fenecdb.com/docs/benchmarks-text); then [vectors](https://fenecdb.com/docs/benchmarks-vector), against SQLite and pgvector in process and fenec-server against pgvector at scale, and [sizes and memory](https://fenecdb.com/docs/benchmarks-size) |
 | [Limits](https://fenecdb.com/docs/limits) | What it does not do, every hard-coded ceiling, memory and scale |
 
 The docs are the long-form reference; their source is

@@ -84,7 +84,7 @@ and is alpha software.</p>
   <td>A replica in the page or app: offline reads, queued writes, live queries (<a href="sync.html">Sync</a>)</td>
   <td>No sync; the session extension records changesets to apply to another database (<a href="https://sqlite.org/sessionintro.html">sessions</a>)</td></tr>
 <tr><td>Access control</td>
-  <td>On the server: a token, JWT rules added to every statement (<a href="http.html#scoped-access">Scoped access</a>)</td>
+  <td>On the server: a token, JWT rules added to every statement (<a href="http-access.html#scoped-access">Scoped access</a>)</td>
   <td>Embedded: none of its own</td></tr>
 <tr><td>Schema and migrations</td>
   <td>Typed schema, <code>alter collection</code>, a schema declared in code and checked at every open (<a href="javascript.html#schema">Schema in code</a>)</td>
@@ -150,7 +150,7 @@ v0.1.10-alpha.4, from 2026-05-18
 
 <p>YCSB's core workloads over a million records, fenecdb and SQLite in
 one process, operations a second, the median of three runs (<a
-href="benchmarks.html#ycsb">every cell</a>). We measured these on one
+href="benchmarks-ycsb.html#ycsb">every cell</a>). We measured these on one
 laptop; the method is below.</p>
 
 <div class="tbl">
@@ -211,9 +211,9 @@ its rows are read back and scored by fenecdb's own code.</p>
 <details class="deep"><summary>Method and details</summary>
 <p>The numbers are <code>make ycsb</code>'s, <code>make
 concurrency-bench</code>'s and <code>make compare</code>'s, as <a
-href="benchmarks.html#ycsb">Everyday reads and writes</a>, <a
-href="benchmarks.html#concurrency">Writers and readers at once</a> and <a
-href="benchmarks.html#against-sqlite-and-pgvector">Against SQLite and
+href="benchmarks-ycsb.html#ycsb">Everyday reads and writes</a>, <a
+href="benchmarks-requests.html#concurrency">Writers and readers at once</a> and <a
+href="benchmarks-vector.html#against-sqlite-and-pgvector">Against SQLite and
 pgvector</a> report them, on an Apple M-series laptop.</p>
 
 <pre data-lang="bash">make ycsb

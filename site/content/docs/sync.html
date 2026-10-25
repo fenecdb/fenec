@@ -431,7 +431,7 @@ subscriptions do not poll.</p>
 <details class="deep"><summary>Details</summary>
 <p>At the default <code>--changes 4096</code> the ring is about 96 KB and costs
 one push per entry on the write path. Subscriptions do not poll — see
-<a href="http.html#subscriptions">the HTTP endpoint</a> for why — and are
+<a href="http-reference.html#subscriptions">the HTTP endpoint</a> for why — and are
 counted separately from ordinary requests under
 <code>--http-max-streams</code>.</p>
 </details>
@@ -459,7 +459,7 @@ expect.</p>
   <li><b>A shape alone is not a security boundary.</b> Under the server's own
     token, a changed id that does not match the shape is sent as a deletion:
     harmless locally, but <i>which ids changed</i> leaks. A per-user token
-    with <a href="/docs/http#scoped-access">scoped access</a> hides both:
+    with <a href="/docs/http-access#scoped-access">scoped access</a> hides both:
     the rows outside its rules are filtered out, and it hears only of rows it
     was sent.</li>
   <li><b><code>bytes</code> fields cannot be synced.</b> In JSON they become

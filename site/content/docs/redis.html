@@ -8,6 +8,14 @@ description: Counters, rate limits, locks with fencing tokens, sessions, caches,
 locks, sessions, queues — done by the database it already has, each a
 statement or two.</p>
 
+<p>The job most apps add Redis for first is a cache in front of the
+database. <code>fenec-server</code> usually does not need one: the file is
+mapped, the operating system keeps the pages in use in memory, and a read
+decodes the row from them. Measured against Redis 7.4 on YCSB in Docker, the
+same durability mode against the same, Redis does more operations a second in
+none of the 33 cells measured both ways (<a href="#cache-in-front">the
+figures and their conditions</a>).</p>
+
 <p>Four things make these work. A <code>set</code> can read the row it
 writes (<code>{n: n + 1}</code>), and the read and the write happen under
 the one writer's lock, so an increment is atomic. Every write answers how
@@ -29,6 +37,71 @@ answered, as a client sends them back. The costs are <code>make
 counters-bench</code> on an M1 Air, in process unless said otherwise; over
 HTTP a request adds its round trip. Where another bench measured a recipe,
 it is named.</p>
+
+<h2 id="cache-in-front">A cache in front of fenec-server</h2>
+
+<p>fenecdb has no buffer pool of its own: the file is mapped, the operating
+system keeps the pages in use in memory, and a read decodes the row straight
+from them (<a href="/docs/concepts#no-buffer-pool">How it works</a>). A row
+read often is in memory with nothing to warm, size or keep in step, so a
+separate cache in front of <code>fenec-server</code> is usually unnecessary
+while the working set fits in memory. YCSB's workloads against Redis 7.4, in
+Docker, each durability mode against the same mode of the other:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>1 000 000 records of 1 KB</th><th class="n">fenec-server</th><th class="n">Redis 7.4</th></tr></thead>
+<tbody>
+<tr><td>C: 100% read, 16 clients, buffered</td><td class="n"><b>18.4 k</b><br><small>p99 2.9 ms</small></td><td class="n">14.0 k<br><small>p99 4.0 ms</small></td></tr>
+<tr><td>B: 95% read, 5% update, 16 clients, durable</td><td class="n"><b>18.2 k</b><br><small>p99 6.0 ms</small></td><td class="n">9.25 k<br><small>p99 8.8 ms</small></td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Operations a second, and under each the p99 of the workload's slowest
+operation, as the benchmark page gives them. Redis does more operations a
+second than fenec-server in none of the 33 cells measured both ways:
+workloads A to F at 1, 4 and 16 clients, durable and buffered (C, which
+writes nothing, buffered alone). Nor does Redis with its snapshots alone, no
+append-only file, which keeps no log: it is behind fenec-server buffered in
+none of the 15 cells measured that way (A, B, D, E and F at 1, 4 and 16
+clients). <a href="/docs/benchmarks-ycsb#ycsb-redis">Every cell</a>, and the
+method.</p>
+
+<p>Over the same network a cache in front can take off at most the time a
+read spends inside the server, and a hop to it is no shorter than a hop to
+the database. In Docker a
+read by key spends 0.023 ms inside the server of a 0.288 ms round trip, and the
+rest is the network (<a href="/docs/benchmarks-requests#round-trip">taken apart</a>);
+one client's read of a record takes 0.29 ms at the median from fenec-server
+(C, buffered) and 0.32 ms from Redis. What a cache adds is an invalidation to
+keep right: a write must reach it, or a read is answered from before it.</p>
+
+<p>The conditions:</p>
+
+<ul>
+  <li><b>While the working set fits in memory.</b> The system keeps the pages in
+    use as far as it has room for them; past that, a read waits for the disk,
+    as in any database. The server compacts a file before it outgrows what
+    the system has for it (<a href="/docs/server#compaction">Compaction</a>,
+    before the file outgrows the page cache).</li>
+  <li><b>One node, Docker's network, YCSB's records.</b> fenec-server and Redis
+    are each a container, on one machine, and a record is ten fields of 100
+    characters. A cache nearer the app than the database is, in the app's own
+    process or on its host while the database is across a network, takes the
+    network off a read: this measures two servers on one network, and says
+    nothing of a nearer one.</li>
+  <li><b>The database's reads.</b> It is not about an HTTP or CDN response cache,
+    which saves a request reaching the server at all
+    (<a href="/docs/limits#fenec-http">responses are not marked
+    cacheable</a>), nor a cache that must stay inside a memory budget by
+    dropping what is used least, which is Redis's (<a
+    href="#not-covered">below</a>).</li>
+  <li><b>Embedded, and in the browser,</b> a read is a call in the app's own
+    process, with no hop to put a cache in front of
+    (<a href="/docs/embedding">Embedded Rust</a>,
+    <a href="/docs/javascript">JavaScript</a>).</li>
+</ul>
 
 <h2 id="patterns">Redis's patterns, and where each one is</h2>
 
@@ -324,7 +397,7 @@ set leases {owner: null, until: null} where name = "report" and owner = "w2" and
     <code>Fenec-Wait</code>, an acquisition that takes nothing is held at
     the server until the holder releases it or its lease lapses, whichever
     comes first — both are a write or a time the server knows of (<a
-    href="/docs/http#wait">Holding a write until it can write</a>).</li>
+    href="/docs/http-reference#wait">Holding a write until it can write</a>).</li>
   <li><b>A resource in fenecdb</b> checks the token in the write itself,
     as above. One elsewhere — a file store, another service — needs a
     check of its own; the token is a number it can keep.</li>
@@ -606,9 +679,9 @@ curl -X POST http://127.0.0.1:8080/_changes/consumers/mailer -d '{"since": 42}'
 <ul>
   <li><b>At least once</b> where the server keeps the place: a consumer
     that crashes between reading and committing is handed those writes
-    again (<a href="/docs/http#consumers">Consumers</a>). One that keeps
+    again (<a href="/docs/http-reference#consumers">Consumers</a>). One that keeps
     <code>Fenec-Next</code> beside its own state, committed with it, has
-    each write once (<a href="/docs/http#changes">Change data
+    each write once (<a href="/docs/http-reference#changes">Change data
     capture</a>).</li>
   <li><b>Only what is on disk:</b> a write is handed out once an fsync
     has covered it, so none a crash lost reaches a consumer.</li>
@@ -653,7 +726,7 @@ stop();
 </pre>
 
 <ul>
-  <li><b>A subscription</b> (<a href="/docs/http#subscriptions">Subscriptions</a>)
+  <li><b>A subscription</b> (<a href="/docs/http-reference#subscriptions">Subscriptions</a>)
     is woken by the write, not by polling: from a write sent to its event read
     by a subscriber took 0.037 ms at the median and
     0.103 at p99 over HTTP on one machine.</li>
@@ -665,12 +738,12 @@ stop();
     stream to 0.94 with 60 and 3.1 with 500, each stream a connection and
     a thread, 64 at most unless <code>--http-max-streams</code> says
     otherwise. A page thousands view polls instead (<a
-    href="/docs/http#polling">Polling a read</a>).</li>
+    href="/docs/http-reference#polling">Polling a read</a>).</li>
   <li><b>A live query</b> keeps a query's answer rather than a shape's
     rows: <code>db.live(query, cb)</code> runs it again on the server
     after every write to what it reads (<a
     href="/docs/javascript">JavaScript</a>).</li>
-  <li><b>The change stream</b> (<a href="/docs/http#changes">Change data
+  <li><b>The change stream</b> (<a href="/docs/http-reference#changes">Change data
     capture</a>) hands out every write on disk exactly once to a consumer
     that sends back where it is, which a subscription — a shape's rows kept
     up to date — does not promise: <code>notify-keyspace-events</code>
@@ -752,11 +825,11 @@ get sicily select name where distance(loc, [15, 37]) &lt;= 200000 near loc [15, 
     250 ms in a crash; <code>always</code> answers after it, a durable
     update 4.0 ms at the median on a Mac (<code>F_FULLFSYNC</code>) and
     0.325 ms on Linux in Docker (<a
-    href="/docs/benchmarks#round-trip">One request's round trip</a>);
+    href="/docs/benchmarks-requests#round-trip">One request's round trip</a>);
     <code>off</code> syncs at shutdown alone (<a
     href="/docs/server#durability">Durability</a>). A request is HTTP: a
     read by id took 0.022 ms at the median on one machine (<a
-    href="/docs/benchmarks#requests">A request over HTTP</a>), and a
+    href="/docs/benchmarks-requests#requests">A request over HTTP</a>), and a
     network's round trip adds to it. Memory alone, a function call a
     statement, is the engine embedded in the app — in Rust, where an
     increment costs 1.36 us, or in the page (<a
@@ -775,7 +848,7 @@ get sicily select name where distance(loc, [15, 37]) &lt;= 200000 near loc [15, 
     counters-bench</code>), 185 800 jobs claimed and acked a second
     (<code>make queue-bench</code>) — and reads go beside them: four
     threads read 701 000 rows a second by id beside four writers (<a
-    href="/docs/benchmarks#concurrency">Writers and readers at
+    href="/docs/benchmarks-requests#concurrency">Writers and readers at
     once</a>). Past one machine's writer the data is split by tenant, a
     file each (<a href="/docs/sharding-design#why-tenants-and-not-hash-partitioning">Sharding design</a>); there
     are no hash slots.</li>

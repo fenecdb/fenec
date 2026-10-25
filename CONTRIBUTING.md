@@ -108,7 +108,7 @@ empty.
 ## Performance claims
 
 `make bench`, `make sweep`, `make memory` and `make compare` are the harnesses
-behind the numbers in `site/content/docs/benchmarks.html`. If a change moves any
+behind the numbers on the benchmarks pages (`site/content/docs/benchmarks*.html`). If a change moves any
 of them, say by how much in the PR description and on what hardware — the docs
 quote measurements, not estimates.
 

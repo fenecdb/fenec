@@ -189,7 +189,7 @@ an agent's calls as they hold a client's requests.</p>
 <ul>
   <li><b>The token is the request's.</b> The endpoint takes the bearer token
     <code>/query</code> takes: the server's token reads and writes everything,
-    and a JSON Web Token is held to its <a href="/docs/http#scoped-access">policy</a>,
+    and a JSON Web Token is held to its <a href="/docs/http-access#scoped-access">policy</a>,
     ANDed into every statement a tool runs — so an agent given a scoped token
     sees exactly what its <code>/query</code> sees. <code>schema</code> lists
     only the collections it may read and counts none of their rows, and on a

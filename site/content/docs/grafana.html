@@ -245,7 +245,7 @@ model:
 <p>The plugin keeps the answer to each statement and its parameters with
 its <code>ETag</code>, and sends the same request again with
 <code>If-None-Match</code>: a 304 is answered from the kept answer
-(<a href="/docs/http#polling">Polling a read</a>).</p>
+(<a href="/docs/http-reference#polling">Polling a read</a>).</p>
 
 <p>Over the seeded week, the median of 21 runs of each, the ways in turns,
 from the host into Docker on an M1 Air: fenec-server directly, Grafana
@@ -397,7 +397,7 @@ ticks           read                   for grafana
 <p>A rule's filter narrows the rows further — <code>events read where site
 = $jwt.site for grafana</code> — and is ANDed into every statement the token
 sends, so a Grafana per customer sees its own rows
-(<a href="/docs/http#scoped-access">Scoped access</a>). The seed mints the
+(<a href="/docs/http-access#scoped-access">Scoped access</a>). The seed mints the
 token for a year, and Grafana reads it from a file when it starts
 (<code>$__file{}</code> in the provisioning). To rotate one, mint another,
 put it into the data source and restart Grafana; <code>--jwt-max-age</code>

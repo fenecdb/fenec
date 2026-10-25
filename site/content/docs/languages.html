@@ -154,7 +154,7 @@ n, err := docs.Where("title", "~", "Dunes").Count(ctx)</pre>
 <code>Batch</code>, <code>IdempotencyKey</code>, <code>After</code> for a
 replica, <code>Subscribe</code>, <code>Changes</code> and
 <code>WithTenant</code> cover the rest of the <a href="http.html">HTTP
-endpoint</a> (<a href="https://github.com/fenecdb/fenecdb/tree/main/integrations/go">integrations/go</a>);
+endpoint</a> and its <a href="http-reference.html">reference</a> (<a href="https://github.com/fenecdb/fenecdb/tree/main/integrations/go">integrations/go</a>);
 a refusal is an <code>*fenecdb.Error</code>, and a batch's says which
 statement stopped it (<code>At</code>, from 0).
 A <code>[]float32</code> goes out as the decimals that read back as each
@@ -257,7 +257,8 @@ classes by property name, any case; <code>BatchAsync</code>,
 <code>WithIdempotencyKey</code>, <code>After</code> for a replica,
 <code>SubscribeAsync</code> as an <code>IAsyncEnumerable</code>,
 <code>ChangesAsync</code> and a <code>Tenant</code> option cover the rest
-of the <a href="http.html">HTTP endpoint</a>
+of the <a href="http.html">HTTP endpoint</a> and its
+<a href="http-reference.html">reference</a>
 (<a href="https://github.com/fenecdb/fenecdb/tree/main/integrations/dotnet">integrations/dotnet</a>);
 a refusal is a <code>FenecException</code>, and a batch's says which
 statement stopped it (<code>At</code>, from 0).
@@ -594,7 +595,8 @@ every builder method throws as it is called, so a Swift chain takes one
   -d '{"query":"get docs select title, year where year &gt;= $1 order year desc limit $2","params":[2020,5]}'
 # [{"title":"Night at the oasis","year":2024},{"title":"Dunes","year":2021}]</pre>
 
-<p>The REST routes, batches, subscriptions and the change stream are on
+<p>The REST routes, subscriptions and the change stream are on
+<a href="http-reference.html">HTTP reference</a>, and batches on
 <a href="http.html">HTTP endpoint</a>.</p>
 
 <details class="deep"><summary>Details: what the examples are held to</summary>

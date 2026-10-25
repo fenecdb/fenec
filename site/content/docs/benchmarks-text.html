@@ -1,0 +1,164 @@
+<!--
+title: Text search benchmarks — fenecdb
+description: What a search box costs (match ranked by BM25, marks, facets, typos and half-typed words), and how good the answers are on two BEIR datasets, with the method behind every number.
+-->
+
+<h1>Text search benchmarks</h1>
+<p class="kicker">What a search box costs, and how good the answers are.</p>
+
+<h2 id="text-search">Text search</h2>
+
+<p>What a search box costs: <code>match</code> ranked by BM25, the marks
+of what it matched, the facets beside it, and the words a typo or a half
+typed word reaches. In one process on an M1.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>100 000 documents of 30 words</th><th class="n">median</th></tr></thead>
+<tbody>
+<tr><td><code>match … limit 10</code>, two words</td><td class="n"><b>0.06 ms</b></td></tr>
+<tr><td>… with <code>highlight()</code>, a row's marks</td><td class="n">1–3 µs more</td></tr>
+<tr><td>… with <code>snippet()</code>, a row's</td><td class="n">2–4 µs more</td></tr>
+<tr><td>… with two facets over what it reaches, about 16 667 rows</td><td class="n">1.6 ms</td></tr>
+<tr><td>a facet over every row, through <code>@hash</code></td><td class="n"><b>0.01 ms</b></td></tr>
+<tr><td>… read from every row</td><td class="n">6.1 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="tbl">
+<table>
+<thead><tr><th><code>fuzzy</code> and <code>prefix</code></th><th class="n">&nbsp;</th></tr></thead>
+<tbody>
+<tr><td>a word's neighbours among FiQA's 135 500 words, one edit</td><td class="n"><b>14 µs</b></td></tr>
+<tr><td>… two edits</td><td class="n">120 µs</td></tr>
+<tr><td>… the words it begins</td><td class="n">4 µs</td></tr>
+<tr><td>the sorted words, made at the first loose <code>match</code>, 60 000 words</td><td class="n">6 ms, 1.3 MB</td></tr>
+</tbody>
+</table>
+</div>
+
+<ul>
+  <li><b>A query that asks for no marks runs as it did.</b> The marks read
+    the row's text again by the index's own tokenizer; nothing is kept for
+    them in the index.</li>
+  <li><b>How good the answers are</b> is the next section: BM25 on two BEIR
+    datasets, with a typo in each query and half typed, beside the
+    vectors.</li>
+</ul>
+
+<details class="deep"><summary>Method and details</summary>
+<p>100 000 documents of 30 words each over a vocabulary of 5 000, the
+commoner words more common, a <code>brand</code> under <code>@hash</code>
+(40 values) and a <code>color</code> with no index (12). Each figure is the
+median of 15 runs over 200 two-word queries; a row's marks are the
+difference over the ten rows of <code>match</code> alone. The words a typo
+reaches are timed over FiQA's own words, 2 000 query words with a typo in
+each, and the sorted words over 100 000 documents of made-up words, many an
+edit or two from another, as a language's are (<a
+href="fenecql-search.html#typos">Typos and words begun</a>, <a
+href="fenecql-search.html#highlights">Highlights and snippets</a>, <a
+href="fenecql-search.html#facets">Facets</a>).</p>
+
+<pre data-lang="bash">make search-bench
+make fuzzy-bench BEIR=path/to/fiqa
+</pre>
+</details>
+
+<h2 id="retrieval-quality">Retrieval quality</h2>
+
+<p>How good the answers are, not how fast: every way fenecdb ranks
+documents, scored by nDCG@10 on two public BEIR datasets. Fusing keyword
+and vector search (<code>fuse</code>) is the one path near the top of
+both.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">SciFact</th><th class="n">FiQA</th><th class="n">FiQA p50</th></tr></thead>
+<tbody>
+<tr><td><code>match</code>, BM25</td><td class="n">0.662</td><td class="n">0.232</td><td class="n">0.26 ms</td></tr>
+<tr><td><code>near</code>, the graph</td><td class="n">0.645</td><td class="n">0.366</td><td class="n">0.37 ms</td></tr>
+<tr><td><code>near … exact</code></td><td class="n">0.645</td><td class="n">0.369</td><td class="n">4.99 ms</td></tr>
+<tr><td><code>match … rerank</code>, 50 candidates</td><td class="n">0.656</td><td class="n">0.337</td><td class="n">0.45 ms</td></tr>
+<tr><td><code>match … rerank</code>, 200 (default)</td><td class="n">0.646</td><td class="n">0.361</td><td class="n">0.78 ms</td></tr>
+<tr><td><code>match … rerank</code>, 1 000</td><td class="n">0.649</td><td class="n">0.369</td><td class="n">1.82 ms</td></tr>
+<tr><td><code>match … near … fuse</code>, 10 a side</td><td class="n"><b>0.700</b></td><td class="n">0.364</td><td class="n">0.67 ms</td></tr>
+<tr><td><code>match … near … fuse</code>, 20 (default)</td><td class="n">0.700</td><td class="n">0.366</td><td class="n">0.74 ms</td></tr>
+<tr><td><code>match … near … fuse</code>, 100</td><td class="n">0.688</td><td class="n">0.359</td><td class="n">0.97 ms</td></tr>
+<tr><td><code>match … near … fuse</code>, 1 000</td><td class="n">0.690</td><td class="n">0.364</td><td class="n">4.03 ms</td></tr>
+<tr><td><code>near</code>, sparse (SPLADE++)</td><td class="n">0.693</td><td class="n">0.331</td><td class="n">0.68 ms</td></tr>
+<tr><td><code>match … near … fuse</code>, sparse</td><td class="n">0.698</td><td class="n">0.314</td><td class="n">1.07 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+<p id="typos">With a typo in each query, and with each query's last word
+half typed, as a search box sends it: <code>fuzzy</code> and
+<code>prefix</code> take back most of what is lost, and leave the queries
+written whole where they were.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">SciFact</th><th class="n">FiQA</th><th class="n">FiQA p50</th></tr></thead>
+<tbody>
+<tr><td><code>match</code>, as written</td><td class="n">0.662</td><td class="n">0.232</td><td class="n">0.26 ms</td></tr>
+<tr><td><code>match … fuzzy</code>, as written</td><td class="n">0.665</td><td class="n">0.233</td><td class="n">0.74 ms</td></tr>
+<tr><td><code>match … prefix</code>, as written</td><td class="n">0.663</td><td class="n">0.234</td><td class="n">0.32 ms</td></tr>
+<tr><td><code>match</code>, a typo</td><td class="n">0.636</td><td class="n">0.213</td><td class="n">0.24 ms</td></tr>
+<tr><td><code>match … fuzzy</code>, a typo</td><td class="n">0.663</td><td class="n">0.229</td><td class="n">0.71 ms</td></tr>
+<tr><td><code>match … fuzzy 1</code>, a typo</td><td class="n"><b>0.666</b></td><td class="n">0.231</td><td class="n">0.53 ms</td></tr>
+<tr><td><code>match</code>, the last word half typed</td><td class="n">0.616</td><td class="n">0.188</td><td class="n">0.26 ms</td></tr>
+<tr><td><code>match … prefix</code>, half typed</td><td class="n">0.655</td><td class="n">0.208</td><td class="n">0.60 ms</td></tr>
+<tr><td><code>match … fuzzy prefix</code>, half typed</td><td class="n">0.658</td><td class="n">0.210</td><td class="n">1.09 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+<details class="deep"><summary>How the typos were made</summary>
+<p>One typo a query, by a generator seeded by the query's place
+(<code>crates/fenec-bench/src/bin/beir.rs</code>): in one word of four
+letters or more, a letter dropped, a key beside it on the keyboard typed as
+well or instead, or two letters swapped — the four kinds Damerau found four
+misspellings in five to be — and in the first letter 7% of the time, as
+Pollock and Zamora found it. SciFact's 300 test queries hold 297 such
+words, FiQA's 648 hold 644. Half typed is the last word cut to half its
+letters, rounded up. A word of under five letters takes no edit, which is
+most of what <code>fuzzy</code> leaves unrecovered; with one typo a query,
+<code>fuzzy 1</code> does a little better than the two edits nine letters
+allow, which pay where a long word holds two. The p50s are the whole
+query's, the words found and their lists merged included.</p>
+</details>
+
+<details class="deep"><summary>Method and details</summary>
+<pre data-lang="bash">cd crates/fenec-bench/beir &amp;&amp; npm install
+node embed.mjs path/to/scifact     # dense: all-MiniLM-L6-v2, 90 MB
+node splade.mjs path/to/scifact    # sparse: SPLADE++, 532 MB, optional
+make beir BEIR=path/to/scifact
+</pre>
+
+<p>Two BEIR datasets as BEIR ships them — SciFact, 5 183 documents and 300
+test queries, and FiQA, 57 638 and 648 — with every document and query
+embedded by all-MiniLM-L6-v2 the way sentence-transformers does it, and
+encoded by SPLADE++ (<code>prithivida/Splade_PP_en_v1</code>) into a
+<code>sparse&lt;30522&gt;</code> field, both cut at 256 tokens with the
+closing <code>[SEP]</code> kept. transformers.js drops it when it cuts a
+text, so both scripts cut texts themselves: for SPLADE that was worth 0.46
+of SciFact's nDCG@10, for the dense vectors up to 0.003. Each of the
+engine's ways of ranking ten documents is then scored by nDCG@10, through
+FenecQL: the answers are the engine's own.</p>
+
+<p>The two datasets pull opposite ways. In SciFact a claim shares its words
+with the evidence and BM25 alone beats the transformer; in FiQA a question
+shares few words with its answer and BM25 is far behind. <code>fuse</code>
+is the one path near the top of both. The rank offset matters less than the
+depth: at 20 a side, <code>k</code> from 10 to 120 moves either score by at
+most 0.005.</p>
+
+<p>SPLADE sits between the two. On SciFact it comes within 0.006 of the dense
+fusion with one index; on FiQA it lifts BM25 by 0.099 but stays under the
+dense vectors, and fused with BM25 there it loses 0.016 — both sides are
+lexical. Its queries' 37 to 65 terms reach most of the corpus, and its
+lists are summed a list at a time rather than walked a document at a time:
+0.68 ms, where MaxScore's walk took 2.58 (<a
+href="concepts.html#sparse-vectors">How it works</a>).</p>
+</details>

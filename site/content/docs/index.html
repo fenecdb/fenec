@@ -97,7 +97,7 @@ routes.</p>
   <li><a href="mobile.html">Mobile and native apps</a>
     <p>Swift, Kotlin and Flutter: a file on the device, live queries driving the UI.</p></li>
   <li><a href="http.html">HTTP endpoint</a>
-    <p>A REST surface derived from the schema, raw FenecQL, batches and a subscription stream.</p></li>
+    <p>Start a server and send it FenecQL from curl or any language's standard library: raw statements, batches and writes that are safe to retry. The <a href="http-reference.html">reference</a> has every route, status and stream, and <a href="http-access.html">security and scoped access</a> the tokens and policies.</p></li>
   <li><a href="sync.html">Sync</a>
     <p>A local replica that reads without the network and writes optimistically.</p></li>
   <li><a href="redis.html">Instead of Redis</a>
@@ -137,9 +137,9 @@ routes.</p>
   <li><a href="file-format.html">File format</a>
     <p>The layout of a file: its record kinds, their bodies, and why each exception exists.</p></li>
   <li><a href="concepts.html">How it works</a>
-    <p>Segments, the mapped file, one writer, and why there is no page cache; the four ways it ships and how the crates fit together.</p></li>
+    <p>Segments, the mapped file, one writer, and why fenecdb has no buffer pool of its own; the four ways it ships and how the crates fit together.</p></li>
   <li><a href="benchmarks.html">Benchmarks</a>
-    <p>YCSB against SQLite, PostgreSQL, MongoDB and Redis, writers beside readers, requests and search, each with its method.</p></li>
+    <p>YCSB against SQLite, PostgreSQL, MongoDB and Redis, writers beside readers, requests, text and vector search, and sizes, each family on a page with its method.</p></li>
   <li><a href="compare.html">Compare</a>
     <p>Beside PostgreSQL, SQLite and PGlite: when to choose each.</p></li>
   <li><a href="build.html">Build from source</a>

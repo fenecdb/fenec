@@ -1,0 +1,446 @@
+<!--
+title: HTTP security and scoped access — fenecdb
+description: A bearer token, CORS and a read-only endpoint, JSON Web Tokens held to a policy file down to the rows, and the keys that verify them, with rotation and identity providers.
+-->
+
+<h1>HTTP security and scoped access</h1>
+<p class="kicker">Who may ask: a bearer token and CORS, JSON Web Tokens held to a
+policy file down to the rows, and the keys that verify them. The routes are in
+the <a href="http-reference.html">HTTP reference</a>.</p>
+
+<h2>Security</h2>
+
+<p>Protect the endpoint with a bearer token, and put a TLS terminator in front
+of it on an open network.</p>
+
+<pre data-lang="bash">fenec-server --file data.fenec --http 127.0.0.1:8080 \
+         --http-cors 'http://localhost:8787' \
+         --http-token "$TOKEN" \
+         --http-read-only
+</pre>
+
+<div class="tbl">
+<table>
+<tbody>
+<tr><td><code>--http-token &lt;value&gt;</code></td><td>every request needs <code>Authorization: Bearer &lt;value&gt;</code>, compared in constant time</td></tr>
+<tr><td><code>--http-cors &lt;origin&gt;</code></td><td>sets <code>Access-Control-Allow-Origin</code>; without it no CORS header is sent at all. A browser&rsquo;s preflight (<code>OPTIONS</code>) from that origin, or any with <code>*</code>, is answered 204 before a token is asked for -- the browser sends none with it -- on a single database and under <code>/t/&lt;tenant&gt;/</code>. Every answer exposes <code>Fenec-Seq</code>, <code>X-Request-Id</code> and <code>Retry-After</code> and lets <code>Idempotency-Key</code> in. Through <code>fenec-shard</code>, give the router the flag: it answers the preflight itself and puts its headers on its own answers and in place of the node's (<a href="/docs/sharding-reference#cors">Tenants and sharding</a>)</td></tr>
+<tr><td><code>--http-read-only</code></td><td>write endpoints return 403; <code>fenec-server</code>'s own path is unaffected</td></tr>
+<tr><td>a replica</td><td>every write returns 403, whatever the flags: its writes come from its primary</td></tr>
+<tr><td>non-loopback address</td><td>refuses to bind without a token, unless <code>--insecure</code> is given</td></tr>
+</tbody>
+</table>
+</div>
+
+<details class="deep"><summary>Details</summary>
+<p>There is no TLS, the same rule as <code>fenec-server</code>: on an open network
+it needs a TLS terminator in front. A <code>PATCH</code> or <code>DELETE</code>
+without a filter is refused, and covering a whole collection needs a separate
+<b>path</b> rather than a flag — a key like <code>?all=true</code> would
+collide with a field named <code>all</code>.</p>
+
+<p>Limits are shared with <code>fenec-server</code> (<code>--max-connections</code>,
+<code>--idle-timeout</code>: a connection silent that long between requests is
+closed with nothing written, and one that went silent part way through a
+request is answered 408); the body ceiling is 64 MiB and the header block
+64 KiB. <code>Transfer-Encoding: chunked</code> is unsupported and refused with
+411, which beats reading half a body. A field whose name matches a clause name
+(<code>select</code>, <code>order</code>, <code>limit</code>,
+<code>offset</code>, <code>count</code>, <code>where</code>,
+<code>group</code>) cannot be filtered
+over HTTP; the FenecQL and <code>fenec-server</code> paths are unaffected.</p>
+
+<div class="note trap">
+  <p><b>A shape alone is not a security boundary.</b> Under the server's own
+  token, which ids changed is visible to a subscriber even when the rows are
+  not. Rows are hidden by a scoped token, below.</p>
+</div>
+</details>
+
+
+<h2>Scoped access</h2>
+
+<p>Give each user a JSON Web Token, and a policy file decides which
+collections and which rows that token can read or write. A browser can then
+talk to the database directly.</p>
+
+<pre data-lang="text"># collection   access         rows                                role
+notes          read,write     where owner = $jwt.sub
+posts          read           where published = true or author = $jwt.sub
+posts          write          where author = $jwt.sub
+messages       read,insert    where room in $jwt.rooms
+journal        read,insert    where owner = $jwt.sub
+journal        append-only
+accounts       update(balance, held)                              for app
+orders         update(status, run_at)  where customer = $jwt.sub and status = "ready" and new.status = "cancelled"
+orders         read(pickup, run_at)    where run_at &lt;= now()                    for courier
+positions      read           where courier in (get orders select courier where customer = $jwt.sub)
+*              read                                               for dashboard
+</pre>
+
+<ul>
+  <li><b>Reads</b> only see the rows the rule allows.</li>
+  <li><b>Fields.</b> <code>read(pickup, run_at)</code> shows the rows it
+    admits with those fields alone, and <code>id</code>: a row shows the
+    fields of every read rule admitting it, the rest <code>null</code>. A
+    courier sees a ready order's pickup, and the customer's door once the
+    order is theirs.</li>
+  <li><b>Writes</b> must stay inside the rule, or get 403. <code>write</code>
+    grants <code>insert</code>, <code>update</code> and <code>delete</code>,
+    and each can be granted alone; <code>update(balance, held)</code> grants
+    an update of those fields and no other.</li>
+  <li><b>Transitions.</b> <code>new.status</code> reads a row as the write
+    leaves it, and a bare name as it stands: the <code>orders</code> rule
+    above lets a customer cancel a ready order, and not take a cancelled
+    one back.</li>
+  <li><b><code>returning</code></b> answers rows the token may read as the
+    write leaves them: a courier who reads the orders they carry claims a
+    ready one and is answered it, claimed.</li>
+  <li><b><code>append-only</code></b> collections take inserts from scoped
+    tokens, and refuse every update and delete with 403.</li>
+  <li><b>A list claim</b>, such as <code>"rooms": ["r1", "r2"]</code>,
+    goes after <code>in</code>.</li>
+  <li><b>Another collection.</b> <code>in (get …)</code> reads a rule's
+    list from rows: the <code>positions</code> rule above lets a customer
+    read where the courier carrying their order is, and nothing of the
+    others.</li>
+  <li><b>The server's own <code>--http-token</code></b> still has full
+    access.</li>
+</ul>
+
+<p>A whole product built on these rules is
+<a href="https://github.com/fenecdb/fenecdb/tree/main/examples/saas">examples/saas</a>:
+sign-up and sessions owned by the app, a tenant per organisation behind
+<code>fenec-shard</code>, roles and teams as grants and list claims, live
+boards and search under each person's token, with its threat model and the
+attacks its tests try.</p>
+
+<details class="deep"><summary>Details</summary>
+<p><code>--http-token</code> is everything or nothing. With
+<code>--jwt-secret</code> the endpoint also takes HS256 JSON Web Tokens, each
+held to the rules of a <code>--policy</code> file, collection by collection and
+down to the rows, so a browser can talk to the database directly with a token
+per user:</p>
+
+<pre data-lang="bash">fenec-server --file data.fenec --http 0.0.0.0:8080 --http-token "$ROOT" \
+         --jwt-secret-file jwt.secret --policy policy.txt
+
+fenec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":1893456000}'
+</pre>
+
+<ul>
+  <li><b>Reads</b> get the rule's filter ANDed in at every level: the
+    collection's <code>where</code>, each <code>lookup</code> below it, a
+    subscription's shape, a <code>count</code>. A collection no rule grants
+    a token anything on does not exist for it: 404, and absent from the
+    list.</li>
+  <li><b>Writes</b> get it twice, as PostgreSQL's <code>USING</code> and
+    <code>WITH CHECK</code>: a <code>set</code> or <code>del</code> touches only
+    the rows the filter matches, and every document written — a put, or a row
+    a <code>set</code> rewrote — has to match it afterwards, or the write is
+    refused with 403. A put that leaves out a field the filter pins to a claim
+    gets the claim's value, so <code>{"title":"a"}</code> is alice's. A scoped
+    put names no <code>id</code>, which could overwrite a row the token cannot
+    see, and a scoped token changes no schema and runs no maintenance.</li>
+  <li><b><code>returning</code></b> answers what the write wrote, so the
+    rows it answers are held to the read rules: a <code>set</code>'s as it
+    wrote them, a <code>del</code>'s as they were. A row the read rules
+    leave out by a field the write does not change is passed over, as a
+    <code>get</code> passes it over; a <code>set</code> that would leave a
+    row the token may not read is refused with 403 and writes nothing.
+    PostgreSQL asks its <code>SELECT</code> policies of the row before an
+    <code>UPDATE … RETURNING</code> as well as after, which is why a courier
+    who reads the orders they carry, claiming a ready order, would take
+    nothing there and be told nothing; here the terms over the fields the
+    <code>set</code> writes are asked of the row it leaves, and the claim
+    answers the order, claimed. Without <code>returning</code> a write's
+    rows are those its own rules reach, read rules or not.</li>
+  <li><b>Grants</b> are <code>read</code>, <code>insert</code>,
+    <code>update</code> and <code>delete</code>, joined by commas, and
+    <code>write</code> is the three writes. An insert is a put of new
+    documents, held to the filters of the rules granting
+    <code>insert</code>; an update is a <code>set</code> and a delete a
+    <code>del</code>, of rows the token may read and the filters of the
+    rules granting them, a <code>set</code>'s rows checked again after.
+    <code>update(balance, held, status)</code> names the fields an update
+    may change: a write over a row — a <code>set</code>, a REST
+    <code>PATCH</code> or <code>PUT</code>, a line of a <code>/batch</code> —
+    is judged by the fields it changes, and each of them must be one rule's
+    whose filter admits the row before and after, or it is refused with 403
+    naming a field (a batch holding it is put back whole). A field written
+    with the value it holds is not changed. Rules widen each other, each
+    with its fields and its rows: <code>notes update where owner =
+    $jwt.sub</code> beside <code>notes update(title)</code> changes every
+    field of the token's notes and the title of anyone's. A token may insert into a collection it cannot read, such as an event
+    stream: its reads of it are refused with 403 and it is not listed.
+    <code>expired</code> grants the rows past their <code>@ttl</code>, which
+    <code>expired()</code> reads (<a href="/docs/fenecql-indexes#reaper">the
+    reaper</a>): a statement asking it is held to the filters of the rules
+    granting <code>expired</code> beside the ones its operation needs, and
+    neither <code>write</code> nor <code>*</code> grants it — a lapsed hold
+    is the reaper's, not a user's to see again.</li>
+  <li id="field-grants"><b>Fields a read shows.</b> <code>read(pickup,
+    run_at)</code> grants the rows its filter admits with those fields and
+    <code>id</code>; <code>read</code> grants every field. A row shows the
+    fields of every read rule admitting it, and the rest answer
+    <code>null</code> — in <code>/query</code>, <code>/batch</code>, REST,
+    each <code>lookup</code> level by its own collection's rules, a write's
+    <code>returning</code>, a subscription's seed and changes, and the MCP
+    tools. Beside <code>orders read where courier = $jwt.sub for
+    courier</code>, the rule above shows a courier every ready order's
+    pickup and the whole of the orders they carry. A field no read rule
+    grants is not there: <code>select *</code> leaves it out,
+    <code>describe</code>, <code>/collections</code> and
+    <code>/_schema</code> do not list it, and naming it is refused (403)
+    as a name the collection lacks is.
+<pre data-lang="text">get orders where dropoff = $1                 -- no ready order matches, whatever its door
+get orders where not (dropoff = $1)           -- every ready order does: no door told from another
+get orders order dropoff                      -- 403: the order would tell the doors
+get orders where courier = $1 order dropoff   -- $1 their sub: every order reached shows it
+</pre>
+    A field withheld from a row must not show through what a statement does
+    with it either. A <code>where</code> term reading it holds only where
+    the row shows it — <code>dropoff = $1</code> is asked as
+    <code>(courier = $jwt.sub and dropoff = $1)</code>, the <code>or</code>
+    of the filters of the rules granting <code>dropoff</code> — in a
+    <code>get</code>, a <code>set</code> or <code>del</code>, a
+    <code>lookup</code> level, a facet's and an inner <code>get</code>'s;
+    <code>and</code> stops at the first false, so the term is never worked
+    out over a value it may not see. <code>order</code>,
+    <code>group</code>, <code>having</code>, a <code>facet</code>, an
+    aggregate, <code>match</code>, <code>near</code>, a highlight, a
+    <code>lookup</code> key and a <code>set</code>'s values read a field
+    only where every row they reach shows it, and are refused with 403
+    naming it otherwise: when every read rule of the collection grants it,
+    or when one rule granting it has no filter or one whose
+    <code>and</code> terms are each a term of the statement's own
+    <code>where</code>, parameters bound — as the last line above. A
+    computed column over such a field is <code>null</code> where the row
+    does not show it and never worked out there, and an inner
+    <code>get</code>'s column of one is listed from the rows showing it. A
+    write reaches the rows it reached before; its <code>returning</code> is
+    masked as a read's rows are. PostgreSQL's column privileges are a
+    role's and the same on every row, and refuse a statement naming a
+    column the role lacks, <code>SELECT *</code> included; a column shown
+    on some rows is a view of <code>CASE WHEN … THEN col END</code>
+    there, whose <code>WHERE</code> reads <code>NULL</code> on the rest
+    where this reads the term as false. A token whose rules name no fields
+    reads as before; one whose do loses the stored-bytes path of a plain
+    <code>get</code> where a column is masked, and pays each rule that could
+    show a row more, per row: over HTTP on loopback a row by id took 28.0 µs
+    against 26.0 under the same two rules naming no fields, a page of
+    twenty 39.5 against 34.4, about 0.13 µs a row of it in process
+    (<code>make policy-bench</code>).</li>
+  <li><b>Transitions.</b> A rule's filter reads the row as it stands, and
+    <code>new.&lt;field&gt;</code> reads it as the write leaves it, as
+    <code>new.</code> names the document in an upsert's <code>else
+    set</code>. One filter asked of the row before and after cannot say
+    which way a row may go: <code>status = "ready" or status =
+    "cancelled"</code> lets a customer cancel an order and take a cancelled
+    one back, and <code>run_at</code> granted lets them move it to the head
+    of the queue. A rule naming <code>new.</code> is a transition, asked of
+    the two rows together:
+<pre data-lang="text"># a customer cancels a ready order, out of the queue for good
+orders  update(status, run_at)  where customer = $jwt.sub and courier is null and status = "ready" and new.status = "cancelled" and new.run_at is null  for customer
+# a courier claims an order whose lease is out, for themselves, counting the attempt
+orders  update(status, run_at, courier, claim, attempts)  where run_at &lt;= now() and new.status = "assigned" and new.courier = $jwt.sub and new.attempts = attempts + 1  for courier
+# and delivers only what they carry
+orders  update(status, delivered_at, run_at, claim)  where courier = $jwt.sub and (status = "assigned" or status = "picked") and new.status = "delivered" and new.run_at is null  for courier
+</pre>
+    A write over a row is the token's when one rule granting
+    <code>update</code> names every field it changes (or names none) and
+    admits the change: a transition by being true of the row before and
+    after together, any other rule by admitting each. Rules naming no
+    fields and no <code>new.</code> widen each other as before, the row
+    before one rule's and the row after another's, as PostgreSQL's
+    permissive policies do; a transition lends neither half. A
+    <code>set</code> picks the rows a transition reaches by what the row
+    before can answer of it — <code>status = "ready"</code> of the first
+    rule above — and each row it writes is then asked the whole rule, a
+    refusal 403 and the statement (or the batch) put back. The row after
+    is held to what the rule says of <code>new.</code> and nothing more:
+    the field list keeps the rest where it was, so a transition with none
+    should pin what must not move (<code>new.customer = customer</code>).
+    A rule naming <code>new.</code> grants <code>update</code> alone — a
+    read, an insert or a delete has no row after, or none before — and
+    one granting more stops the server at startup. A scoped
+    <code>set</code> of one row over HTTP on loopback took 5.0 µs more
+    than the server token's 45 µs under a plain rule, 5.7–5.9 under a
+    field list and 6.1–6.8 under a transition
+    (<a href="https://github.com/fenecdb/fenecdb/tree/main/crates/fenec-http/examples/policy.rs"><code>make
+    policy-bench</code></a>).</li>
+  <li><b><code>append-only</code></b> is a line of its own,
+    <code>journal append-only</code>, with no filter and no role. No scoped
+    token updates or deletes there, by any route — <code>/query</code>,
+    REST, <code>/batch</code> — whatever its rules grant: <code>write</code>
+    and <code>*</code> mean <code>insert</code> there, and a rule naming
+    <code>update</code> or <code>delete</code> for the collection stops the
+    server at startup. It binds JSON Web Tokens and not the server's own
+    token: corrections, erasure and <code>@ttl</code>'s sweep stay with
+    whoever holds that, and an app server that should only append is given
+    a scoped token of its own, a role for instance.</li>
+  <li><b>List claims.</b> A claim that is a JSON array goes after
+    <code>in</code>: <code>room in $jwt.rooms</code> matches the rooms it
+    lists, <code>room in [$jwt.rooms, "lobby"]</code> those and one more,
+    and a text claim there is a list of one. It holds reads, writes
+    (<code>WITH CHECK</code>: a post into a room the list does not hold is
+    403) and subscriptions alike. A token whose list claim holds more than
+    1 000 values is refused (401). A <code>role</code> claim may be a list
+    too, and a rule <code>for</code> a role applies when the list holds
+    it. Membership kept in another collection is a rule's <code>in (get
+    …)</code> (below).</li>
+  <li><b>Rules that read another collection.</b> A rule's filter takes
+    <code>in (get …)</code>, its claims bound inside as anywhere else:
+<pre data-lang="text"># a customer follows the courier carrying their order
+positions  read  where courier in (get orders select courier where customer = $jwt.sub and (status = "assigned" or status = "picked"))  for customer
+# a member reads and posts in the rooms they belong to
+messages   read,insert  where room in (get members select room where user = $jwt.sub)
+</pre>
+    The inner <code>get</code> reads the rows of its collection the
+    token's own <code>get</code> would, held to the token's rules there;
+    one no rule lets the token read gives none of its rows, as
+    PostgreSQL's row security gives a policy's subquery none of a table no
+    policy grants. The fields it reads are the policy's own: its list is
+    never shown, only what it admits. It is answered before each
+    statement, under the lock that runs it, as the <code>in</code> list it
+    is: reads, a <code>lookup</code> level, a facet, a <code>match</code>
+    and an agent's MCP tools see the list as it stands, and a write's
+    <code>WITH CHECK</code> — an insert's document, an update's row before
+    and after, a transition's pair, an upsert's row written over,
+    <code>returning</code>'s rows — is tested by it where no query could
+    run. A rule naming the fields it shows may read another collection
+    too, <code>positions read(courier, at, loc) where courier in (get
+    orders …)</code>: each row is shown the fields of the rules admitting
+    it as their lists stand, in a read, a <code>lookup</code> level and a
+    stream (<a href="#field-grants">Fields a read shows</a>). A
+    <code>/batch</code> answers it again for each
+    statement: a courier's claim, then a read of the customer's door the
+    claim lets them read, is one round trip. The list is held to a list
+    claim's bound, 1 000 values, and a statement whose list would hold
+    more is refused (400) rather than answered with a list cut short; a
+    value held by many rows counts once. Rules that read each other's
+    collections — <code>positions</code> reading <code>orders</code> whose
+    rules read <code>positions</code>, at any depth, whatever their roles
+    — stop the server at startup, since none of them could be answered
+    first; so do a rule on <code>*</code> that reads a collection, a claim
+    anywhere in the inner <code>get</code> but its <code>where</code>, and
+    what an inner <code>get</code> may not say anyway. A scoped
+    subscription whose rules read another collection is bound again when
+    that collection is written: the courier enters a customer's stream of
+    <code>positions</code> as the order is claimed and leaves it, a
+    deletion of the row it was sent, as it is delivered, with no write to
+    <code>positions</code> between. It costs one inner <code>get</code> a
+    statement — a <code>@hash</code> bucket's read, 1.8 to 2.1 µs in
+    process and 4.3 to 4.7 µs over HTTP on loopback above a rule naming a
+    claim — and a
+    stream one at each write to the collection its rules read: beside 100
+    scoped streams a write took 1.89 ms of the server's CPU against 1.65
+    under a rule naming the courier as a claim, every scoped stream
+    looking at every write either way. A token with no such rule runs as
+    it did (<a
+    href="https://github.com/fenecdb/fenecdb/tree/main/crates/fenec-http/examples/policy.rs"><code>make
+    policy-bench</code></a>, <code>ARGS=streams</code>).</li>
+  <li><b><code>match</code> scores over the rows the token may read.</b>
+    BM25's statistics — how many documents, their mean length, how many
+    hold each word — are taken over the rows the query's filter selects,
+    the token's rules among them, not over the collection: there a user's
+    own memo scored 9.87, then 4.79 once another user wrote 200 private
+    memos holding the same word, which told the first how many of the
+    second's held it. A score is what a collection holding the user's rows
+    alone would give, and so is the order of <code>match</code>,
+    <code>rerank</code>'s candidates and <code>fuse</code>'s text side. It
+    costs the token's query its rows' lengths and each word's count among
+    them: over 100 000 documents, a filter keeping 2.5% took 0.16 ms and
+    takes 0.24, one keeping half 5.4 and 6.2. The server's own token
+    scores over the collection, as before.</li>
+  <li><b><a href="http-reference.html#subscriptions">Subscriptions</a></b> are told only of rows they were sent: a scoped
+    subscriber hears of a row leaving its shape only if the row was in it,
+    so the ids other users write never reach it — rows leaving as a rule
+    that reads another collection moves among them. Where a rule names the
+    fields it shows, a row written again that shows what it showed is not
+    sent: a write to a field the subscriber does not see would tell it
+    when.</li>
+  <li><b>Tokens</b> are HS256, or RS256 with <code>--jwt-keys</code> (below).
+    The algorithm is the key's, not the token's, so <code>alg: none</code> is
+    refused. Every token is checked against <code>exp</code> and <code>nbf</code>,
+    and one with no <code>exp</code> is refused (401): it would be good for
+    ever, and a token that leaked could only be outlived by rotating every
+    key. <code>--jwt-require-exp off</code> takes such tokens again, and
+    <code>--jwt-max-age &lt;s&gt;</code> also refuses one whose
+    <code>exp</code> lies further ahead than that. <code>--mint-token</code>
+    gives claims naming no <code>exp</code> one an hour away. A rule with <code>for</code> applies
+    to tokens whose <code>role</code> claim names that role, or lists it; rules on one
+    collection widen each other; a rule whose filter names a claim the token
+    lacks does not apply. A subscription is checked when it opens, and
+    ended at its token's <code>exp</code> with
+    <code>event: error</code> and
+    <code>{"error":"the token has expired","status":401}</code>: the
+    client takes it as a refused request, fetches a fresh token and opens
+    the stream again (<code>FenecHttp.live</code>, <code>subscribe</code>,
+    the sync layer, Go's <code>*Error</code> and .NET's
+    <code>Event.Status</code>). Without it a stream outlived its token, and
+    a member taken off a team heard the team until the client went away.
+    No other request is held open past its token, nor before it: a read,
+    a subscription or a <code>/_changes</code> page sent with
+    <code>Fenec-After</code> waits only once its token is taken
+    — one the server refuses is answered 401 at once, never after the
+    wait — and is checked again once its wait ends, a write
+    held by <code>Fenec-Wait</code> asks its token again each time it runs,
+    and <code>/_changes</code> takes no scoped token.</li>
+  <li><b>Refusals</b> tell a scoped token only what it may read: a
+    <code>@unique</code> clash (409) names the field, not the document
+    holding the value nor the value, since that row is another user's.</li>
+  <li><b>Tenants.</b> On a <code>--dir</code> node a token reaches
+    <code>/t/&lt;t&gt;/</code> only when its <code>tenant</code> claim names
+    <code>&lt;t&gt;</code> (a text, or a list holding it), and is refused
+    with 403 under every other tenant's prefix; one naming no tenant is
+    refused there unless the node runs with
+    <code>--jwt-unbound-tenants</code> (<a href="/docs/sharding-reference#tokens">Tokens</a>).</li>
+</ul>
+
+<p>The server's own <code>--http-token</code> keeps full access alongside.</p>
+</details>
+
+
+<h2 id="jwt-keys">Keys, rotation and identity providers</h2>
+
+<p>To accept tokens from Auth0, Clerk, Firebase or another identity provider,
+give <code>--jwt-keys</code> its published key file. Edit the file to rotate
+keys; no restart is needed.</p>
+
+<pre data-lang="bash"># the provider's public keys, as it publishes them
+curl -s https://example.auth0.com/.well-known/jwks.json &gt; jwks.json
+fenec-server --file data.fenec --http 0.0.0.0:8080 --jwt-keys jwks.json --policy policy.txt
+</pre>
+
+<details class="deep"><summary>Details</summary>
+<p><code>--jwt-keys</code> takes a JWKS file, <code>{"keys": [...]}</code>, in
+place of a secret. An <code>oct</code> key verifies HS256 tokens and needs at
+least 32 bytes. An <code>RSA</code> key of at least 2048 bits verifies RS256
+tokens, which is what Auth0, Clerk, Firebase and most identity providers
+sign with. A token issued by one of them is taken with its public keys
+alone. Keys of any other kind (EC, OKP) are skipped. A key is only used for
+its own algorithm: an RSA modulus is public, and taken as an HS256 secret it
+would let anyone sign. A token that names a <code>kid</code> is checked
+against that key only. A token without one is checked against each key of
+its algorithm.</p>
+
+<p>The server looks at the file at most once a second and reads it again
+when it has changed, so keys rotate without a restart. To rotate:</p>
+
+<ol>
+  <li>Add the new key to the file.</li>
+  <li>Start signing with it.</li>
+  <li>Once the tokens signed with the old key have expired, remove the old
+    key.</li>
+</ol>
+
+<p>If the file can no longer be read, the server keeps the keys it read
+last and logs why. <code>--mint-token</code> signs with the first
+<code>oct</code> key and names its <code>kid</code>.</p>
+
+<p>A token that has already been verified is kept by its text, so that
+later requests with it skip the check. The server keeps up to 4 096 tokens,
+and the kept tokens are dropped whenever the keys change. Checking a token
+from that cache takes 0.3 µs for HS256 and 0.5 µs for RS256. Checking a new one takes 2.9 µs for HS256 and
+38 µs for RS256 over 2048 bits (Apple M1).</p>
+</details>

@@ -556,7 +556,7 @@
     },
     {
       "name": "a write a tenant's bytes quota refuses is put back, told with the quota, and the writes behind it go",
-      "covers": "sync.html#refusals-retries-and-offline, http.html#statuses: 507 naming bytes or rows is a refusal -- waiting makes no room, and a write held for it would hold every write behind it, the delete that would make the room among them",
+      "covers": "sync.html#refusals-retries-and-offline, http-reference.html#statuses: 507 naming bytes or rows is a refusal -- waiting makes no room, and a write held for it would hold every write behind it, the delete that would make the room among them",
       "steps": [
         {"do": "start"},
         {"do": "seed", "seq": 3, "rows": "@open"},
@@ -595,7 +595,7 @@
     },
     {
       "name": "a 507 naming no quota is the server's own trouble: the write is kept and sent again",
-      "covers": "http.html#statuses: a 507 naming no quota is the server's own ceiling (--max-memory, which a handover or an idle tenant closed brings back under, or an operator raises) or a proxy's; only a tenant's quota, which nothing but its own deletes makes room under, is a refusal",
+      "covers": "http-reference.html#statuses: a 507 naming no quota is the server's own ceiling (--max-memory, which a handover or an idle tenant closed brings back under, or an operator raises) or a proxy's; only a tenant's quota, which nothing but its own deletes makes room under, is a refusal",
       "steps": [
         {"do": "start"},
         {"do": "seed", "seq": 3, "rows": "@open"},
@@ -740,7 +740,7 @@
     },
     {
       "name": "a stream ended at its token's exp asks for a token, and opens again with it",
-      "covers": "http.html#subscriptions: the server ends a scoped stream at its token's exp with an error event of status 401",
+      "covers": "http-reference.html#subscriptions: the server ends a scoped stream at its token's exp with an error event of status 401",
       "steps": [
         {"do": "start", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open", "auth": "Bearer t0"}]}},
         {"do": "seed", "seq": 3, "rows": "@open", "expect": {"ready": true}},
