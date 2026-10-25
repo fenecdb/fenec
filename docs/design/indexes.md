@@ -209,7 +209,19 @@ sign-bit flip, floats through order-preserving bits with `-0.0` folded onto
 compares equal to everything, so it matches every inclusive comparison and no
 strict one, and an index holding one is never walked for `order`. A literal the
 key space cannot express exactly (`12.5` against an `int`, an int past 2^53
-against a `timestamp`) is left out of the range and evaluated per row. Ties come
+against a `timestamp`) is left out of the range and evaluated per row. One of
+another kind than a typed field's, which `cmp_value` orders the field's values
+against by kind alone (`level > true`, `level < ""`, `t >= ""` where `""` reads
+as no time), is true of every value or of none (`SortedIndex::by_kind`), so it
+is no bound or an empty range (`Range::close`) and the range stays exact,
+natively -- the browser module, where no scoped rule writes one, evaluates it
+row by row as before, 611 bytes smaller: the
+edges a scoped token's ordered rule is held to its claim's kind by (`level <= 5
+and level > true`, access.md) were evaluated row by row, and a count over 20
+001 of 200 000 rows in process went 44 us -> 790 us, +0.35 us with the verdict,
+what any second comparison costs (`level > -1` the same; `make policy-bench
+ARGS=ranges`). Its unit test holds each verdict to `compare` over values of
+every kind, and `tests/sorted.rs` has filters of another kind's literals. Ties come
 out in ascending id both ways, since that is the order the scan leaves them in
 -- a descending walk reverses each run of equal keys. A walk tests the rest of
 the filter row by row and gives up past an eighth of the collection, so a filter

@@ -330,7 +330,8 @@ fence-bench:
 ## under a policy of a plain rule, a field list, a transition, a field
 ## list answering its row and a rule reading another collection, and a read
 ## by id under three of them, in process and over HTTP, in turns; ARGS="20000
-## plain,reach" names sides, ARGS=streams a write beside scoped streams
+## plain,reach" names sides, ARGS=streams a write beside scoped streams,
+## ARGS=ranges an ordered index's range under a rule ordering by a claim
 ## (crates/fenec-http/examples/policy.rs)
 policy-bench:
 	$(CARGO) run --release -p fenec-http --example policy -- $(or $(ARGS),20000)

@@ -377,9 +377,17 @@ messages   read,insert  where room in (get members select room where user = $jwt
     or as a list where the rule reads one value: <code>"sub": null</code>
     is no subject, and <code>owner = $jwt.sub</code> does not become
     <code>owner = null</code>, which every row with no owner matches. A
-    number and a bool are values like any other. A policy names its
+    number and a bool are values like any other. A claim a rule compares
+    by order (<code>level &lt;= $jwt.clearance</code>) admits only values
+    of its own kind, under a <code>not</code> too: given
+    <code>"top"</code>, no number is below it. A text claim that reads as a
+    time, such as <code>"2026-07-01T00:00:00Z"</code>, orders a time field
+    by time. A claim inside a call or arithmetic
+    (<code>lower($jwt.email)</code>, <code>$jwt.iat * 1000</code>) and an
+    ordered comparison with a claim used as a value stop the server at
+    startup: mint the claim as the rule compares it. A policy names its
     parameters by claim alone: one writing <code>$1</code> or
-    <code>$3</code> of its own stops the server at startup. A
+    <code>$3</code> of its own stops the server at startup too. A
     subscription is checked when it opens, and
     ended at its token's <code>exp</code> with
     <code>event: error</code> and

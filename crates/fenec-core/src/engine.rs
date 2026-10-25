@@ -13725,10 +13725,32 @@ fn sorted_range(
                 range.narrow(op, key);
                 any = true;
             }
-            None => exact = false,
+            None => match by_kind(ty, op, v) {
+                Some(true) => {}
+                Some(false) => {
+                    range.close(ty);
+                    any = true;
+                }
+                None => exact = false,
+            },
         }
     }
     any.then_some((range, exact))
+}
+
+/// What a comparison of a typed field with a value of another kind is of
+/// every row ([`SortedIndex::by_kind`]): true, no bound; false, no row.
+/// Natively alone: what writes such a literal is a scoped token's rule
+/// (`fenec_http::access`), which the browser module has none of, and there
+/// it was 611 bytes; it evaluates such a comparison row by row, as before.
+#[cfg(not(target_arch = "wasm32"))]
+fn by_kind(ty: &DataType, op: CmpOp, v: &Value) -> Option<bool> {
+    SortedIndex::by_kind(ty, op, v)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn by_kind(_: &DataType, _: CmpOp, _: &Value) -> Option<bool> {
+    None
 }
 
 /// Sort keys: a field position (`None` for `id`), whether it ascends, how

@@ -105,9 +105,13 @@
 //! token holds as `null`, as `""`, as an object, as a list where the rule
 //! reads one value, or as a list holding any of those ([`usable`]): bound,
 //! `owner = $jwt.sub` given `null` read every row with no owner. A rule
-//! only grants, so one that does not apply grants nothing. The tenant claim
-//! is the one whose absence widens (`--jwt-unbound-tenants`): held as a
-//! value naming no tenant, it reaches none. A `sub` of `""` is no subject.
+//! only grants, so one that does not apply grants nothing. A claim a rule
+//! orders by (`level <= $jwt.clearance`) holds the other side to its kind,
+//! under a `not` too ([`kind_held`]); one inside a call or a sum, or in
+//! order inside a value, is refused at startup ([`claims_held`]). The
+//! tenant claim is the one whose absence widens (`--jwt-unbound-tenants`):
+//! held as a value naming no tenant, it reaches none. A `sub` of `""` is no
+//! subject.
 //!
 //! **A rule may read another collection** through `in (get ...)`, its
 //! claims bound inside the inner `get` as anywhere in the filter:
@@ -957,6 +961,9 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         let Statement::Select(sel) = stmt else {
             unreachable!("a get parses as a select")
         };
+        if let Some(f) = &sel.filter {
+            claims_held(f, true, &claims)?;
+        }
         // An inner `get` reads another collection, as the token's own `get`
         // would, and is answered before each statement under its lock
         // ([`Scope::bound`]): a document being written is tested on its
@@ -1004,6 +1011,87 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         role,
         reads,
     })
+}
+
+/// Refuses what a claim's kind cannot be held through ([`kind_held`]): a
+/// claim inside a call or an arithmetic -- `lower($jwt.c)`, `coalesce($jwt.c,
+/// 0)`, `least(level, $jwt.c)`, `$jwt.c + 1` -- whose result has a kind the
+/// rule cannot know until it runs, and which given a claim of another kind
+/// admitted every row (`least(level, "top")` is the level, every number
+/// ranking below every text), and an ordered comparison with a claim used
+/// as a value (`(level <= $jwt.c) = false`, a `case`'s condition), whose
+/// guard holds only where it is a condition, standing under `and`, `or` and
+/// `not` alone. `cond`: `e` is a condition. `claims` names them.
+fn claims_held(e: &Expr, cond: bool, claims: &[String]) -> std::result::Result<(), String> {
+    // The claim named by the last parameter `e` reads, for the refusal's words.
+    let named = |e: &Expr| {
+        let k = e.max_param().wrapping_sub(1);
+        claims.get(k).map_or("<claim>", String::as_str).to_string()
+    };
+    let operand = |x: &Expr| match x {
+        Expr::Param(_) => Ok(()),
+        x => claims_held(x, false, claims),
+    };
+    match e {
+        Expr::Param(_) | Expr::Field(_) | Expr::Lit(_) => Ok(()),
+        Expr::And(a, b) | Expr::Or(a, b) => {
+            claims_held(a, cond, claims)?;
+            claims_held(b, cond, claims)
+        }
+        Expr::Not(a) => claims_held(a, cond, claims),
+        Expr::Cmp(op, a, b) => {
+            let ordered = !matches!(op, CmpOp::Eq | CmpOp::Ne);
+            let claim = matches!(**a, Expr::Param(_)) || matches!(**b, Expr::Param(_));
+            if ordered && claim && !cond {
+                return Err(format!(
+                    "`$jwt.{}` is compared in order inside a value: an ordered comparison \
+                     with a claim is held to the claim's kind as a condition -- standing \
+                     under `and`, `or` and `not` -- not as a value another expression reads",
+                    named(e)
+                ));
+            }
+            operand(a)?;
+            operand(b)
+        }
+        Expr::Call(name, args) if args.iter().any(|a| a.max_param() > 0) => {
+            let a = args
+                .iter()
+                .find(|a| a.max_param() > 0)
+                .expect("one holds a claim");
+            Err(format!(
+                "`$jwt.{}` inside `{name}(...)`: a claim is compared as the token holds it, \
+                 and a call over it could hand the rule a value of any kind -- mint the claim \
+                 as the rule compares it",
+                named(a)
+            ))
+        }
+        Expr::Arith(_, a, b) if e.max_param() > 0 => {
+            let a = if a.max_param() > 0 { a } else { b };
+            Err(format!(
+                "`$jwt.{}` in arithmetic: a claim is compared as the token holds it, and a \
+                 sum over it could hand the rule a value of any kind -- mint the claim as the \
+                 rule compares it",
+                named(a)
+            ))
+        }
+        Expr::Call(_, args) => args.iter().try_for_each(|a| claims_held(a, false, claims)),
+        Expr::Arith(_, a, b) | Expr::Like(a, b) | Expr::Has(a, b) => {
+            operand(a)?;
+            operand(b)
+        }
+        Expr::IsNull(a) => operand(a),
+        Expr::In(x, items) => {
+            operand(x)?;
+            items.iter().try_for_each(operand)
+        }
+        Expr::InSelect(x, sel) => {
+            operand(x)?;
+            match &sel.filter {
+                Some(f) => claims_held(f, true, claims),
+                None => Ok(()),
+            }
+        }
+    }
 }
 
 /// Marks in `alone` each claim `e` reads as one value somewhere: anywhere
@@ -1293,15 +1381,35 @@ fn split_grants(grants: &str) -> std::result::Result<Vec<&str>, String> {
 
 /// `e` with each parameter replaced by the claim it stands for.
 fn bind(e: &Expr, values: &[Value]) -> Expr {
-    let b = |x: &Expr| Box::new(bind(x, values));
+    bind_held(e, values, true)
+}
+
+/// [`bind`] of `e` standing under an even number of `not`s (`pass`) or an
+/// odd one: an ordered comparison with a claim is held to the claim's kind
+/// ([`kind_held`]) as `cmp and held` under the first, and as `cmp or not
+/// held` under the second, which the `not` above turns into `not cmp and
+/// held` -- so a value of another kind passes neither the comparison nor
+/// its negation. ANDed in under a `not` alone, the guard became an `or`
+/// there, and `not (score > $jwt.max)` admitted every text and list.
+/// An inner `get`'s filter stands where its `in` does: under `not ... in`,
+/// a row of another kind is in its list and so held out.
+fn bind_held(e: &Expr, values: &[Value], pass: bool) -> Expr {
+    let b = |x: &Expr| Box::new(bind_held(x, values, pass));
     match e {
         Expr::Param(i) => Expr::Lit(values[*i].clone()),
         Expr::Field(_) | Expr::Lit(_) => e.clone(),
         Expr::And(x, y) => Expr::And(b(x), b(y)),
         Expr::Or(x, y) => Expr::Or(b(x), b(y)),
-        Expr::Not(x) => Expr::Not(b(x)),
+        Expr::Not(x) => Expr::Not(Box::new(bind_held(x, values, !pass))),
         Expr::IsNull(x) => Expr::IsNull(b(x)),
-        Expr::Cmp(op, x, y) => Expr::Cmp(*op, b(x), b(y)),
+        Expr::Cmp(op, x, y) => {
+            let cmp = Expr::Cmp(*op, b(x), b(y));
+            match kind_held(*op, x, y, values, pass) {
+                Some(held) if pass => Expr::And(Box::new(cmp), Box::new(held)),
+                Some(held) => Expr::Or(Box::new(cmp), Box::new(Expr::Not(Box::new(held)))),
+                None => cmp,
+            }
+        }
         Expr::Like(x, y) => Expr::Like(b(x), b(y)),
         Expr::Has(x, y) => Expr::Has(b(x), b(y)),
         Expr::Arith(op, x, y) => Expr::Arith(*op, b(x), b(y)),
@@ -1315,7 +1423,7 @@ fn bind(e: &Expr, values: &[Value]) -> Expr {
                         Value::List(l) => out.extend(l.iter().cloned().map(Expr::Lit)),
                         v => out.push(Expr::Lit(v.clone())),
                     },
-                    i => out.push(bind(i, values)),
+                    i => out.push(bind_held(i, values, pass)),
                 }
             }
             Expr::In(b(x), out)
@@ -1323,12 +1431,82 @@ fn bind(e: &Expr, values: &[Value]) -> Expr {
         // An inner `get` holds its claims in its `where` alone ([`rule`]).
         Expr::InSelect(x, sel) => {
             let mut sel = (**sel).clone();
-            sel.filter = sel.filter.as_ref().map(|f| bind(f, values));
+            sel.filter = sel.filter.as_ref().map(|f| bind_held(f, values, pass));
             Expr::InSelect(b(x), Box::new(sel))
         }
-        Expr::Call(f, args) => {
-            Expr::Call(f.clone(), args.iter().map(|a| bind(a, values)).collect())
+        Expr::Call(f, args) => Expr::Call(
+            f.clone(),
+            args.iter().map(|a| bind_held(a, values, pass)).collect(),
+        ),
+    }
+}
+
+/// The lower edge of a text claim that reads as a time, itself a time
+/// `time::parse` reads -- the first day of year 0 -- so that a time field
+/// orders against such a claim (`at <= $jwt.until`,
+/// `"2026-07-01T00:00:00Z"`) by time, and a text field as text from there.
+const EARLIEST: &str = "0000-01-01";
+
+/// What holds the other side of `x op y` to the kind of the claim on one
+/// side, where `op` orders (`<`, `<=`, `>`, `>=`): `None` where it does not,
+/// or neither side is a claim. A filter orders two values of other kinds by
+/// kind (`cmp_value`) -- every bool below every number, every number below
+/// every text -- so `level <= $jwt.clearance` given the text `"top"`
+/// admitted every row of an `int` field, and `name >= $jwt.from` given `5`
+/// every row of a `text` one. Here a value of another kind is neither below
+/// the claim nor above it: the other side is held to the edges of the
+/// claim's kind, past which the other kinds rank -- `> true` and `< ""` for
+/// a number, `<= true` (and `>= false`) for a bool, `>= ""` and `<` the
+/// byte `0xFF` for a text: above every text, whose UTF-8 never holds that
+/// byte, and below every kind ranked above texts, bytes ranking with them
+/// (a vector literal, the next kind, is refused beside a json field). A
+/// text claim that reads as a time is a time's kind as well, as
+/// `cmp_value` compares a time with a text by reading it, so its lower
+/// edge is [`EARLIEST`]: a time field orders against it by time, a text
+/// field as text from there. Where the comparison stands under an even
+/// number of `not`s (`held`) the edge on the side it leaves open is
+/// enough; under an odd one it is negated, and needs both. A typed field's
+/// edges are true or false of every row, which `@sorted`'s range takes as
+/// no bound or none (`fenec_core::sorted::by_kind`), so the range stays
+/// exact. `=`, `!=` and `in` never take one kind for another (`cmp_value`
+/// is not `Equal` across kinds) and ask nothing more.
+fn kind_held(op: CmpOp, x: &Expr, y: &Expr, values: &[Value], held: bool) -> Option<Expr> {
+    // `other op claim`, or `claim op other` turned around: `below` where
+    // the other side is asked to be below the claim.
+    let lower = matches!(op, CmpOp::Lt | CmpOp::Le);
+    let upper = matches!(op, CmpOp::Gt | CmpOp::Ge);
+    let (other, claim, below) = match (x, y) {
+        _ if !lower && !upper => return None,
+        (o, Expr::Param(k)) => (o, &values[*k], lower),
+        (Expr::Param(k), o) => (o, &values[*k], upper),
+        _ => return None,
+    };
+    let blank = || Value::Text(String::new());
+    let (lo, hi) = match claim {
+        Value::Int(_) | Value::Float(_) => ((CmpOp::Gt, Value::Bool(true)), (CmpOp::Lt, blank())),
+        Value::Text(t) => {
+            let lo = match fenec_core::time::parse(t) {
+                Ok(_) => Value::Text(EARLIEST.into()),
+                Err(_) => blank(),
+            };
+            ((CmpOp::Ge, lo), (CmpOp::Lt, Value::Bytes(vec![0xFF])))
         }
+        Value::Bool(_) => (
+            (CmpOp::Ge, Value::Bool(false)),
+            (CmpOp::Le, Value::Bool(true)),
+        ),
+        _ => return None,
+    };
+    let edge = |(op, v): (CmpOp, Value)| {
+        Expr::Cmp(op, Box::new(bind(other, values)), Box::new(Expr::Lit(v)))
+    };
+    match (held, below, claim) {
+        (false, ..) => Some(Expr::And(Box::new(edge(lo)), Box::new(edge(hi)))),
+        // Nothing ranks below a bool but `null`, which orders against
+        // nothing.
+        (true, true, Value::Bool(_)) => None,
+        (true, true, _) => Some(edge(lo)),
+        (true, false, _) => Some(edge(hi)),
     }
 }
 
@@ -1691,6 +1869,24 @@ impl Scope {
         granted(&self.rules, collection, op)
     }
 
+    /// What [`Self::filter`] would answer, without making the filter:
+    /// `None` no access, `Some(false)` every row, `Some(true)` rows a
+    /// filter picks. Asked where only that is wanted: a `get` made the
+    /// filter twice, once to AND it in and once to see that there was one,
+    /// and a rule holding a claim to its kind (`kind_held`) copied two
+    /// comparisons more each time.
+    fn filtered(&self, collection: &str, op: u8) -> Option<bool> {
+        if op & (UPDATE | DELETE) != 0 && self.append_only(collection) {
+            return None;
+        }
+        let mut granting = self
+            .rules
+            .iter()
+            .filter(|r| r.ops & op != 0 && r.collection.as_deref().is_none_or(|c| c == collection));
+        let first = granting.next()?;
+        Some(first.using().is_some() && granting.all(|r| r.using().is_some()))
+    }
+
     /// Each reaching rule's inner `get`s held to the token's read rules on
     /// the collection each reads, at any depth -- the rules there may read
     /// further, which the ring check at startup bounds -- so that each is
@@ -1871,7 +2067,7 @@ impl Scope {
         // naming them -- where `orders` does not exist for it.
         if let Some(n) = sel.flat.as_ref().and_then(|f| f.names.as_deref()) {
             for (_, c) in &n.tables {
-                if self.filter(c, READ).is_none() {
+                if self.filtered(c, READ).is_none() {
                     return Err(self.refused(c, "read"));
                 }
             }
@@ -1895,7 +2091,7 @@ impl Scope {
         // row told a user how many rows it could not read held a word --
         // alice's own memo scored 9.87, and 4.79 once bob had written 200
         // private ones holding it.
-        let held = matches!(self.filter(&sel.collection, READ), Some(Some(_)));
+        let held = self.filtered(&sel.collection, READ) == Some(true);
         if let Some(m) = sel.matcher.as_mut().filter(|_| held) {
             m.within = true;
         }
@@ -3024,6 +3220,107 @@ mod tests {
                 Err("this token's tenant claim names no tenant"),
                 "{none}"
             );
+        }
+    }
+
+    /// An ordered comparison with a claim holds the other side to the
+    /// claim's kind: under an even number of `not`s on the side the
+    /// comparison leaves open, under an odd one -- `cmp or not held` -- by
+    /// both edges. A text that reads as a time takes a time's lower edge;
+    /// `=` asks nothing more.
+    #[test]
+    fn an_ordered_claim_is_held_to_its_kind() {
+        let a = access(
+            "files read where level <= $jwt.c\n\
+             people read where $jwt.c < name\n\
+             notes read where owner = $jwt.c\n\
+             negated read where not (level > $jwt.c)\n",
+        );
+        let filter = |c: &str, collection: &str| {
+            let s = a
+                .scope(&a.mint(&format!(r#"{{"c":{c}}}"#)).unwrap(), 0)
+                .unwrap();
+            s.filter(collection, READ).unwrap().unwrap()
+        };
+        let lit = |v: Value| Box::new(Expr::Lit(v));
+        let edge = |op, v| Expr::Cmp(op, Box::new(Expr::Field("level".into())), lit(v));
+        let held = |e: Expr| match e {
+            Expr::And(_, held) => Some(*held),
+            Expr::Cmp(..) => None,
+            e => panic!("{e:?}"),
+        };
+        let blank = || Value::Text(String::new());
+        assert_eq!(
+            held(filter("5", "files")),
+            Some(edge(CmpOp::Gt, Value::Bool(true)))
+        );
+        assert_eq!(
+            held(filter("\"top\"", "files")),
+            Some(edge(CmpOp::Ge, blank()))
+        );
+        assert_eq!(
+            held(filter("\"2026-07-01T00:00:00Z\"", "files")),
+            Some(edge(CmpOp::Ge, Value::Text(EARLIEST.into())))
+        );
+        assert_eq!(held(filter("true", "files")), None);
+        let name = |op, v| Expr::Cmp(op, Box::new(Expr::Field("name".into())), lit(v));
+        assert_eq!(held(filter("5", "people")), Some(name(CmpOp::Lt, blank())));
+        assert_eq!(
+            held(filter("\"b\"", "people")),
+            Some(name(CmpOp::Lt, Value::Bytes(vec![0xFF])))
+        );
+        assert_eq!(
+            held(filter("false", "people")),
+            Some(name(CmpOp::Le, Value::Bool(true)))
+        );
+        assert_eq!(held(filter("5", "notes")), None);
+        // Under a `not`: both edges, negated beside the comparison.
+        let Expr::Not(inner) = filter("5", "negated") else {
+            panic!("a not");
+        };
+        let both = Expr::And(
+            Box::new(edge(CmpOp::Gt, Value::Bool(true))),
+            Box::new(edge(CmpOp::Lt, blank())),
+        );
+        let cmp = Expr::Cmp(
+            CmpOp::Gt,
+            Box::new(Expr::Field("level".into())),
+            lit(Value::Int(5)),
+        );
+        assert_eq!(
+            *inner,
+            Expr::Or(Box::new(cmp), Box::new(Expr::Not(Box::new(both))))
+        );
+    }
+
+    /// A claim whose kind a rule cannot hold -- inside a call or a sum, or
+    /// compared in order inside a value -- stops the server at startup;
+    /// one compared bare, under `and`, `or`, `not` or in an inner `get`'s
+    /// condition, is taken.
+    #[test]
+    fn a_claim_held_nowhere_is_refused_at_startup() {
+        for bad in [
+            "files read where level <= lower($jwt.c)",
+            "files read where coalesce($jwt.c, 0) >= level",
+            "files read where least(level, $jwt.c) = level",
+            "files read where owner = upper($jwt.sub)",
+            "files read where level < $jwt.c * 2",
+            "files read where (level <= $jwt.c) = true",
+            "files read where ((level <= $jwt.c) and x) = true",
+            "files read where (level <= $jwt.c) is null",
+            "files read where case when level <= $jwt.c then 1 else 0 end = 1",
+            "files read where id in (get other select x where y = lower($jwt.c))",
+        ] {
+            assert!(Access::new(SECRET, bad).is_err(), "{bad}");
+        }
+        for good in [
+            "files read where level <= $jwt.c or not (level > $jwt.d)",
+            "files read where (level = $jwt.c) = true",
+            "files read where id in (get other select x where not (y > $jwt.c))",
+            "files read where room in [$jwt.rooms, 'lobby'] and $jwt.rooms has room",
+            "files read where level <= length(name)",
+        ] {
+            assert!(Access::new(SECRET, good).is_ok(), "{good}");
         }
     }
 }
