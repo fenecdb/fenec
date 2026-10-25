@@ -11,33 +11,45 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { CreateBucketCommand, HeadObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
-import { backend, keyOf, s3From } from './files-backend.mjs';
+import { backend } from './files-backend.mjs';
 import { follow } from './blobs.mjs';
-import { atExit, cleanup, dir, here, server, until } from './harness.mjs';
-import { init, shapes, token } from './idp.mjs';
+import { reconcile } from './reconcile.mjs';
+import { atExit, cleanup, dir, here, query, server, until } from './harness.mjs';
+import { addServiceKey, init, merge, shapes, token } from './idp.mjs';
+import { keysOf, s3From } from './store.mjs';
+import { serviceTokens } from './service-token.mjs';
 
 const say = (...a) => console.log(...a);
-const short = (url) => url.replace(/\?.*$/, '?X-Amz-Algorithm=…&X-Amz-Signature=…');
+// The URL as it is shown here: the store's address is the run's, and a signature is no one's business.
+const short = (url) => `<store>${new URL(url).pathname}?…`;
 let container = null;
 atExit(() => container && execFileSync('docker', ['rm', '-f', container], { stdio: 'ignore' }));
 
+// Pinned: a store that changes under a recipe is a recipe that fails for another reason.
+const SEAWEEDFS = 'chrislusf/seaweedfs:4.50';
+
 try {
-  // The identity provider's stand-in, and the people it signs in.
+  // The identity provider's stand-in, the people it signs in, and a key of the
+  // backend's own, whose public half the server's file holds beside the provider's.
   init(dir);
+  addServiceKey(dir);
+  merge(dir, join(dir, 'keys.json'));
   const as = (sub, claims = {}) => token(dir, { ...shapes.plain(sub), ...claims });
   const alice = as('alice');
   const bob = as('bob');
+  const appToken = serviceTokens({ pem: readFileSync(join(dir, 'svc-1.pem')), sub: 'files-backend' });
 
-  // fenec-server: the JWKS, the policy, the change stream the follower reads.
+  // fenec-server: the keys, the policy, the change stream the follower reads
+  // (a buffer of 1 MiB, so that the last step can outrun it).
   const url = await server('files', [
-    '--http-token', 'root', '--cdc',
-    '--jwt-keys', join(dir, 'jwks.json'), '--policy', join(here, 'files-policy.txt'),
+    '--http-token', 'root', '--cdc', '--replication-buffer', '1',
+    '--jwt-keys', join(dir, 'keys.json'), '--policy', join(here, 'files-policy.txt'),
   ]);
-  const post = (token, path, body) => fetch(`${url}${path}`, {
-    method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  await post('root', '/query', { query: readFileSync(join(here, 'files-schema.fenecql'), 'utf8') });
+  const post = (token, path, body) => query(url, token, body.query, body.params);
+  for (const stmt of readFileSync(join(here, 'files-schema.fenecql'), 'utf8').split('\n').filter(Boolean)) {
+    await query(url, 'root', stmt);
+  }
+  await query(url, 'root', 'create collection junk (body text)');
 
   // The object store.
   const env = { ...process.env };
@@ -47,7 +59,7 @@ try {
       actions: ['Admin', 'Read', 'Write', 'List', 'Tagging'] }] }));
     container = execFileSync('docker', ['run', '-d', '--rm', '--name', `fenec-recipes-s3-${process.pid}`,
       '-p', '127.0.0.1:0:8333', '-v', `${join(dir, 's3.json')}:/etc/seaweedfs/s3.json:ro`,
-      'chrislusf/seaweedfs', 'server', '-s3', '-s3.config=/etc/seaweedfs/s3.json', '-dir=/data'],
+      SEAWEEDFS, 'server', '-s3', '-s3.config=/etc/seaweedfs/s3.json', '-dir=/data'],
       { encoding: 'utf8' }).trim().slice(0, 12);
     const port = execFileSync('docker', ['port', container, '8333/tcp'], { encoding: 'utf8' }).trim().split(':').pop();
     Object.assign(env, { S3_ENDPOINT: `http://127.0.0.1:${port}`, S3_REGION: 'us-east-1', S3_KEY: 'recipes-key',
@@ -55,12 +67,12 @@ try {
     await until('the object store', async () => (await fetch(env.S3_ENDPOINT)).status === 403, 60_000);
   }
   const s3 = s3From(env);
+  const keys = keysOf();
   await until('the bucket', () => s3.send(new CreateBucketCommand({ Bucket: env.BUCKET })).then(() => true,
     (e) => e.name === 'BucketAlreadyOwnedByYou'), 30_000);
-  say(`fenec-server ${url}, bucket ${env.BUCKET} at ${env.S3_ENDPOINT}`);
+  say(`fenec-server and the bucket ${env.BUCKET} are up`);
 
-  // The backend: a token of its own, role app, for marking a row ready.
-  const app = backend({ fenec: url, appToken: as('files-backend', { role: 'app' }), s3, bucket: env.BUCKET });
+  const app = backend({ fenec: url, appToken, s3, bucket: env.BUCKET });
   await new Promise((r) => app.listen(0, '127.0.0.1', r));
   const api = `http://127.0.0.1:${app.address().port}`;
   const call = (token, method, path, body) => fetch(`${api}${path}`, {
@@ -68,19 +80,28 @@ try {
     body: body && JSON.stringify(body),
   });
   const json = async (res) => (res.status === 204 ? '' : await res.json());
+  const there = (Key) => s3.send(new HeadObjectCommand({ Bucket: env.BUCKET, Key })).then(() => true, () => false);
+  const gone = (Key) => until(`${Key} to go`, async () => !(await there(Key)));
+  const rows = async (text) => JSON.stringify(await (await query(url, 'root', text)).json());
 
-  // The bucket's follower, with an end of its own.
-  const stop = new AbortController();
-  const following = follow({ fenec: url, adminToken: 'root', s3, bucket: env.BUCKET, signal: stop.signal, wait: 1000 });
+  // The bucket's follower, with an end of its own. What it says is kept and
+  // shown where the run has waited for it, so that the output reads the same
+  // however the two interleave.
+  const said = [];
+  const flush = () => said.splice(0).forEach((l) => say(l));
+  const waitSaid = (re) => until(`the follower to say ${re}`, async () => said.some((l) => re.test(l)));
+  const startFollower = () => {
+    const ctl = new AbortController();
+    return { ctl, done: follow({ fenec: url, adminToken: 'root', s3, bucket: env.BUCKET, signal: ctl.signal, wait: 500, log: (m) => said.push(m) }) };
+  };
+  let follower = startFollower();
 
   say('\n-- alice adds a file');
   const bytes = Buffer.from('hello from alice\n');
   let res = await call(alice, 'POST', '/files', { name: 'hello.txt', type: 'text/plain', size: bytes.length });
   const made = await json(res);
   say(`POST /files             ${res.status} {"id":${made.id},"url":"${short(made.url)}"}`);
-  const rows = await (await fetch(`${url}/query`, { method: 'POST', headers: { authorization: 'Bearer root', 'content-type': 'application/json' },
-    body: JSON.stringify({ query: 'get files select id, owner, name, type, size, state' }) })).json();
-  say('the row the server holds:', JSON.stringify(rows));
+  say('the row the server holds:', await rows('get files select id, owner, name, type, size, state'));
 
   say('\n-- she sends the bytes to the bucket herself, with the URL');
   res = await fetch(made.url, { method: 'PUT', headers: made.headers, body: bytes });
@@ -89,6 +110,7 @@ try {
   say(`GET /files/${made.id} before done ${res.status} ${JSON.stringify(await json(res))}`);
   res = await call(alice, 'POST', `/files/${made.id}/done`);
   say(`POST /files/${made.id}/done    ${res.status} ${JSON.stringify(await json(res))}`);
+  say(`the upload copied to ${keys.live(made.id)}, ${keys.pending(made.id)} ${(await there(keys.pending(made.id))) ? 'still there' : 'gone'}`);
 
   say('\n-- she downloads it; bob is told there is no such file');
   res = await call(alice, 'GET', `/files/${made.id}`);
@@ -102,9 +124,19 @@ try {
   say(`DELETE /files/${made.id} (bob)  ${res.status} ${JSON.stringify(await json(res))}`);
   res = await call(bob, 'GET', '/files');
   say(`GET /files (bob)        ${res.status} ${JSON.stringify(await json(res))}`);
-
   res = await post(alice, '/query', { query: 'get files select sum(size) where state = "ready"' });
   say(`alice's total, for a quota   ${res.status} ${JSON.stringify(await res.json())}`);
+
+  say('\n-- a name that is not ASCII, and what a download is saved as');
+  res = await call(alice, 'POST', '/files', { name: 'résumé "final".pdf', type: 'application/pdf', size: 4 });
+  const pdf = await json(res);
+  await fetch(pdf.url, { method: 'PUT', headers: pdf.headers, body: '%PDF' });
+  await call(alice, 'POST', `/files/${pdf.id}/done`);
+  const pdfGot = await json(await call(alice, 'GET', `/files/${pdf.id}`));
+  const pdfDownload = await fetch(pdfGot.url);
+  say(`Content-Disposition: ${pdfDownload.headers.get('content-disposition')}`);
+  say(`Content-Type: ${pdfDownload.headers.get('content-type')}`);
+  await pdfDownload.arrayBuffer();
 
   say('\n-- what the rules and the bucket refuse');
   res = await call(alice, 'POST', '/files', { name: 'big.bin', type: 'application/octet-stream', size: 20 * 1024 * 1024 });
@@ -120,28 +152,60 @@ try {
   say(`POST /files/${short5.id}/done            ${res.status} ${JSON.stringify(await json(res))}`);
   // A store that did not hold the signed length would have kept the 20 bytes:
   // put them there as it would have, and the check on done is what is left.
-  await s3.send(new PutObjectCommand({ Bucket: env.BUCKET, Key: keyOf(short5.id), Body: Buffer.from('more than five bytes') }));
+  await s3.send(new PutObjectCommand({ Bucket: env.BUCKET, Key: keys.pending(short5.id), Body: Buffer.from('more than five bytes') }));
   res = await call(alice, 'POST', `/files/${short5.id}/done`);
   say(`POST /files/${short5.id}/done, 20 bytes there   ${res.status} ${JSON.stringify(await json(res))}`);
-  await until('the object to go', () => s3.send(new HeadObjectCommand({ Bucket: env.BUCKET, Key: keyOf(short5.id) })).then(() => false, (e) => e.$metadata?.httpStatusCode === 404));
-  say(`HEAD ${keyOf(short5.id)}: 404, the row having gone`);
+  await gone(keys.pending(short5.id));
+  say(`HEAD ${keys.pending(short5.id)}: gone with its row`);
+  await waitSaid(new RegExp(`row ${short5.id} deleted`));
+  flush();
 
-  say('\n-- alice deletes the file: the object goes with the row');
-  await s3.send(new HeadObjectCommand({ Bucket: env.BUCKET, Key: keyOf(made.id) }));
+  say('\n-- alice deletes the file: the objects go with the row');
   res = await call(alice, 'DELETE', `/files/${made.id}`);
   say(`DELETE /files/${made.id} (alice) ${res.status}`);
-  await until('the object to go', () => s3.send(new HeadObjectCommand({ Bucket: env.BUCKET, Key: keyOf(made.id) })).then(() => false, (e) => e.$metadata?.httpStatusCode === 404));
-  say(`HEAD ${keyOf(made.id)}: 404`);
+  await gone(keys.live(made.id));
+  say(`HEAD ${keys.live(made.id)}: gone`);
+  await waitSaid(new RegExp(`row ${made.id} deleted`));
+  flush();
+
+  say('\n-- an upload URL that outlives its row');
+  res = await call(alice, 'POST', '/files', { name: 'late.txt', type: 'text/plain', size: 5 });
+  const late = await json(res);
+  await call(alice, 'DELETE', `/files/${late.id}`);
+  say(`DELETE /files/${late.id} (alice) before the upload`);
+  await waitSaid(new RegExp(`row ${late.id} deleted`)); // the follower has seen the deletion
+  flush();
+  res = await fetch(late.url, { method: 'PUT', headers: late.headers, body: 'later' });
+  say(`PUT <presigned>, after the delete   ${res.status}`);
+  say(`HEAD ${keys.pending(late.id)}: ${(await there(keys.pending(late.id))) ? 'there, with no row' : 'gone'}`);
+  const swept = await reconcile({ fenec: url, adminToken: 'root', s3, bucket: env.BUCKET });
+  say(`reconcile deleted ${swept.join(', ') || 'nothing'}`);
 
   say('\n-- a pending upload nobody finished is swept');
-  await fetch(`${url}/query`, { method: 'POST', headers: { authorization: 'Bearer root', 'content-type': 'application/json' },
-    body: JSON.stringify({ query: 'put files {owner: "alice", name: "abandoned.txt", type: "text/plain", size: 9, state: "pending", created: now() - 7200000}' }) });
-  res = await fetch(`${url}/query`, { method: 'POST', headers: { authorization: 'Bearer root', 'content-type': 'application/json' },
-    body: JSON.stringify({ query: 'del files where state = "pending" and created < now() - 3600000' }) });
+  await query(url, 'root', 'put files {owner: "alice", name: "abandoned.txt", type: "text/plain", size: 9, state: "pending", created: now() - 7200000}');
+  res = await query(url, 'root', 'del files where state = "pending" and created < now() - 3600000');
   say(`del files where state = "pending" and created < now() - 3600000: ${JSON.stringify(await res.json())}`);
+  await waitSaid(/row \d+ deleted/);
+  flush();
 
-  stop.abort();
-  await following;
+  say('\n-- the follower is stopped, a file is deleted, and the stream moves past what the server keeps');
+  const second = await json(await call(alice, 'POST', '/files', { name: 'second.txt', type: 'text/plain', size: 6 }));
+  await fetch(second.url, { method: 'PUT', headers: second.headers, body: 'second' });
+  await call(alice, 'POST', `/files/${second.id}/done`);
+  follower.ctl.abort();
+  await follower.done;
+  await call(alice, 'DELETE', `/files/${second.id}`);
+  for (let i = 0; i < 4; i++) await query(url, 'root', 'put junk {body: $1}', ['x'.repeat(400_000)]);
+  await new Promise((r) => setTimeout(r, 500)); // the junk is on disk, and the first write kept is settled
+  say(`${keys.live(second.id)} is ${(await there(keys.live(second.id))) ? 'still in the bucket' : 'gone'}, its row deleted`);
+  follower = startFollower();
+  await gone(keys.live(second.id));
+  say(`${keys.live(second.id)}: gone`);
+  await waitSaid(/reconciled/);
+  flush();
+
+  follower.ctl.abort();
+  await follower.done;
 } finally {
   await cleanup();
 }

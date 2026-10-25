@@ -444,6 +444,41 @@ jobs:
           SAAS_FENEC_SERVER="$PWD/target/release/fenec-server" SAAS_FENEC_SHARD="$PWD/target/release/fenec-shard" \
             examples/run-tests.sh saas
 
+  # examples/recipes: the docs' guides to auth, files in S3 or R2, and functions
+  # and webhooks, each run against this checkout's debug fenec-server and
+  # web/ -- auth.sh, the files demo against SeaweedFS (pinned) in Docker, which
+  # ubuntu-latest has, and the functions demo with the Worker under a pinned
+  # wrangler, installed by the script -- and each output held to
+  # examples/recipes/golden/ and the golden to the pages that paste it. A job
+  # of its own, like the others': Docker and a wrangler no other job uses.
+  recipes:
+    name: examples (recipes)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-latest-recipes-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ubuntu-latest-recipes-
+
+      - name: The recipes
+        run: |
+          make wasm
+          make recipes-test
+
   # examples/dispatch: Plover, courier dispatch over release fenec-server
   # tenant nodes and fenec-shard -- 50 couriers claiming at once and waiting
   # at the server, a courier killed under its lease, two companies' quotas

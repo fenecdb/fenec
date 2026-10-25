@@ -50,6 +50,25 @@ call() {
         -H 'Content-Type: application/json' --data-binary "$body" -w ' [%{http_code}]')"
 }
 
+# poll <seconds> <command...>: the command again until it succeeds, for that long at most.
+poll() {
+    n=$(($1 * 10))
+    shift
+    while ! "$@" >/dev/null 2>&1; do
+        n=$((n - 1))
+        [ $n -gt 0 ] || { echo "timed out: $*" >&2; exit 1; }
+        sleep 0.1
+    done
+}
+# accepts <token>: whether the server takes the token (a 200 to a read).
+accepts() {
+    [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$url/query" -H "Authorization: Bearer $1" \
+        -H 'Content-Type: application/json' -d '{"query": "get notes"}')" = 200 ]
+}
+
+# serves <token>: whether /_whoami takes the token.
+serves() { [ "$(curl -s -o /dev/null -w '%{http_code}' "$url/_whoami" -H "Authorization: Bearer $1")" = 200 ]; }
+
 setup() { # the collections and two profiles, written with the server's own token
     while read -r stmt; do call "" root "$stmt" >/dev/null; done <"$here/schema.fenecql"
     call "" root 'put profiles [{owner: "alice", name: "Alice", email: "alice@example.test", phone: "111"}, {owner: "bob", name: "Bob", email: "bob@example.test", phone: "222"}]' >/dev/null
@@ -91,9 +110,9 @@ mkdir "$idp"
 node "$here/idp.mjs" init "$idp"
 node "$here/idp.mjs" serve "$idp" >"$dir/idp.url" &
 idppid=$!
-until [ -s "$dir/idp.url" ]; do sleep 0.1; done
+poll 10 test -s "$dir/idp.url"
 idpurl=$(cat "$dir/idp.url")
-sh "$here/refresh-jwks.sh" "$idpurl/.well-known/jwks.json" "$dir/jwks.json" # what the job does first
+JWKS_PROTO='=http' sh "$here/refresh-jwks.sh" "$idpurl/.well-known/jwks.json" "$dir/jwks.json" # what the job does first
 start rs --jwt-keys "$dir/jwks.json"
 setup
 call "" root 'put notes {owner: "bob", title: "bob note"}' >/dev/null
@@ -111,42 +130,67 @@ node "$here/idp.mjs" add-key "$idp" idp-2
 token=$(node "$here/idp.mjs" token "$idp" plain user_2xYzAbc)
 call "a token of the new key" "$token" 'get notes select title'
 echo "-- the refresh job fetches the provider's file; no restart"
-sh "$here/refresh-jwks.sh" "$idpurl/.well-known/jwks.json" "$dir/jwks.json"
-sleep 2
+JWKS_PROTO='=http' sh "$here/refresh-jwks.sh" "$idpurl/.well-known/jwks.json" "$dir/jwks.json"
+poll 5 accepts "$token"
 call "the same token" "$token" 'get notes select title'
+echo "-- a key of your own service goes into the file beside the provider's"
+node "$here/idp.mjs" service-key "$idp"
+JWKS_PROTO='=http' sh "$here/refresh-jwks.sh" "$idpurl/.well-known/jwks.json" "$dir/jwks.json" "$idp/service-jwks.json"
+jq -c '[.keys[].kid]' "$dir/jwks.json"
+service=$(node "$here/idp.mjs" service-token "$idp" files-backend)
+poll 5 serves "$service"
+printf '%-42s ' "the server's view of the service's token"
+curl -s "$url/_whoami" -H "Authorization: Bearer $service" | jq -c '{kind, sub}'
 echo "-- the job asks for a page that is not there one night"
-sh "$here/refresh-jwks.sh" "$idpurl/nothing" "$dir/jwks.json" 2>&1 || echo "(the job failed, rc $?)"
+JWKS_PROTO='=http' sh "$here/refresh-jwks.sh" "$idpurl/nothing" "$dir/jwks.json" 2>&1 || echo "(the job failed, rc $?)"
 call "the same token" "$token" 'get notes select title'
 echo "-- and a file that is no JWKS, written over the keys by hand"
 echo '<html>502 Bad Gateway</html>' >"$dir/jwks.json"
-sleep 2
+# The server reads the file again when a request asks for the keys, so a request is what makes it say so.
+noted() { accepts "$token" || true; grep -q 'the keys read before stay' "$dir/server.log"; }
+poll 5 noted
 call "the same token" "$token" 'get notes select title'
 grep -o 'jwks.json: .*' "$dir/server.log" | sed 's/ request_id=.*//' | sed "s#$dir/##"
 echo "-- a provider that signs with EC keys"
-call "an ES256 token" "$(node "$here/idp.mjs" ec-token user_2xYzAbc)" 'get notes select title'
+call "an ES384 token" "$(node "$here/idp.mjs" ec-token user_2xYzAbc)" 'get notes select title'
 stop
 
 echo
-echo "== 3. rules that name a claim's value, for what a policy cannot name otherwise"
+echo "== 3. rules that name a claim's value, every one pinned to this application"
 policy="$here/policy-claims.txt"
 cp "$idp/jwks.json" "$dir/jwks.json"
 start claims --jwt-keys "$dir/jwks.json"
 setup
-call "" root 'put staff {user: "dana"}' >/dev/null
-call "" root 'put notes [{owner: "alice", title: "alice note"}, {owner: "bob", title: "bob note"}]' >/dev/null
-idp_token() { node "$here/idp.mjs" token "$idp" "$@"; }
-call "access token for this app, alice" "$(idp_token access alice)" 'get notes select owner, title'
-call "access token for another app, alice" "$(idp_token access alice '{"aud":["0123456789abcdef"]}')" 'get notes select owner, title'
-call "auth0 token holding read:notes" "$(idp_token auth0 erin)" 'get notes select owner, title'
-call "auth0 token without it" "$(idp_token auth0 erin '{"permissions":[]}')" 'get notes select owner, title'
-call "dana, a row of staff" "$(idp_token plain dana)" 'get notes select owner, title'
-call "frank, not in staff" "$(idp_token plain frank)" 'get notes select owner, title'
+call "" root 'put staff {user: "auth0|dana"}' >/dev/null
+call "" root 'put notes [{owner: "auth0|ada", title: "auth0 note"}, {owner: "ada", title: "ada note"}, {owner: "bob", title: "bob note"}]' >/dev/null
+t() { node "$here/idp.mjs" token "$idp" "$@"; }
+API='https://api.example.test'
+call "auth0, a token for the API" "$(t auth0 ada '{"permissions":[]}')" 'get notes select title'
+call "auth0, one holding read:notes" "$(t auth0 ada)" 'get notes select title'
+call "auth0, an ID token (aud is the client)" "$(t auth0 ada '{"aud":"Zr8Example"}')" 'get notes select title'
+call "auth0, a token for another API" "$(t auth0 ada '{"aud":["https://other.example.test"]}')" 'get notes select title'
+call "no aud, holding read:notes" "$(t plain ada '{"permissions":["read:notes"]}')" 'get notes select title'
+call "profiles, a token for the API" "$(t auth0 ada)" 'get profiles'
+call "profiles, a token for another API" "$(t auth0 ada '{"aud":["https://other.example.test"]}')" 'get profiles'
+call "dana, in staff, a token for the API" "$(t auth0 dana '{"permissions":[]}')" 'get notes select title'
+call "dana, in staff, another API's" "$(t auth0 dana '{"aud":["https://other.example.test"],"permissions":[]}')" 'get notes select title'
+call "access, this application" "$(t access ada)" 'get notes select title'
+call "access, another application of the team" "$(t access ada '{"aud":["0123456789abcdef"]}')" 'get notes select title'
+call "firebase, this project" "$(t firebase ada)" 'get notes select title'
+call "firebase, another project" "$(t firebase ada '{"aud":"other-project"}')" 'get notes select title'
+call "clerk, this origin" "$(t clerk ada '{"azp":"https://app.example.test"}')" 'get notes select title'
+call "clerk, another origin" "$(t clerk ada '{"azp":"https://evil.example.test"}')" 'get notes select title'
+call "cognito, an access token of this client" "$(t cognito ada)" 'get notes select title'
+call "cognito, an ID token" "$(t cognito ada '{"token_use":"id","aud":"1example23456789"}')" 'get notes select title'
+call "supabase, a person" "$(t supabase ada)" 'get notes select title'
+call "supabase, an anonymous sign-in" "$(t supabase ada '{"is_anonymous":true}')" 'get notes select title'
 stop
 unset policy
 
 echo
 echo "== 4. a JWKS file with no key this server can use is refused at the start"
-printf '{"keys":[{"kty":"EC","crv":"P-256","kid":"ec-1","alg":"ES256","use":"sig","x":"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU","y":"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0"}]}' >"$dir/ec.json"
+# A P-384 key, for ES384: not one of the algorithms this server verifies.
+printf '{"keys":[{"kty":"EC","crv":"P-384","kid":"ec-1","alg":"ES384","use":"sig","x":"Q873GS5VgaO8sPd7q3e0CLqJr3pjeijRJVNwydrSUPgBcf5Ykn_H60fVfPKBOt9D","y":"lcvLR6f1kd9OIf53hL0pGOwn5ayn655WIT9HNTuheW4jgCo8v7Xj461tr8QVSJwl"}]}' >"$dir/ec.json"
 "$server" --http 127.0.0.1:0 --jwt-keys "$dir/ec.json" --policy "$here/policy.txt" 2>&1 | sed "s#$dir/##" || true
 
 echo
@@ -179,7 +223,7 @@ tenant_node() { # tenant_node <shape> <tenant> <other tenant> [fenec-server flag
     "$server" --dir "$dir/tenants" --http 127.0.0.1:0 --http-token root --admin-token admin \
         --jwt-keys "$dir/jwks.json" --policy "$here/policy.txt" "$@" 2>"$dir/server.log" &
     pid=$!
-    until grep -q "listening on: http://" "$dir/server.log" 2>/dev/null; do sleep 0.1; done
+    poll 10 grep -q "listening on: http://" "$dir/server.log"
     url=$(sed -n 's/.*listening on: \(http:[^ ]*\).*/\1/p' "$dir/server.log" | head -1)
     owner=alice
     [ "$shape" != auth0 ] || owner='auth0|alice' # Auth0's sub is the identity provider's, then the user's
@@ -204,3 +248,16 @@ echo "-- the claim \`tenant\`, which Clerk's session token carries once customiz
 tenant_node clerk acme globex
 echo "-- --jwt-tenant-claim org_id, which Auth0 puts in a token for an organization"
 tenant_node auth0 org_acme org_globex --jwt-tenant-claim org_id
+
+echo
+echo "== 7. a legacy HS256 secret, as an oct key of the file"
+secret=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n')
+printf '{"keys":[{"kty":"oct","kid":"legacy","alg":"HS256","k":"%s"}]}' "$secret" >"$dir/oct.json"
+sed 's/"k":"[^"]*"/"k":"..."/' "$dir/oct.json"
+echo
+legacy=$("$server" --jwt-keys "$dir/oct.json" --policy "$here/policy.txt" --mint-token '{"sub":"alice"}')
+start legacy --jwt-keys "$dir/oct.json"
+setup
+call "" root 'put notes {owner: "alice", title: "alice note"}' >/dev/null
+call "a token signed with the secret" "$legacy" 'get notes select owner, title'
+stop

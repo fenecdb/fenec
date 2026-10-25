@@ -168,6 +168,17 @@ run_dispatch() {
         FENEC_SHARD="${DISPATCH_FENEC_SHARD:-$root/target/debug/fenec-shard}" sh scripts/ci.sh)
 }
 
+# The recipes (examples/recipes/ci.sh): auth.sh, the files demo against an
+# S3-compatible store in Docker and the functions demo, each against this
+# checkout's server and web/, and their outputs held to golden/*.txt and the
+# docs pages that paste them. RECIPES_UPDATE=1 writes the golden again.
+run_recipes() {
+    has node || { missing node "recipes"; return; }
+    w=$(npm_example recipes)
+    (cd "$w" && FENEC_SERVER="${RECIPES_FENEC_SERVER:-$root/target/debug/fenec-server}" \
+        RECIPES_GOLDEN="$root/examples/recipes/golden" RECIPES_PAGES="$root/site/content/docs" sh ci.sh)
+}
+
 run_python() {
     has python3 || { missing python3 "python"; return; }
     serve python
@@ -219,7 +230,7 @@ run_flutter() {
     (cd "$here/flutter" && ./run-tests.sh)
 }
 
-all="node-server web-local react shop ledger saas analytics dispatch python go dotnet rust swift kotlin-android flutter"
+all="node-server web-local react shop ledger saas analytics dispatch recipes python go dotnet rust swift kotlin-android flutter"
 "$cargo" build -q -p fenec-server --manifest-path "$root/Cargo.toml"
 for e in ${*:-$all}; do
     echo "== $e"
@@ -232,6 +243,7 @@ for e in ${*:-$all}; do
         saas) run_saas ;;
         analytics) run_analytics ;;
         dispatch) run_dispatch ;;
+        recipes) run_recipes ;;
         python) run_python ;;
         go) run_go ;;
         dotnet) run_dotnet ;;

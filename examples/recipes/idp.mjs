@@ -12,7 +12,15 @@
 //   node idp.mjs token <dir> <shape> <sub> [claims-json]
 //                                            clerk | auth0 | supabase | cognito
 //                                            | access | plain
-//   node idp.mjs ec-token <sub>              an ES256 token, which a server
+//   node idp.mjs service-key <dir> [kid]    a key of your own service, kept
+//                                            apart from the provider's: its
+//                                            public half in service-jwks.json
+//   node idp.mjs merge <dir> <out>           the provider's keys and your
+//                                            service's in one JWKS, as
+//                                            refresh-jwks.sh makes the file
+//   node idp.mjs service-token <dir> <sub> [claims-json]
+//                                            a short token your service signs
+//   node idp.mjs ec-token <sub>              an ES384 token, which a server
 //                                            that takes RS256 and HS256 refuses
 //   node idp.mjs serve <dir>                 the JWKS over HTTP at
 //                                            /.well-known/jwks.json, as a
@@ -21,6 +29,7 @@ import { createServer } from 'node:http';
 import { createPrivateKey, createSign, generateKeyPairSync, sign as signRaw } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { isMain } from './main.mjs';
 
 const b64 = (v) => Buffer.from(typeof v === 'string' ? v : JSON.stringify(v)).toString('base64url');
 
@@ -42,9 +51,33 @@ function readJwks(dir) {
   return existsSync(join(dir, 'jwks.json')) ? JSON.parse(readFileSync(join(dir, 'jwks.json'), 'utf8')) : { keys: [] };
 }
 
+/**
+ * A key of your own service, apart from the provider's: what a backend or a
+ * Worker signs the short tokens it calls fenec-server with. The private half
+ * stays in `<kid>.pem` (the service's secret); the public half is in
+ * `service-jwks.json`, which `merge` and refresh-jwks.sh add to the file the
+ * server reads. A real provider's JWKS never holds it.
+ */
+export function addServiceKey(dir, kid = 'svc-1') {
+  const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  writeFileSync(join(dir, `${kid}.pem`), privateKey.export({ type: 'pkcs8', format: 'pem' }));
+  const jwk = { ...publicKey.export({ format: 'jwk' }), kid, alg: 'RS256', use: 'sig' };
+  writeFileSync(join(dir, 'service-jwks.json'), JSON.stringify({ keys: [jwk] }, null, 2));
+}
+
+/** The provider's keys and the service's, as the server's file holds them. */
+export function merge(dir, out) {
+  const own = existsSync(join(dir, 'service-jwks.json')) ? JSON.parse(readFileSync(join(dir, 'service-jwks.json'), 'utf8')).keys : [];
+  writeFileSync(out, JSON.stringify({ keys: [...readJwks(dir).keys, ...own] }, null, 2));
+}
+
+/** A token the service signs for itself: `sub` is its name, 5 minutes long. */
+export function serviceToken(dir, sub, claims = {}, { kid = 'svc-1', ttl = 300 } = {}) {
+  return token(dir, { sub, ...claims }, { kid, ttl });
+}
+
 /** An RS256 token for `claims`, signed with the newest key, an hour long. */
-export function token(dir, claims, { ttl = 3600 } = {}) {
-  const kid = readFileSync(join(dir, 'signing-kid'), 'utf8').trim();
+export function token(dir, claims, { ttl = 3600, kid = readFileSync(join(dir, 'signing-kid'), 'utf8').trim() } = {}) {
   const key = createPrivateKey(readFileSync(join(dir, `${kid}.pem`)));
   const now = Math.floor(Date.now() / 1000);
   const head = b64({ alg: 'RS256', typ: 'JWT', kid });
@@ -74,6 +107,7 @@ export const shapes = {
   }),
   // Supabase Auth's access token: `role` is the Postgres role, `authenticated`
   // for every signed-in user; `app_metadata` is nested.
+  // An anonymous sign-in has `role: authenticated` too, and `is_anonymous: true`.
   supabase: (sub) => ({
     iss: 'https://abcdefgh.supabase.co/auth/v1', aud: 'authenticated', sub,
     role: 'authenticated', aal: 'aal1', session_id: '5b0f6a3e', email: `${sub}@example.test`,
@@ -86,6 +120,12 @@ export const shapes = {
     client_id: '1example23456789', token_use: 'access', scope: 'openid', username: sub,
     'cognito:groups': ['editors'], role: 'member',
   }),
+  // A Firebase ID token: Google signs every project's with the same keys, and
+  // `aud` is the project's id, `iss` the project's address.
+  firebase: (sub) => ({
+    iss: 'https://securetoken.google.com/demo-project', aud: 'demo-project', sub,
+    auth_time: Math.floor(Date.now() / 1000), firebase: { sign_in_provider: 'password' },
+  }),
   // Cloudflare Access's application token: `aud` is the application's tag,
   // a list, and a team's other applications are signed with the same keys.
   access: (sub) => ({
@@ -95,14 +135,14 @@ export const shapes = {
   plain: (sub) => ({ sub }),
 };
 
-/** An ES256 token signed by a key no JWKS here holds: what a provider that
+/** An ES384 token signed by a key no JWKS here holds: what a provider that
  * signs with EC keys sends, which this server does not take. */
 export function ecToken(sub) {
-  const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'P-384' });
   const now = Math.floor(Date.now() / 1000);
-  const head = b64({ alg: 'ES256', typ: 'JWT', kid: 'ec-1' });
+  const head = b64({ alg: 'ES384', typ: 'JWT', kid: 'ec-1' });
   const body = b64({ sub, iat: now, exp: now + 3600 });
-  const sig = signRaw('sha256', Buffer.from(`${head}.${body}`), { key: privateKey, dsaEncoding: 'ieee-p1363' });
+  const sig = signRaw('sha384', Buffer.from(`${head}.${body}`), { key: privateKey, dsaEncoding: 'ieee-p1363' });
   return `${head}.${body}.${sig.toString('base64url')}`;
 }
 
@@ -115,7 +155,7 @@ export function serve(dir) {
   server.listen(0, '127.0.0.1', () => console.log(`http://127.0.0.1:${server.address().port}`));
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMain(import.meta.url)) {
   const [cmd, a, b, c, d] = process.argv.slice(2);
   if (cmd === 'init') init(a);
   else if (cmd === 'add-key') addKey(a, b);
@@ -124,5 +164,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.log(token(a, { ...shapes[b](c), ...(d ? JSON.parse(d) : {}) }));
   } else if (cmd === 'ec-token') console.log(ecToken(a));
   else if (cmd === 'serve') serve(a);
-  else throw new Error('usage: node idp.mjs init|add-key|token|ec-token|serve ...');
+  else if (cmd === 'service-key') addServiceKey(a, b);
+  else if (cmd === 'merge') merge(a, b);
+  else if (cmd === 'service-token') console.log(serviceToken(a, b, c ? JSON.parse(c) : {}));
+  else throw new Error('usage: node idp.mjs init|add-key|token|ec-token|serve|service-key|merge|service-token ...');
 }

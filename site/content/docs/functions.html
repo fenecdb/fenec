@@ -1,6 +1,6 @@
 <!--
 title: Functions and webhooks — fenecdb
-description: Reacting to a write with no code in the database: a Worker that is an endpoint, a job queue with workers, a consumer of the change stream that calls a webhook. When each fits, and each of them run against a real server.
+description: Reacting to a write with no code in the database: a Worker that is an endpoint, a job queue with workers, a signed webhook from the change stream. When each fits, each with its own scoped token, and each run against a real server.
 -->
 
 <h1>Functions and webhooks</h1>
@@ -17,7 +17,8 @@ of its own: <a href="/docs/embedding#plugins">Embedded Rust</a>. A
 react, when each fits, and each one run against a real server
 (<code>node functions-demo.mjs</code> in <code>examples/recipes</code>, after
 <code>npm install</code>; the Worker part runs when <code>wrangler</code> is on
-the path or <code>WRANGLER</code> names it).</p>
+the path or <code>WRANGLER</code> names it, and <code>make recipes-test</code>
+holds this page's outputs to what the demo prints).</p>
 
 <div class="tbl">
 <table>
@@ -25,17 +26,41 @@ the path or <code>WRANGLER</code> names it).</p>
 <tbody>
 <tr><td>An endpoint with logic: a webhook arriving, a check the rules cannot say, a call to a third party before the write</td><td><a href="#worker">A Worker</a> (or any function) in front of the server, with a token of its own</td><td>Once per request. The client retries under an <code>Idempotency-Key</code>, and the write and what goes with it are one <code>/batch</code></td></tr>
 <tr><td>Work to do after a write, that may take a while and be retried, by many workers: mail, thumbnails, billing</td><td><a href="#queue">A job queue</a>: the job is a row, written in the batch of what it is about</td><td>At least once, a lease a job, a back-off, a dead letter</td></tr>
-<tr><td>To tell another system a row changed: a search index, Kafka, a cache, a webhook</td><td><a href="#webhook">A consumer</a> of <code>/_changes</code></td><td>At least once, in order, from a place the server keeps. It sees every write, whoever made it</td></tr>
+<tr><td>To let another system know a row changed: a search index, Kafka, a cache, a webhook</td><td><a href="#webhook">A consumer</a> of <code>/_changes</code></td><td>At least once, in order, from a place the server keeps. It sees every write, whoever made it</td></tr>
 <tr><td>State and logic per user or team, at the edge</td><td>A Durable Object with the engine inside (<a href="/docs/serverless">Serverless and Cloudflare</a>)</td><td>One writer an object, no network between code and data</td></tr>
 <tr><td>Something to expire, or to sweep on a schedule</td><td><code>@ttl</code>, or a statement on a timer (cron, an object's alarm)</td><td>The server's own sweep, or yours</td></tr>
 </tbody>
 </table>
 </div>
 
+<h2 id="credentials">A token for each service</h2>
+
+<p>Each service here is its own caller with the least the server will give it, and
+the policy says so in a file a person can read. A service is its <code>sub</code>,
+which a provider assigns and a person does not choose, not a <code>role</code>
+(a role claim in the provider's namespace would be one the provider's settings
+might fill); it signs a five-minute token with a key of its own, whose public
+half is in the server's keys file beside the provider's. Why not
+<code>--mint-token</code>, and how the file is made, are in
+<a href="/docs/auth#services">Auth with your identity provider</a>.</p>
+
+<pre data-lang="text" data-label="functions-policy.txt"># collection  access                                       rows
+
+# The signup function (worker/index.mjs) adds a signup and the job that welcomes
+# it, and reads and changes nothing. Each service is its `sub`, which a
+# provider assigns and a person does not choose (service-token.mjs).
+signups       insert                                       where $jwt.sub = 'signup-function'
+jobs          insert                                       where $jwt.sub = 'signup-function'
+
+# The welcome worker (welcome-worker.mjs) claims a job, writes its lease and
+# its failures, and deletes what it has done.
+jobs          read,delete                                  where $jwt.sub = 'welcome-worker'
+jobs          update(owner, run_at, attempts, error)       where $jwt.sub = 'welcome-worker'</pre>
+
 <h2 id="worker">A function: a Worker that is an endpoint</h2>
 
 <p>A Cloudflare Worker, a Lambda or a small server in front of the database,
-holding a token of its own as a secret, never a person's. The Worker below
+holding a key of its own as a secret, never a person's token. The Worker below
 takes a signup, checks what the database's rules do not, and writes the signup
 and the job that welcomes it in <b>one</b> <code>/batch</code>: the two land
 together or not at all, so no worker finds a job with no signup, and no
@@ -45,19 +70,44 @@ signup goes unwelcomed.</p>
 // endpoint of its own. POST /signup checks what the database's rules cannot
 // (an address that looks like one), then writes the signup and the job that
 // welcomes it in ONE batch, so a worker never finds a job with no signup nor
-// a signup that will never be welcomed. The Worker holds a token of its own
-// (a secret: `wrangler secret put FENEC_TOKEN`), never a person's.
+// a signup that will never be welcomed.
 //
-// The client's Idempotency-Key goes on to fenec-server as it is: a request
-// sent again after a timeout is answered what the first was, and writes
-// nothing twice.
+// The Worker is a service of its own to fenec-server: a key (the secret
+// SERVICE_KEY, PKCS#8 in base64) whose public half is in the server's keys
+// file, and a token signed with it for five minutes, `sub` signup-function.
+// functions-policy.txt lets that sub insert into two collections and nothing
+// else, so a Worker that leaked its secret could add rows, not read them. Not a
+// person's token, and not the server's own.
+//
+// The client's Idempotency-Key goes on to fenec-server, with the caller's name
+// in front of it. The server keeps a key under this token's subject, which is
+// every caller's alike: left as it came, one caller's key could collide with
+// another's (a 422, or a replayed answer that was not theirs).
+const b64url = (bytes) =&gt; btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const text = (s) =&gt; new TextEncoder().encode(s);
+
+let kept = null; // the token, per isolate, until a minute before it lapses
+
+async function serviceToken(env) {
+  const now = Math.floor(Date.now() / 1000);
+  if (kept &amp;&amp; kept.exp - 60 &gt; now) return kept.token;
+  const key = await crypto.subtle.importKey('pkcs8', Uint8Array.from(atob(env.SERVICE_KEY), (c) =&gt; c.charCodeAt(0)),
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']);
+  const head = b64url(text(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid: 'svc-1' })));
+  const body = b64url(text(JSON.stringify({ sub: 'signup-function', iat: now, exp: now + 300 })));
+  const sig = new Uint8Array(await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, text(`${head}.${body}`)));
+  kept = { token: `${head}.${body}.${b64url(sig)}`, exp: now + 300 };
+  return kept.token;
+}
+
 export default {
   async fetch(request, env) {
     const { pathname } = new URL(request.url);
     if (request.method !== 'POST' || pathname !== '/signup') return new Response('not found', { status: 404 });
 
     const { email, name } = await request.json().catch(() =&gt; ({}));
-    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email ?? '') || !name) {
+    if (typeof email !== 'string' || email.length &gt; 254 || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)
+      || typeof name !== 'string' || !name || name.length &gt; 100) {
       return Response.json({ error: 'a name and an email address' }, { status: 400 });
     }
 
@@ -66,13 +116,17 @@ export default {
       // An object goes in as a parameter: inside an object literal only constants do.
       { query: 'put jobs {kind: "welcome", payload: $1, run_at: now(), attempts: 0}', params: [{ email, name }] },
     ];
-    const headers = { authorization: `Bearer ${env.FENEC_TOKEN}`, 'content-type': 'application/x-ndjson' };
+    const headers = { authorization: `Bearer ${await serviceToken(env)}`, 'content-type': 'application/x-ndjson' };
     const key = request.headers.get('idempotency-key');
-    if (key) headers['idempotency-key'] = key;
+    if (key) {
+      // The caller: who signed in, where there is a sign-in; the address otherwise.
+      const caller = request.headers.get('cf-connecting-ip') ?? 'unknown';
+      headers['idempotency-key'] = `${caller}:${key.slice(0, 100)}`;
+    }
     const res = await fetch(`${env.FENEC_URL}/batch`, { method: 'POST', headers, body: lines.map((l) =&gt; JSON.stringify(l)).join('\n') });
 
     if (res.status === 409) return Response.json({ error: 'already signed up' }, { status: 409 }); // @unique(email)
-    if (!res.ok) return Response.json({ error: 'the database refused', status: res.status }, { status: 502 });
+    if (!res.ok) return Response.json({ error: 'try again later' }, { status: 502 }); // not the server's words
     return Response.json({ ok: true, replayed: res.headers.get('idempotent-replayed') === 'true' }, { status: 201 });
   },
 };</pre>
@@ -81,25 +135,40 @@ export default {
 POST /signup  ada, sent again    201 {"ok":true,"replayed":true}
 POST /signup  ada, a new request 409 {"error":"already signed up"}
 POST /signup  not an address     400 {"error":"a name and an email address"}
-signups [{"email":"ada@example.test"}]  jobs [{"kind":"welcome","owner":null,"attempts":0}]</pre>
+signups [{"email":"ada@example.test"}]  jobs [{"kind":"welcome","owner":null,"attempts":0}]
+with the Worker's token, read signups    403
+with the Worker's token, delete jobs     {"affected":0}
+with the Worker's token, insert a signup {"affected":1}</pre>
 
 <ul>
   <li><b>Run under <code>wrangler dev</code></b> (workerd, as Cloudflare runs
-    it) against a real server. The token is a line of <code>.dev.vars</code>
-    there and <code>wrangler secret put FENEC_TOKEN</code> deployed; fenec-server is reached over HTTP like any
-    other service, so a function holds no pool of connections to exhaust.</li>
+    it) against a real server. The key is a line of <code>.dev.vars</code>
+    there (PKCS#8 in base64, <code>openssl pkcs8 -topk8 -nocrypt -outform DER |
+    base64</code>) and <code>wrangler secret put SERVICE_KEY</code> deployed;
+    fenec-server is reached over HTTP like any other service, so a function holds
+    no pool of connections to exhaust.</li>
+  <li><b>A leaked key adds rows and reads none.</b> The last three lines are what
+    the Worker's own token is answered: its reads are refused, its <code>del</code>
+    finds no row it may delete, and its insert is the one thing it was given.</li>
   <li><b>The same request, sent again</b> (a timeout, a retry) is answered the
-    first one's answer, <code>replayed: true</code>, and writes nothing twice;
-    the key is the client's, passed on. A <em>different</em> request for an
-    address already signed up reaches the <code>@unique</code> on
-    <code>email</code> and is 409, and the batch, jobs and all, is put back.</li>
+    first one's answer, <code>replayed: true</code>, and writes nothing twice. A
+    <em>different</em> request for an address already signed up reaches the
+    <code>@unique</code> on <code>email</code> and is 409, and the batch, jobs
+    and all, is put back.</li>
+  <li><b>The client's key is scoped to the caller.</b> The server keeps an
+    <code>Idempotency-Key</code> under the token's subject, which here is every
+    caller's alike, so the Worker puts the caller (a sign-in where there is one,
+    the address where there is not) in front of it: left as it came, one caller's key
+    could collide with another's, or replay an answer that was not theirs.</li>
   <li><b>An object goes in as a parameter.</b> Inside an object literal a
     FenecQL statement takes constants only, so the job's <code>payload</code>
     is <code>$1</code>, and the parameter is the object.</li>
+  <li><b>The server's words are not the Worker's.</b> A refusal is "try again
+    later" to the caller, and a body or an address is checked before it is sent.</li>
   <li><b>A Worker is also where a provider's webhook is verified</b> before
     anything is written, and where a token that arrives in another header (a
     Cloudflare Access one) can be moved into the one the server reads
-    (<a href="/docs/auth#claims">Auth with your identity provider</a>).
+    (<a href="/docs/auth#access">Auth with your identity provider</a>).
     Servers in several regions take one URL through a Worker at the front, the
     <a href="/docs/sharding-entry#global-entry">global entry</a>.</li>
 </ul>
@@ -107,61 +176,99 @@ signups [{"email":"ada@example.test"}]  jobs [{"kind":"welcome","owner":null,"at
 <h2 id="queue">Work after a write: a job queue</h2>
 
 <p>The job is a row, and a worker claims it with one statement that picks the
-oldest ready jobs and writes a lease on them; held at the server with
+oldest ready job and writes a lease on it; held at the server with
 <code>Fenec-Wait</code> until there is one. The queue is
 <a href="/docs/queues">Job queues</a>; the function here is the
 worker.</p>
 
-<pre data-lang="js" data-label="welcome-worker.mjs">// A worker of the `jobs` collection, docs/functions: it claims the oldest
-// ready jobs, each its own for a lease; the claim is held at the server until
-// there is one (`wait`), so an idle worker costs nothing and a new job reaches
-// it in under a millisecond. A job done is deleted; a job that fails is put
-// back after a back-off; a worker that dies holds its jobs only until the
-// lease lapses. Each step names the owner it was claimed by and requires its
-// row, so a worker whose lease lapsed finds out (412) instead of acking
-// another worker's job. (The queue itself is docs/queues.)
+<pre data-lang="js" data-label="welcome-worker.mjs">// A worker of the `jobs` collection, docs/functions: it claims one ready job
+// at a time, its own for a lease; the claim is held at the server until there
+// is one (`wait`), so an idle worker costs nothing and a new job reaches it in
+// under a millisecond. A job done is deleted. A job that fails is put back
+// after a back-off, and after `maxAttempts` tries is kept with its error and no
+// time to run (a dead letter: no claim takes a job without one) for a person
+// to look at. A worker that dies holds its job only until the lease lapses.
+// Each step names the owner it was claimed by and requires its row, so a
+// worker whose lease lapsed finds out (412) instead of acking another worker's
+// job. (The queue itself is docs/queues.)
+//
+// One job to a claim, because a claim's lease is the job's: ten claimed
+// together under one 30 s lease, and run one after the other, would lapse on
+// the ninth while the first was still being done. A handler is also given the
+// time the lease has left, and a signal that fires then.
 import { connect, expr, inc, raw } from '@fenecdb/web/client';
 
-export async function work({ fenec, token, handlers, name = 'worker', lease = 30_000, wait = 30_000, signal, log = console.log }) {
-  const jobs = connect(fenec, { token }).from('jobs');
-  const me = `${name}-${Math.random().toString(36).slice(2, 6)}`;
+/**
+ * `token` is `() =&gt; Promise&lt;token&gt;`: the worker's own (service-token.mjs),
+ * asked for again on each claim since a claim can wait half a minute.
+ */
+export async function work({
+  fenec, token, handlers, id = Math.random().toString(36).slice(2, 6), lease = 30_000, wait = 30_000,
+  maxAttempts = 3, backoff = 1000, signal, log = console.log,
+}) {
   while (!signal?.aborted) {
-    const owner = `${me}:${Date.now()}`; // a claim, not the worker: two claims of one job tell apart
+    const jobs = connect(fenec, { token: await token() }).from('jobs');
+    const owner = `${id}:${Date.now()}`; // a claim, not the worker: two claims of one job tell apart
     let claimed;
     try {
-      claimed = await jobs.where(raw('run_at &lt;= now()')).order('run_at').limit(10)
+      claimed = await jobs.where(raw('run_at &lt;= now()')).order('run_at').limit(1)
         .update({ owner, run_at: expr('now() + ?', lease), attempts: inc(1) }, { returning: true, wait, signal });
     } catch (e) {
       if (signal?.aborted) return;
       throw e;
     }
     for (const job of claimed) {
-      log(`${me}: job ${job.id} ${job.kind}, attempt ${job.attempts}`);
+      log(`${id}: job ${job.id} ${job.kind}, attempt ${job.attempts}`);
+      const mine = () =&gt; jobs.where('id', job.id).where('owner', owner);
       try {
-        await handlers[job.kind](job.payload);
-        await jobs.where('id', job.id).where('owner', owner).delete({ require: 1 });
+        const left = AbortSignal.timeout(lease - 5000); // stop short of the lease
+        await Promise.race([
+          handlers[job.kind](job.payload, { signal: left }),
+          new Promise((_, no) =&gt; left.addEventListener('abort', () =&gt; no(new Error('out of time')))),
+        ]);
+        await mine().delete({ require: 1 });
       } catch (e) {
-        log(`${me}: job ${job.id} failed (${e.message}); back in ${2 ** job.attempts} s`);
-        await jobs.where('id', job.id).where('owner', owner)
-          .update({ owner: null, run_at: expr('now() + ?', 1000 * 2 ** job.attempts) }, { require: 1 }).catch(() =&gt; {});
+        if (job.attempts &gt;= maxAttempts) {
+          log(`${id}: job ${job.id} failed (${e.message}); ${job.attempts} attempts, kept as dead`);
+          await mine().update({ owner: null, run_at: null, error: e.message }, { require: 1 }).catch(() =&gt; {});
+        } else {
+          const ms = backoff * 2 ** job.attempts;
+          log(`${id}: job ${job.id} failed (${e.message}); again in ${ms / 1000} s`);
+          await mine().update({ owner: null, run_at: expr('now() + ?', ms), error: e.message }, { require: 1 }).catch(() =&gt; {});
+        }
       }
     }
   }
 }</pre>
 
 <pre data-lang="text">a worker took [{"id":1,"payload.email":"ada@example.test"}] and died
-w-lr7i: job 2 welcome, attempt 1
-   mail to bo@example.test after 0.0 s
-w-lr7i: job 1 welcome, attempt 2
-   mail to ada@example.test after 2.0 s
-jobs left []</pre>
+w1: job 2 welcome, attempt 1
+   mail to bo@example.test after 0 s
+w1: job 3 welcome, attempt 1
+w1: job 3 failed (mailbox refused); again in 0.6 s
+w1: job 3 welcome, attempt 2
+w1: job 3 failed (mailbox refused); again in 1.2 s
+w1: job 3 welcome, attempt 3
+w1: job 3 failed (mailbox refused); 3 attempts, kept as dead
+w1: job 1 welcome, attempt 2
+   mail to ada@example.test after 3 s
+jobs left [{"id":3,"run_at":null,"attempts":3,"error":"mailbox refused"}]</pre>
 
 <ul>
   <li><b>A worker that dies holds nothing for long.</b> The job the first
-    worker took and never acked was ready again once its two-second lease
+    worker took and never acked was ready again once its three-second lease
     lapsed, and the next claim took it, <code>attempt 2</code>. (The worker
-    claims for 30 seconds; the dead one's claim was made for two, to keep the
+    claims for 30 seconds; the dead one's claim was made for three, to keep the
     run short.)</li>
+  <li><b>One job to a claim, a lease to a job.</b> Ten claimed together under one
+    30-second lease and done one after another would lapse on the ninth while
+    the first was still being done, and another worker would take them. The
+    handler is also given the time the lease has left, as a signal.</li>
+  <li><b>Bounded.</b> A job that fails is tried again after a back-off (0.6 s,
+    then 1.2 s here; the worker's default base is a second, so 2 s and then 4 s) and, after three attempts, is
+    kept with its error and no time to run: a dead letter, which no claim takes
+    and a person can read (<code>get jobs where run_at is null</code>). Without
+    the bound one bad job would be tried for ever.</li>
   <li><b>It is at least once.</b> A job can run twice, once by a worker that
     was only slow. The handler is built to be run twice: key what it does by
     the job's id or the row it is about, or send it under an
@@ -170,18 +277,22 @@ jobs left []</pre>
     seconds at most) and answered when it takes a job, which a new one does in
     0.38 ms at the median (<a href="/docs/queues#wait">Waiting for a
     job</a>).</li>
-  <li><b>Retries, back-off, priorities and dead letters</b> are statements on
+  <li><b>Retries, priorities and dead letters</b> are statements on
     the same collection (<a href="/docs/queues#fail">Fail, back off,
     dead-letter</a>, <a href="/docs/queues#priority">Priorities</a>).</li>
 </ul>
 
 <h2 id="webhook">A webhook for a table: a consumer</h2>
 
-<p>To tell something else that a row changed, read the change stream. With
+<p>To let something else know that a row changed, read the change stream. With
 <code>--cdc</code> the server hands every write over once it is on disk, in
 order, documents and all, and keeps a consumer's place for it. The consumer
 below POSTs the writes to the collections it is asked for to a URL, as signed
-JSON, and moves on only when the URL has answered.</p>
+JSON, and moves on only when the URL has answered. <b>It sends the document</b>
+(every field of it, as the stream has it) to the receiver, unless it is told
+<code>shape: 'ids'</code>, which sends the change's number, collection, kind and
+id: use that where the receiver has no business with the rest and can read the
+row itself.</p>
 
 <details class="deep" open><summary>webhook.mjs</summary>
 <pre data-lang="js">// A webhook for a table, docs/functions: a consumer of the change stream
@@ -192,57 +303,91 @@ JSON, and moves on only when the URL has answered.</p>
 //
 //   FENEC_URL=... ADMIN_TOKEN=... HOOK_URL=https://... HOOK_SECRET=... node webhook.mjs orders
 //
-// What a receiver can rely on:
-//   X-Signature-256: sha256=&lt;HMAC-SHA256 of the body, with the shared secret&gt;
-//   Idempotency-Key: &lt;seq&gt;, the change's number in this database: a delivery
-//   sent again (the relay died between the answer and the commit) carries the
-//   same key, and a receiver that has seen it answers 200 and does nothing.
-import { createHmac } from 'node:crypto';
+// What goes out is the change as the stream has it: `put` carries the whole
+// document, every field of it. A receiver is told as much as the stream says,
+// so send ids (`shape: 'ids'`) where the receiver has no business with the
+// rest and can read the row itself.
+//
+// What a delivery is answered decides what happens to the stream:
+//   2xx           done; the next change.
+//   408, 429, 5xx, no answer
+//                 tried again with a back-off, `tries` times; then the relay
+//                 stops (below), for a receiver that is down is not a reason
+//                 to put every change it missed away.
+//   400, 413, 422 and the other 4xx
+//                 the receiver refuses this change, and would refuse it again:
+//                 it is kept in `dead_letters` and the stream goes on.
+//   401, 403, 404, 405, 410, and any redirect
+//                 stop, and say so. The receiver does not trust this sender
+//                 (a secret that was rotated, a URL that moved), and every
+//                 change behind this one would be put away for the same reason.
+//                 A redirect is never followed: the body is signed for the
+//                 address it was sent to.
+// Stopping is throwing an Alert, with nothing committed: the process exits
+// non-zero, whoever watches it is told, and a restart sends this change again.
+import { signatures } from './webhook-verify.mjs';
+import { isMain } from './main.mjs';
+
+export class Alert extends Error {}
 
 const sleep = (ms, signal) =&gt; new Promise((resolve) =&gt; {
   const t = setTimeout(resolve, ms);
   signal?.addEventListener('abort', () =&gt; (clearTimeout(t), resolve()), { once: true });
 });
 
-export const sign = (secret, body) =&gt; `sha256=${createHmac('sha256', secret).update(body).digest('hex')}`;
+const STOP = new Set([401, 403, 404, 405, 410]);
+const RETRY = (status) =&gt; status === 408 || status === 429 || status &gt;= 500;
 
-/** Deliver the writes to `collections` (ops: put, del) at `url`, forever. */
+/**
+ * Deliver the writes to `collections` (ops: put, del) at `url`, forever.
+ * `secrets` is one secret, or two while one is being rotated out.
+ */
 export async function relay({
-  fenec, adminToken, url, secret, collections, ops = ['put', 'del'], name = 'webhook',
+  fenec, adminToken, url, secrets, collections, ops = ['put', 'del'], shape = 'full', name = 'webhook',
   tries = 5, backoff = 500, wait = 10_000, signal, log = console.log,
 }) {
   const headers = { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' };
   const server = (path, init) =&gt; fetch(`${fenec}${path}`, { headers, ...init });
-  await server(`/_changes/consumers/${name}`, { method: 'POST' }); // made once; a second ask says it exists
+  // Made once, where there is none. A POST to a consumer that exists moves it
+  // to the last write on disk, and every change since it was stopped is lost.
+  const listed = await (await server('/_changes/consumers')).json();
+  if (!listed.some((c) =&gt; c.name === name)) await server(`/_changes/consumers/${name}`, { method: 'POST' });
 
   async function deliver(change) {
-    const body = JSON.stringify(change);
+    const sent = shape === 'ids' ? { seq: change.seq, collection: change.collection, op: change.op, id: change.id ?? change.doc?.id } : change;
+    const body = JSON.stringify(sent);
     for (let attempt = 1; attempt &lt;= tries; attempt++) {
+      const timestamp = Math.floor(Date.now() / 1000);
       const res = await fetch(url, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-signature-256': sign(secret, body), 'idempotency-key': String(change.seq) },
+        headers: {
+          'content-type': 'application/json',
+          'x-webhook-timestamp': String(timestamp),
+          'x-webhook-signature': signatures([].concat(secrets), timestamp, body),
+        },
         body,
+        redirect: 'manual',
         signal,
       }).catch(() =&gt; null);
-      if (res?.ok) return true;
+      if (res?.ok) return;
       if (signal?.aborted) throw new Error('stopped'); // not delivered, not committed: the next run sends it again
-      // 4xx other than 408 and 429 is the receiver saying "never": trying
-      // again would only hold up every change behind this one.
-      if (res &amp;&amp; res.status &gt;= 400 &amp;&amp; res.status &lt; 500 &amp;&amp; ![408, 429].includes(res.status)) {
-        log(`relay: seq ${change.seq} refused (${res.status})`);
-        break;
+      const status = res ? res.status : 0;
+      if (status &gt;= 300 &amp;&amp; status &lt; 400) throw new Alert(`seq ${change.seq}: ${url} redirects (${status}), and a signed body is not sent on`);
+      if (STOP.has(status)) throw new Alert(`seq ${change.seq}: ${url} answers ${status}; stopped, nothing committed`);
+      if (res &amp;&amp; !RETRY(status)) {
+        log(`relay: seq ${change.seq} refused (${status})`);
+        await server('/query', {
+          method: 'POST',
+          body: JSON.stringify({ query: 'put dead_letters {seq: $1, collection: $2, op: $3, status: $4, change: $5, at: now()}',
+            params: [change.seq, change.collection, change.op, status, sent] }),
+        });
+        log(`relay: seq ${change.seq} kept in dead_letters`);
+        return;
       }
-      log(`relay: seq ${change.seq} try ${attempt} of ${tries}: ${res ? res.status : 'no answer'}`);
-      await sleep(backoff * 2 ** (attempt - 1), signal);
+      log(`relay: seq ${change.seq} try ${attempt} of ${tries}: ${status || 'no answer'}`);
+      if (attempt &lt; tries) await sleep(Math.min(backoff * 2 ** (attempt - 1), 60_000), signal);
     }
-    // Kept where a person will look, and the stream goes on.
-    await server('/query', {
-      method: 'POST',
-      body: JSON.stringify({ query: 'put dead_letters {seq: $1, collection: $2, op: $3, change: $4, at: now()}',
-        params: [change.seq, change.collection, change.op, change] }),
-    });
-    log(`relay: seq ${change.seq} kept in dead_letters`);
-    return false;
+    throw new Alert(`seq ${change.seq}: ${url} did not answer ${tries} times; stopped, nothing committed`);
   }
 
   while (!signal?.aborted) {
@@ -252,13 +397,12 @@ export async function relay({
     const next = Number(page.headers.get('fenec-next'));
     for (const line of (await page.text()).split('\n').filter(Boolean)) {
       const change = JSON.parse(line);
-      if (collections.includes(change.collection) &amp;&amp; ops.includes(change.op)) {
-        try {
-          await deliver(change);
-        } catch (e) {
-          if (signal?.aborted) return;
-          throw e;
-        }
+      if (!collections.includes(change.collection) || !ops.includes(change.op)) continue;
+      try {
+        await deliver(change);
+      } catch (e) {
+        if (signal?.aborted) return;
+        throw e;
       }
     }
     // After every delivery of the page was answered, not before.
@@ -266,44 +410,160 @@ export async function relay({
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMain(import.meta.url)) {
   const env = process.env;
-  await relay({
-    fenec: env.FENEC_URL, adminToken: env.ADMIN_TOKEN, url: env.HOOK_URL, secret: env.HOOK_SECRET,
-    collections: process.argv.slice(2),
-  });
+  try {
+    await relay({
+      fenec: env.FENEC_URL, adminToken: env.ADMIN_TOKEN, url: env.HOOK_URL,
+      secrets: env.HOOK_SECRET.split(','), // two, comma between, while one is rotated out
+      collections: process.argv.slice(2), shape: env.HOOK_SHAPE ?? 'full',
+    });
+  } catch (e) {
+    console.error(e instanceof Alert ? `ALERT: ${e.message}` : e);
+    process.exit(1);
+  }
 }</pre>
 </details>
 
-<pre data-lang="text">   receiver: seq 17 orders put total 40 signature ok -&gt; 500
-relay: seq 17 try 1 of 3: 500
-   receiver: seq 17 orders put total 40 signature ok -&gt; 200
-   receiver: seq 20 orders put total 13 signature ok -&gt; 400
-relay: seq 20 refused (400)
-relay: seq 20 kept in dead_letters
-dead_letters [{"seq":20,"collection":"orders","op":"put"}]
+<p>What the receiver does with a delivery, in the order it does it:</p>
+
+<details class="deep" open><summary>webhook-verify.mjs, the receiver's checks</summary>
+<pre data-lang="js">// What a receiver of webhook.mjs's deliveries does, docs/functions. Three
+// checks, in this order, before the body is trusted:
+//
+//   1. The signature: HMAC-SHA-256 over `&lt;timestamp&gt;.&lt;body&gt;` with the secret
+//      the two share, compared in constant time. The timestamp is part of
+//      what is signed, so it cannot be moved to make an old body new.
+//   2. The timestamp: within a few minutes of now. A body someone captured and
+//      sends again an hour later has a good signature and a stale time.
+//   3. The `seq` inside the body, which the signature covers: a change already
+//      done is answered 200 and not done again. A header outside the signature
+//      (an Idempotency-Key, say) is whatever the sender of this request wrote.
+//
+// A secret is rotated by the sender signing with the new and the old (two
+// `v1=` values) while the receiver learns the new: it accepts a body one of
+// whose signatures one of its secrets makes.
+import { createHmac, timingSafeEqual } from 'node:crypto';
+
+export const sign = (secret, timestamp, body) =&gt; createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex');
+
+/** The header a sender sets: one `v1=` for each secret it signs with. */
+export const signatures = (secrets, timestamp, body) =&gt; secrets.map((s) =&gt; `v1=${sign(s, timestamp, body)}`).join(',');
+
+const same = (a, b) =&gt; a.length === b.length &amp;&amp; timingSafeEqual(Buffer.from(a), Buffer.from(b));
+
+/** `{ok: true}` or `{ok: false, why}`; `now` is seconds, a parameter so that a test can move it. */
+export function verify({ secrets, headers, body, tolerance = 300, now = () =&gt; Date.now() / 1000 }) {
+  const timestamp = headers['x-webhook-timestamp'];
+  if (!/^\d{1,12}$/.test(timestamp ?? '')) return { ok: false, why: 'no timestamp' };
+  const given = (headers['x-webhook-signature'] ?? '').split(',').map((p) =&gt; p.trim().replace(/^v1=/, ''));
+  const good = secrets.some((secret) =&gt; given.some((g) =&gt; same(g, sign(secret, timestamp, body))));
+  if (!good) return { ok: false, why: 'bad signature' };
+  if (Math.abs(now() - Number(timestamp)) &gt; tolerance) return { ok: false, why: 'stale' };
+  return { ok: true };
+}
+
+/**
+ * A request handler for node:http. `secrets` is a list, or a function that
+ * answers one (read at each delivery, so that a secret can be rotated). `done`
+ * is the set of `seq`s already done
+ * (a table, in a receiver that is run twice), `act(change)` what the receiver
+ * is for.
+ */
+export function receiver({ secrets, act, done = new Set(), tolerance, now, log = () =&gt; {}, captured }) {
+  return async (req, res) =&gt; {
+    let body = '';
+    for await (const chunk of req) {
+      body += chunk;
+      if (body.length &gt; 1 &lt;&lt; 20) return void res.writeHead(413).end();
+    }
+    const checked = verify({ secrets: typeof secrets === 'function' ? secrets() : secrets, headers: req.headers, body, tolerance, now });
+    if (!checked.ok) {
+      log(`rejected: ${checked.why}`);
+      return void res.writeHead(401).end();
+    }
+    captured?.push({ headers: req.headers, body }); // for a demonstration of a replay
+    const change = JSON.parse(body);
+    if (done.has(change.seq)) {
+      log(`seq ${change.seq} seen: nothing done`);
+      return void res.writeHead(200).end();
+    }
+    try {
+      await act(change);
+    } catch (e) {
+      log(`seq ${change.seq}: answered ${e.status ?? 500}`);
+      return void res.writeHead(e.status ?? 500).end();
+    }
+    done.add(change.seq);
+    log(`seq ${change.seq} ${change.collection} ${change.op}: done`);
+    res.writeHead(200).end();
+  };
+}</pre>
+</details>
+
+<pre data-lang="text">   receiver: seq 6: answered 500
+relay: seq 6 try 1 of 3: 500
+   receiver: seq 6 orders put: done
+   receiver: seq 9: answered 400
+relay: seq 9 refused (400)
+relay: seq 9 kept in dead_letters
+dead_letters [{"seq":9,"collection":"orders","op":"put","status":400}]
+-- the first delivery, captured, sent again
+   receiver: seq 6 seen: nothing done
+   replayed at once: 200
+   receiver: rejected: stale
+   replayed an hour later: 401
 -- the relay stopped; an order is written meanwhile; a new relay carries on from the place the server kept
-   receiver: seq 24 orders put total 7 signature ok -&gt; 200</pre>
+   receiver: seq 12 orders put: done
+-- the receiver rotates its secret before the relay has heard
+   receiver: rejected: bad signature
+ALERT: seq 14: http://127.0.0.1:57550/hook answers 401; stopped, nothing committed
+-- the relay is given both secrets for a while, and the same change goes out
+   receiver: seq 14 orders put: done
+-- only ids, for a receiver that has no business with the rest
+   receiver: it was sent {"seq":17,"collection":"orders","op":"del","id":4}
+   receiver: seq 17 orders del: done
+-- a receiver whose address has moved: a redirect is not followed
+ALERT: seq 20: http://127.0.0.1:57550/moved redirects (302), and a signed body is not sent on</pre>
 
 <ul>
-  <li><b>What a receiver checks.</b> <code>X-Signature-256</code> is an
-    HMAC-SHA-256 of the body with the secret the two share; recomputed over
-    the body as received, and compared in constant time, it says the
-    sender holds the secret. <code>Idempotency-Key</code> is the change's
-    <code>seq</code>, its number in this database: a delivery repeated after
-    the relay died between the answer and the commit carries the same one,
-    and a receiver that has seen it answers 200 and does nothing.
-    (<code>seq</code> counts every write of the database, the jobs and the
-    signups among them, so the numbers above are not consecutive.)</li>
-  <li><b>Retry, then give up in a place you will look.</b> A 500 is tried
-    again after a back-off. A 4xx (but a 408 or a 429) is the receiver saying
-    never, and trying again would only hold up every change behind it: the
-    change is kept in <code>dead_letters</code> and the stream goes on. Without
-    that, one poisoned row would stop the webhook for everything after it.</li>
+  <li><b>What is signed is <code>&lt;timestamp&gt;.&lt;body&gt;</code>.</b> The
+    receiver checks the signature in constant time, then that the timestamp is
+    within five minutes of its own clock. A delivery someone captured and sends
+    again an hour later has a good signature and a stale time: 401 above. (The
+    run moves the receiver's clock to show it.)</li>
+  <li><b>It deduplicates on the signed <code>seq</code>, not on a header.</b>
+    <code>seq</code> is the change's number in this database and is inside the
+    body the signature covers. A delivery repeated at once, or after the relay
+    died between the answer and the commit, carries the same <code>seq</code>,
+    and a receiver that has seen it answers 200 and does nothing
+    (<code>seen</code> above). A header outside the signature, an
+    <code>Idempotency-Key</code> for one, is whatever the sender of that request
+    wrote. (<code>seq</code> counts every write of the database, so the numbers
+    are not consecutive, and a run's differ.)</li>
+  <li><b>What the receiver answers decides the stream.</b> 2xx is done. A 500 is
+    tried again after a back-off; after <code>tries</code> of them the relay
+    <i>stops and says so</i>, since a receiver that is down is no reason to put away
+    every change it missed. A 400, 413 or 422 is the receiver refusing this
+    change, which it would refuse again: it goes to <code>dead_letters</code> and
+    the stream goes on, where one poisoned row would otherwise stop the webhook
+    for everything after it. <b>A 401, 403, 404, 405 or 410 stops the relay</b>:
+    the receiver does not trust this sender or has moved, and every change behind
+    would be put away for the same reason. It exits with an <code>ALERT</code>
+    and nothing committed, and a restart sends that change again.</li>
+  <li><b>A redirect is not followed.</b> The body is signed for the address it
+    was sent to, and a 3xx would hand it on to another: the relay stops, as for a
+    401.</li>
+  <li><b>A secret is rotated with both.</b> The receiver learns the new one
+    while the relay signs with the new and the old (two <code>v1=</code> values);
+    once every receiver has the new, the old goes. The run: the receiver
+    rotated before the relay heard (ALERT, stopped), then the relay was given
+    both and the same change went out.</li>
   <li><b>The server remembers the place.</b> The relay was stopped, an order
     written, and a new relay started: it delivered the new order alone. A
     crash between a delivery and the commit repeats that delivery, which is
-    why the key is there.</li>
+    why <code>seq</code> is there. A consumer is made once: a <code>POST</code>
+    to one that exists moves it to the last write on disk.</li>
   <li><b>Everything is seen, whoever wrote it.</b> A change by the backend, by
     a person's own token from a page and by a sweep are the same to a
     consumer, which is the point; and the reason it takes the server's token
@@ -313,9 +573,9 @@ dead_letters [{"seq":20,"collection":"orders","op":"put"}]
     parallel work let the consumer do no work of its own: have it write a
     job per change (a <code>put jobs</code>), and let workers take them.</li>
   <li><b>Already built.</b> <code>python -m fenecdb.relay http://127.0.0.1:8080 --consumer search
-    --to https://indexer.internal/hook</code> does the same from a package
-    (<a href="/docs/microservices">Services and events</a>), and a consumer
-    in Python or Go is a loop of the same shape.</li>
+    --to https://indexer.internal/hook</code> does the plain version of this from a
+    package (<a href="/docs/microservices">Services and events</a>), without the
+    signature and the stop; a consumer in Python or Go is a loop of the same shape.</li>
 </ul>
 
 <h2 id="choose">Choosing</h2>
@@ -338,14 +598,16 @@ dead_letters [{"seq":20,"collection":"orders","op":"put"}]
 
 <ul>
   <li><b>No exactly once.</b> A delivery, a job and a request can each be
-    repeated, and each carries a key so that a repeat does nothing.</li>
+    repeated, and each carries something a repeat is known by.</li>
   <li><b>No order across tenants.</b> The stream is one database's, in the
     order its writes landed.</li>
   <li><b>A buffer, not an archive.</b> The server keeps the stream in a buffer
     of 64 MiB unless told otherwise
     (<code>--replication-buffer</code>); a consumer further behind is answered
-    410 and starts over from a read of the collections
-    (<a href="/docs/microservices#delivery-and-replay">Delivery and replay</a>).</li>
+    410. What that means for one that must see every change is in
+    <a href="/docs/files#deleting">Files</a> (a reconcile, not a read of the
+    collections, for deletions) and
+    <a href="/docs/microservices#delivery-and-replay">Delivery and replay</a>.</li>
   <li><b>No schedule of its own.</b> A cron job, an object's alarm or a
     <code>@ttl</code> is the clock.</li>
 </ul>

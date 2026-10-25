@@ -1,17 +1,39 @@
-# Rules that name a claim's value, for what the policy cannot name as a role.
-# (policy.txt's `for admin` reads the claim `role`; a claim the provider
-# names `cognito:groups` or `https://example.test/role` has no name here.)
+# Rules that name a claim's value, and pin every one of them to the
+# application the database is for. fenec-server checks no `iss` and no `aud`,
+# and a provider's keys sign far more than your tokens: one Auth0 tenant signs
+# every API's and every app's, Google signs every Firebase project's,
+# Cloudflare Access signs every application of a team. A rule that is not
+# pinned is a rule for all of them; a rule that names a claim the token lacks
+# does not apply, so a token with no `aud` meets none of these.
+#
+# A database has one provider, and so one of the sections below; they are
+# together here to be tried against one server.
 
-# Cloudflare Access signs every application of a team with the same keys, so
-# a token for another application would verify: pin the audience, a list.
-notes         read                        where owner = $jwt.sub and '32eafc7626e974616deaf0dc3ba5c0a0eb5f4d2d1e3b8f0a6c1a2e7d9a4b5c6d' in $jwt.aud
+# ---- Auth0: the API's identifier is in aud, as a list. An ID token's aud is
+# the client's id, and another API's token names that API.
+notes         read,write                  where owner = $jwt.sub and 'https://api.example.test' in $jwt.aud
+# `permissions` is a list claim a rule can test (RBAC's "Add Permissions in the
+# Access Token"); its rule is pinned too.
+notes         read                        where 'read:notes' in $jwt.permissions and 'https://api.example.test' in $jwt.aud
+# Staff are rows, and the rule that reads them is pinned like the rest.
+staff         read                        where user = $jwt.sub and 'https://api.example.test' in $jwt.aud
+notes         read                        where $jwt.sub in (get staff select user) and 'https://api.example.test' in $jwt.aud
+profiles      read(name)                  where 'https://api.example.test' in $jwt.aud
+audit         read,insert                 where actor = $jwt.sub and 'https://api.example.test' in $jwt.aud
 
-# Auth0's `permissions` is a list claim, which a rule can test.
-notes         read                        where 'read:notes' in $jwt.permissions
+# ---- Cloudflare Access: aud is a list holding the application's tag.
+notes         read,write                  where owner = $jwt.sub and '32eafc7626e974616deaf0dc3ba5c0a0eb5f4d2d1e3b8f0a6c1a2e7d9a4b5c6d' in $jwt.aud
 
-# Whatever the provider sends: staff are rows, and a rule asks for them.
-staff         read                        where user = $jwt.sub
-notes         read                        where $jwt.sub in (get staff select user)
+# ---- Firebase: aud is the project's id, a text.
+notes         read,write                  where owner = $jwt.sub and $jwt.aud = 'demo-project'
 
-profiles      read(name)
-audit         read,insert                 where actor = $jwt.sub
+# ---- Clerk: azp is the origin the session was started on.
+notes         read,write                  where owner = $jwt.sub and $jwt.azp = 'https://app.example.test'
+
+# ---- Cognito: client_id names the app client of an access token, and an ID
+# token has `token_use: id` and an aud instead; the pool's keys sign both.
+notes         read,write                  where owner = $jwt.sub and $jwt.client_id = '1example23456789' and $jwt.token_use = 'access'
+
+# ---- Supabase Auth: aud is `authenticated` for every project, and so is the
+# role of an anonymous sign-in, which `is_anonymous` tells apart.
+notes         read,write                  where owner = $jwt.sub and $jwt.aud = 'authenticated' and $jwt.is_anonymous = false

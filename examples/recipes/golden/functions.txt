@@ -1,0 +1,49 @@
+== 1. a Cloudflare Worker, under wrangler dev (workerd)
+POST /signup  ada                201 {"ok":true,"replayed":false}
+POST /signup  ada, sent again    201 {"ok":true,"replayed":true}
+POST /signup  ada, a new request 409 {"error":"already signed up"}
+POST /signup  not an address     400 {"error":"a name and an email address"}
+signups [{"email":"ada@example.test"}]  jobs [{"kind":"welcome","owner":null,"attempts":0}]
+with the Worker's token, read signups    403
+with the Worker's token, delete jobs     {"affected":0}
+with the Worker's token, insert a signup {"affected":1}
+
+== 2. a worker of the jobs the signups leave
+a worker took [{"id":1,"payload.email":"ada@example.test"}] and died
+w1: job 2 welcome, attempt 1
+   mail to bo@example.test after N s
+w1: job 3 welcome, attempt 1
+w1: job 3 failed (mailbox refused); again in 0.6 s
+w1: job 3 welcome, attempt 2
+w1: job 3 failed (mailbox refused); again in 1.2 s
+w1: job 3 welcome, attempt 3
+w1: job 3 failed (mailbox refused); 3 attempts, kept as dead
+w1: job 1 welcome, attempt 2
+   mail to ada@example.test after N s
+jobs left [{"id":3,"run_at":null,"attempts":3,"error":"mailbox refused"}]
+
+== 3. a webhook for orders
+   receiver: seq N: answered 500
+relay: seq N try 1 of 3: 500
+   receiver: seq N orders put: done
+   receiver: seq N: answered 400
+relay: seq N refused (400)
+relay: seq N kept in dead_letters
+dead_letters [{"seq":N,"collection":"orders","op":"put","status":400}]
+-- the first delivery, captured, sent again
+   receiver: seq N seen: nothing done
+   replayed at once: 200
+   receiver: rejected: stale
+   replayed an hour later: 401
+-- the relay stopped; an order is written meanwhile; a new relay carries on from the place the server kept
+   receiver: seq N orders put: done
+-- the receiver rotates its secret before the relay has heard
+   receiver: rejected: bad signature
+ALERT: seq N: http://127.0.0.1:PORT/hook answers 401; stopped, nothing committed
+-- the relay is given both secrets for a while, and the same change goes out
+   receiver: seq N orders put: done
+-- only ids, for a receiver that has no business with the rest
+   receiver: it was sent {"seq":N,"collection":"orders","op":"del","id":4}
+   receiver: seq N orders del: done
+-- a receiver whose address has moved: a redirect is not followed
+ALERT: seq N: http://127.0.0.1:PORT/moved redirects (302), and a signed body is not sent on
