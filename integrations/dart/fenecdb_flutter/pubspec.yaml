@@ -1,8 +1,8 @@
 name: fenecdb_flutter
 description: fenecdb in a Flutter app on iOS, Android and macOS -- the fenecdb package with the native library bundled for each platform.
 version: 0.1.11
-homepage: https://github.com/fenecdb/fenec
-repository: https://github.com/fenecdb/fenec/tree/main/integrations/dart/fenecdb_flutter
+homepage: https://github.com/fenecdb/fenecdb
+repository: https://github.com/fenecdb/fenecdb/tree/main/integrations/dart/fenecdb_flutter
 topics: [database, vector, embedded, ffi]
 
 environment:

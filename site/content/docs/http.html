@@ -979,7 +979,7 @@ positions      read           where courier in (get orders select courier where 
 </ul>
 
 <p>A whole product built on these rules is
-<a href="https://github.com/fenecdb/fenec/tree/main/examples/saas">examples/saas</a>:
+<a href="https://github.com/fenecdb/fenecdb/tree/main/examples/saas">examples/saas</a>:
 sign-up and sessions owned by the app, a tenant per organisation behind
 <code>fenec-shard</code>, roles and teams as grants and list claims, live
 boards and search under each person's token, with its threat model and the
@@ -1137,7 +1137,7 @@ orders  update(status, delivered_at, run_at, claim)  where courier = $jwt.sub an
     <code>set</code> of one row over HTTP on loopback took 5.0 µs more
     than the server token's 45 µs under a plain rule, 5.7–5.9 under a
     field list and 6.1–6.8 under a transition
-    (<a href="https://github.com/fenecdb/fenec/tree/main/crates/fenec-http/examples/policy.rs"><code>make
+    (<a href="https://github.com/fenecdb/fenecdb/tree/main/crates/fenec-http/examples/policy.rs"><code>make
     policy-bench</code></a>).</li>
   <li><b><code>append-only</code></b> is a line of its own,
     <code>journal append-only</code>, with no filter and no role. No scoped
@@ -1208,7 +1208,7 @@ messages   read,insert  where room in (get members select room where user = $jwt
     under a rule naming the courier as a claim, every scoped stream
     looking at every write either way. A token with no such rule runs as
     it did (<a
-    href="https://github.com/fenecdb/fenec/tree/main/crates/fenec-http/examples/policy.rs"><code>make
+    href="https://github.com/fenecdb/fenecdb/tree/main/crates/fenec-http/examples/policy.rs"><code>make
     policy-bench</code></a>, <code>ARGS=streams</code>).</li>
   <li><b><code>match</code> scores over the rows the token may read.</b>
     BM25's statistics — how many documents, their mean length, how many

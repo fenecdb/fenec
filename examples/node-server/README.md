@@ -22,7 +22,7 @@ WebAssembly is fetched or loaded; every query runs on the server.
 ## Prerequisites
 
 Node 22 or newer, and `fenec-server`: a [release
-binary](https://github.com/fenecdb/fenec/releases), or
+binary](https://github.com/fenecdb/fenecdb/releases), or
 `cargo build --release -p fenec-server` at the repository's root
 (`target/release/fenec-server`).
 

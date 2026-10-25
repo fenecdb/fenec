@@ -27,7 +27,7 @@ test = [
 [project.urls]
 Homepage = "https://fenecdb.com"
 Documentation = "https://fenecdb.com/docs/integrations"
-Source = "https://github.com/fenecdb/fenec"
+Source = "https://github.com/fenecdb/fenecdb"
 
 [tool.setuptools]
 packages = ["fenecdb"]

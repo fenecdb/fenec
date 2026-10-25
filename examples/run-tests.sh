@@ -179,7 +179,7 @@ run_python() {
 run_go() {
     has go || { missing go "go"; return; }
     w=$(copy go)
-    (cd "$w" && go mod edit -replace "github.com/fenecdb/fenec/integrations/go=$root/integrations/go" && go vet ./...)
+    (cd "$w" && go mod edit -replace "github.com/fenecdb/fenecdb/integrations/go=$root/integrations/go" && go vet ./...)
     serve go
     (cd "$w" && FENEC_URL="$url" FENEC_TOKEN="$token" go run . smoke)
     stop

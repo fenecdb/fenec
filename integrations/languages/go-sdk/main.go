@@ -8,7 +8,7 @@ import (
 	"os"
 	"reflect"
 
-	fenecdb "github.com/fenecdb/fenec/integrations/go"
+	fenecdb "github.com/fenecdb/fenecdb/integrations/go"
 )
 
 type Doc struct {

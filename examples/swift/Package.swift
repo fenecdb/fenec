@@ -13,8 +13,8 @@ let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending
 let fenec: Package.Dependency =
     local
     ? .package(path: root.path)
-    : .package(url: "https://github.com/fenecdb/fenec", from: "0.1.11")
-let fenecPackage = local ? root.lastPathComponent : "fenec"
+    : .package(url: "https://github.com/fenecdb/fenecdb", from: "0.1.11")
+let fenecPackage = local ? root.lastPathComponent : "fenecdb"
 
 let package = Package(
     name: "Notes",

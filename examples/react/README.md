@@ -21,7 +21,7 @@ in the page; one line in `src/db.ts` makes it a replica synced with a
 ## Prerequisites
 
 Node 22 or newer. For the synced line, `fenec-server`: a [release
-binary](https://github.com/fenecdb/fenec/releases), or
+binary](https://github.com/fenecdb/fenecdb/releases), or
 `cargo build --release -p fenec-server` at the repository's root.
 
 ## Run

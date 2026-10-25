@@ -35,7 +35,7 @@ nothing reaches a registry before the notes have had a read.
    and drafts the release with all of them and their checksums. Beside `vX.Y.Z` it pushes `integrations/go/vX.Y.Z` at
    the same commit: a Go module in a subdirectory is fetched by a tag that
    names it, so that tag is the Go SDK's release (`go get
-   github.com/fenecdb/fenec/integrations/go@vX.Y.Z`), and there is no
+   github.com/fenecdb/fenecdb/integrations/go@vX.Y.Z`), and there is no
    registry to publish to.
 4. Read the draft, then publish it: `gh release edit vX.Y.Z --draft=false`.
    `packages.yml` builds the three packages again, installs them where a user
@@ -64,7 +64,7 @@ the .NET SDK is installed.
 | `@fenecdb/cloudflare` on npm | `integrations/cloudflare` | `persist`, `restore`, `checkpoint`: a database kept in a Durable Object's storage |
 | `@fenecdb/langchain` on npm | `integrations/langchain` | `FenecVectorStore` for LangChain.js, over a `Fenec` or a `FenecHttp` |
 | `FenecDb` on NuGet | `integrations/dotnet/FenecDb` | `FenecClient`, the .NET SDK over HTTP; `HttpClient` and `System.Text.Json` alone |
-| `github.com/fenecdb/fenec/integrations/go` | the tag `integrations/go/vX.Y.Z` | package `fenecdb`, the Go SDK over HTTP; the standard library alone |
+| `github.com/fenecdb/fenecdb/integrations/go` | the tag `integrations/go/vX.Y.Z` | package `fenecdb`, the Go SDK over HTTP; the standard library alone |
 | `FenecDB` for SwiftPM | `Package.swift`, `integrations/swift` | the tag, and `FenecFFI.xcframework.zip` on the release: the library embedded in a macOS or iOS app |
 | `com.fenecdb:fenecdb` on Maven Central | `integrations/kotlin/fenecdb` | the Kotlin library for the JVM; kotlinx-coroutines alone, the native library brought by the app |
 | `com.fenecdb:fenecdb-android` on Maven Central | `integrations/kotlin/android` | the AAR: the same library and `libfenec_ffi.so` for arm64-v8a, armeabi-v7a, x86_64 |
@@ -86,8 +86,8 @@ until the organization exists. On PyPI, an API token for the whole account,
 since a token scoped to a project cannot make the project on its first
 upload. Then, pasting each when asked:
 
-    gh secret set NPM_TOKEN -R fenecdb/fenec
-    gh secret set PYPI_API_TOKEN -R fenecdb/fenec
+    gh secret set NPM_TOKEN -R fenecdb/fenecdb
+    gh secret set PYPI_API_TOKEN -R fenecdb/fenecdb
 
 After the first upload the PyPI token can be replaced by one scoped to
 `fenecdb`. A release published before the secrets were set gets its
@@ -97,7 +97,7 @@ packages from a dispatch: `gh workflow run packages.yml -f tag=vX.Y.Z`.
 
 **PyPI.** Signed in as the account that will own `fenecdb`, under
 *Publishing*, add a pending publisher: project `fenecdb`, owner `fenecdb`,
-repository `fenec`, workflow `packages.yml`, environment `pypi`. The first
+repository `fenecdb`, workflow `packages.yml`, environment `pypi`. The first
 published release creates the project.
 
 **npm.** Create the organization `fenecdb`, which is the `@fenecdb` scope. npm
@@ -108,7 +108,7 @@ first version goes out with a token:
    as the repository secret `NPM_TOKEN`.
 2. Publish the release: the four `@fenecdb` packages go out with it.
 3. On npmjs.com, for each of the four, *Settings*, *Trusted publishing*,
-   GitHub Actions: `fenecdb/fenec`, workflow `packages.yml`, environment
+   GitHub Actions: `fenecdb/fenecdb`, workflow `packages.yml`, environment
    `npm`.
 4. Delete the secret and revoke the token. Later releases publish with the
    workflow's identity alone.
@@ -119,7 +119,7 @@ on. Signed in to nuget.org as the account that will own `FenecDb`, under
 *API Keys*, create a key with *Push new packages and package versions* for
 the glob pattern `FenecDb` -- the first push creates the package -- then:
 
-    gh secret set NUGET_API_KEY -R fenecdb/fenec
+    gh secret set NUGET_API_KEY -R fenecdb/fenecdb
 
 A key expires (365 days at most); a new one goes into the same secret. A
 release published before the secret was set gets its package from a
@@ -127,7 +127,14 @@ dispatch: `gh workflow run packages.yml -f tag=vX.Y.Z`.
 
 **Go.** Nothing to set up: the module is fetched from the repository by its
 tag, and `proxy.golang.org` keeps a version once someone has fetched it.
-A tag pushed by mistake is not moved; the next version replaces it.
+A tag pushed by mistake is not moved; the next version replaces it. The
+module path is the repository's name: v0.1.11 and earlier declare
+`github.com/fenecdb/fenec/integrations/go`, from before the repository
+became `fenecdb`, and the first release after them declares
+`github.com/fenecdb/fenecdb/integrations/go`. A version's `go.mod` is what
+`go get` checks the path against, so an app moves to the new path with that
+release, and `examples/go/go.mod` (which `make version` writes) names a
+version of the new path that resolves from then on.
 
 **Swift.** Nothing to set up either: SwiftPM fetches the package by the
 tag and the zip by the URL `Package.swift` names. `swift-binary.yml` opens
@@ -150,10 +157,10 @@ bundle `packages.yml` makes, with no Gradle plugin. Once:
    (`gpg --keyserver keyserver.ubuntu.com --send-keys <id>`), and store the
    private half, armored, and its passphrase:
 
-       gpg --armor --export-secret-keys <id> | gh secret set SIGNING_KEY -R fenecdb/fenec
-       gh secret set SIGNING_PASSWORD -R fenecdb/fenec
-       gh secret set MAVEN_CENTRAL_USERNAME -R fenecdb/fenec
-       gh secret set MAVEN_CENTRAL_PASSWORD -R fenecdb/fenec
+       gpg --armor --export-secret-keys <id> | gh secret set SIGNING_KEY -R fenecdb/fenecdb
+       gh secret set SIGNING_PASSWORD -R fenecdb/fenecdb
+       gh secret set MAVEN_CENTRAL_USERNAME -R fenecdb/fenecdb
+       gh secret set MAVEN_CENTRAL_PASSWORD -R fenecdb/fenecdb
 
 The upload is `publishingType=AUTOMATIC`: the Portal releases the
 deployment once it validates, and a version is there for good.
@@ -166,7 +173,7 @@ that will own `fenecdb` and `fenecdb_flutter` (a verified publisher,
 machine writes `pub-credentials.json` (`~/Library/Application
 Support/dart/` on macOS, `~/.config/dart/` on Linux); then
 
-    gh secret set PUB_CREDENTIALS -R fenecdb/fenec < <that file>
+    gh secret set PUB_CREDENTIALS -R fenecdb/fenecdb < <that file>
 
 The first publish creates both packages. The credentials hold a refresh
 token: logging out of that machine's pub (`dart pub logout`) revokes it,

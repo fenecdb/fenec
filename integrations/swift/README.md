@@ -6,9 +6,15 @@ the browser module share their code and file format with -- on its own, or
 a replica a server keeps in step.
 
 ```swift
-.package(url: "https://github.com/fenecdb/fenec", from: "0.1.7")
-// target: .product(name: "FenecDB", package: "fenec")
+.package(url: "https://github.com/fenecdb/fenecdb", from: "0.1.11")
+// target: .product(name: "FenecDB", package: "fenecdb")
 ```
+
+SwiftPM names a package after the last component of its URL, and the
+repository was `fenecdb/fenec` before it became `fenecdb`. An app that keeps
+the old URL (GitHub redirects it) keeps the package identity `fenec`, so its
+target dependencies say `package: "fenec"`; one that moves to
+`https://github.com/fenecdb/fenecdb` changes them to `package: "fenecdb"`.
 
 ```swift
 import FenecDB

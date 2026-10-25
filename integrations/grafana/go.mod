@@ -1,4 +1,4 @@
-module github.com/fenecdb/fenec/integrations/grafana
+module github.com/fenecdb/fenecdb/integrations/grafana
 
 go 1.26.5
 
@@ -15,7 +15,7 @@ require (
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect
 	github.com/fatih/color v1.19.0 // indirect
-	github.com/fenecdb/fenec/integrations/go v0.0.0
+	github.com/fenecdb/fenecdb/integrations/go v0.0.0
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/goccy/go-json v0.11.2 // indirect
@@ -85,4 +85,4 @@ require (
 	gopkg.in/fsnotify/fsnotify.v1 v1.4.7 // indirect
 )
 
-replace github.com/fenecdb/fenec/integrations/go => ../go
+replace github.com/fenecdb/fenecdb/integrations/go => ../go

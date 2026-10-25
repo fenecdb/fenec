@@ -17,7 +17,7 @@ languages-test` the eight examples (Python, Java, PHP and Ruby from their
 images, the others with the toolchain on the machine), `make react-test`
 runs the hook against a real replica, and CI runs all three
 (`integrations`). The Go and .NET SDKs (`integrations/go`, module
-`github.com/fenecdb/fenec/integrations/go`, package `fenecdb`;
+`github.com/fenecdb/fenecdb/integrations/go`, package `fenecdb`;
 `integrations/dotnet`, NuGet's `FenecDb`, `net8.0`) are the standard
 library alone, the Python client's surface -- a statement and its rows,
 typed rows, writes with their `Fenec-Seq`, `/batch`, an idempotency key,

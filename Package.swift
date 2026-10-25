@@ -3,7 +3,7 @@
 // FenecDB for Swift: fenecdb embedded in a macOS or iOS app, a file on the
 // device. The package lives in integrations/swift; this manifest is at the
 // repository's root because SwiftPM fetches a package by its repository
-// and tag -- `.package(url: "https://github.com/fenecdb/fenec", from: "X.Y.Z")`.
+// and tag -- `.package(url: "https://github.com/fenecdb/fenecdb", from: "X.Y.Z")`.
 //
 // The engine is the native library (crates/fenec-ffi) as an XCFramework.
 // Built here by integrations/swift/build-xcframework.sh, it is taken from
@@ -25,7 +25,7 @@ let ffi: Target =
     ? .binaryTarget(name: "FenecFFI", path: local)
     : .binaryTarget(
         name: "FenecFFI",
-        url: "https://github.com/fenecdb/fenec/releases/download/v\(release)/FenecFFI.xcframework.zip",
+        url: "https://github.com/fenecdb/fenecdb/releases/download/v\(release)/FenecFFI.xcframework.zip",
         checksum: checksum)
 
 let package = Package(

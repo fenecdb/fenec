@@ -16,7 +16,7 @@
     <PackageTags>fenecdb;database;vector;search;hnsw</PackageTags>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <PackageProjectUrl>https://fenecdb.com/docs/languages</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/fenecdb/fenec</RepositoryUrl>
+    <RepositoryUrl>https://github.com/fenecdb/fenecdb</RepositoryUrl>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
   <ItemGroup>
