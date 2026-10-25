@@ -389,7 +389,8 @@ Lighthouse CI on its mobile profile with the throttling applied (slow 4G,
 150 ms round trips) and the CPU of a mid-tier phone: slowed until
 Lighthouse's own benchmark scores 1 000, DevTools' calibrated "mid-tier
 mobile", which took 3.15x on this machine (`scripts/cpu-slowdown.mjs`; the
-shop's README has why a fixed 4x is not used). The median of three runs
+shop's README has why a fixed 4x is not used, and why Chrome's files are
+read in first, `scripts/warm-chrome.mjs`). The median of three runs
 (`npm run lighthouse`), over the demo's data:
 
 | page | perf | a11y | best practices | SEO | FCP | LCP | TBT | CLS | JS (compressed) | page weight |
@@ -613,6 +614,6 @@ src/
   live.ts           the shared live polls
   sim.ts, traffic.ts    invented visitors, and the demo's beacons
   setup.ts, users.ts, tokens.ts, db.ts, time.ts, config.ts
-scripts/            db.sh, setup.ts, rollup.ts, build.ts, ci.sh, lighthouse.sh, cpu-slowdown.mjs, bench-*.ts
+scripts/            db.sh, setup.ts, rollup.ts, build.ts, ci.sh, lighthouse.sh, warm-chrome.mjs, cpu-slowdown.mjs, bench-*.ts
 test/               correctness, security, seo, perf
 ```

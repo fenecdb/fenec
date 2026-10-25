@@ -92,8 +92,22 @@ playground as well (`local.test.mjs`). Before a process's first launch the
 harness reads Chrome's own files through (`warm`): on a fresh GitHub runner
 a cold launch faulted its binary in for 5 to 20 s of the 30 puppeteer waits
 for its endpoint, and once past them every e2e test failed in its hook;
-read first, 457 MB in 2.5 to 13 s, the launch took 0.2 to 1.6. The router
-run's one timeout did not come back in twelve runs at a load of 27 (busy
+read first, 457 MB in 2.5 to 13 s, the launch took 0.2 to 1.6. The shop's
+and Kestrel's Lighthouse steps read Chrome so too
+(`examples/{shop,analytics}/scripts/warm-chrome.mjs`, run first by
+`lighthouse.sh`): Lighthouse's chrome-launcher waits 25 s (50 polls of 500
+ms) for Chrome's endpoint, and the shop's job once failed in its first
+launch of Chrome, 25.4 s after its last test passed, `waiting for dynamic
+debugging port in chrome-err.log` with Chrome still running. The log holds
+no more, so GitHub's disk is the cause that fits, not one proved. In a
+Debian container of three cores with its page cache dropped and its reads
+of the disk held to 80 a second (a cgroup's `io.max`, which Chrome's page
+faults of some 77 KB each feel and a sequential read of mebibytes hardly
+does) that launch failed with that error after 27.8 s in two runs, took
+16.0 s at 150 a second and 7.7 at 300 (1.0 unthrottled); reading Chromium
+first took 4.7, 2.5 and 1.2 s and the launch after it 5.6, 3.0 and 1.5
+(the libraries Chrome links from outside its directory are not read). The
+router run's one timeout did not come back in twelve runs at a load of 27 (busy
 loops on every core, three suites at once); a run filtered by name charges
 its first test with the `before` hook's 100 000-row seed, about 10 s, which
 is the hook's and not the router's.
