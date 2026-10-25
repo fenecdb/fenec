@@ -212,7 +212,8 @@ get coupons where code = $1 and uses &lt; max_uses limit 1 require 1 else 'coupo
     data.</li>
   <li><b>Refused, never cut:</b> a parameter (<code>else $1</code>), an empty
     reason, one longer than 200 bytes of UTF-8 (<a href="limits.html">Limits</a>),
-    and anything not in quotes. <code>else</code> with no
+    a backtick, which the refusal quotes its statement with, and anything
+    not in quotes. <code>else</code> with no
     <code>require</code> before it is still an unknown command.</li>
   <li><b>The error leads with the reason</b>, then the count in
     parentheses: <code>unmet: insufficient funds (`set accounts` wrote 0

@@ -127,7 +127,8 @@ statement, the caller -- must not choose what refused, and it is parsed
 with the text, so a statement the parse cache holds holds its reason.
 Empty is refused, and so is one past `MAX_REASON`, 200 bytes: a sentence
 an app shows or maps to one, which goes out in every 412, synced refusal
-and shell line, refused rather than cut as every limit is. `require 1
+and shell line, refused rather than cut as every limit is. So is a
+backtick, which the refusal quotes its statement with (below). `require 1
 else` was "unknown command `else`" before, so no text that parsed reads
 otherwise; SQL has no such clause and no spelling of it, and its
 statements' FenecQL clauses take it (`update ... where ... require 1 else
@@ -138,10 +139,12 @@ nothing, and an `Option` of it made every `require` 8 bytes more to move,
 
 The reason travels in the refusal's message, never beside it: `unmet`
 writes "insufficient funds (`set accounts` wrote 0 rows, and requires 1)"
-and `Error::reason` reads it back as the message up to the last `` (` ``,
-which only the count's words open -- a verb, a collection's name, which
-holds no space, parenthesis or backtick, and numbers -- whatever the
-reason holds. Every consumer that shows a message shows the reason with
+and `Error::reason` reads it back as the message up to the first `` (` ``,
+which the count's words open and the reason, holding no backtick, never
+holds. The first, not the last: a quoted collection's name may hold one
+(`set "x (`y" ...`), and the last read that refusal's reason as "my reason
+(`set x"; a message with no reason ends in the count's digits, never in
+`)`. Every consumer that shows a message shows the reason with
 no change; those with a structure add it: the 412's body beside `error`
 (`error_response`) and a stopped `/batch`'s beside `at` (`api::Stop`,
 `render_batch_stop`, on the write, read and pinned paths alike), the
@@ -150,22 +153,28 @@ the sync's refusal -- the native core's `refused` action and `FenecSync`'s
 `FenecError.reason`, each read from the body, the write put back as
 before; `integrations/sync-scenarios.json` holds both runners to it, and to
 a replica that finds the count unmet itself, saying the reason there with
-nothing sent. A scoped token is told it as any caller is (`access::told`
-passes it): the words are the statement's, which the token sent, and name
-nothing of a row. A second `String` in `Unmet` took the error, and every
-`Result` of the crate no larger, from 32 bytes to 48; a `u16` of the
+nothing sent. A query across tenants names each failed tenant's reason
+beside its words (fenec-shard's `fanout::said`), and an MCP tool's refusal
+beside its text, as the 412 gives it. A scoped token is told it as any
+caller is (`access::told` passes it): the words are the statement's, which
+the token sent, and name nothing of a row. A second `String` in `Unmet`
+took the error, and every `Result` of the crate no larger, from 32 bytes
+to 48; a `u16` of the
 reason's length kept 32, but rustc laid the variant out by its `String`'s
 niche at another offset than the other eleven variants' `String`, and the
 error's drop, `Clone` and `Display` each branched on it: 1.3 KB of the
-module, 0.5 KB brotli. Finding the last `` (` `` with `rfind` took the
-string searcher into the module, 7.8 KB; a byte window does it in 0.2.
+module, 0.5 KB brotli. Finding the `` (` `` with `rfind` took the string
+searcher into the module, 7.8 KB; a byte window does it in 0.2.
 
 Each builder takes it beside the count -- `{ require: 1, reason }` on a
 write, `.require(1, { reason })` on a read, `reason` in the six others'
 own forms -- and writes it into the text, a quote doubled and a backslash
 escaped, held to the golden file with its refusals (`a require's reason is
-a text of 1 to 200 bytes`, a reason with no count); every SDK's error has
-`reason`. Named `reason`, not `else`: a keyword in six of the seven
+a text of 1 to 200 bytes`, `a require's reason holds no backtick`, a reason
+with no count), its bytes counted as UTF-8 sends them: Python refuses a
+lone surrogate and Go text that is not UTF-8, which neither would send as
+written; every SDK's error has `reason`. Named `reason`, not `else`: a
+keyword in six of the seven
 languages, and the name the answer gives it. The shell needs no
 `Parser::cut` mark: the parser reads `else` straight after the count, so
 no reading at the text's end is one it backtracks over, and an `else` on
@@ -173,7 +182,7 @@ the next line goes on with a write -- a write waits for its next line --
 as the corpus' lines hold (`a_statement_written_over_lines_reads_as_one`);
 a read typed whole on one line still answers at Enter, as every read
 does. The highlighter takes `require` and `else` as keywords. The module
-grew 1 516 bytes, 0.6 KB brotli -- the clause's parse, the reason's clone
+grew 1 761 bytes, 0.6 KB brotli -- the clause's parse, the reason's clone
 and drop, the refusals' words.
 
 ## Upserts

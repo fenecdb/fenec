@@ -1050,11 +1050,14 @@ class Query private constructor(private val s: State) {
     // parameter, as the count is not: it is the statement's own words,
     // which a caller tells one refusal from another by. 1 to 200 bytes of
     // UTF-8, as the parser holds it: bytes, not chars, so "ş" counts two.
+    // No backtick: the refusal quotes its statement with them, and the
+    // reason is read back as its words up to the first "(`".
     private fun reasonClause(reason: String?): String {
         if (reason == null) return ""
         if (reason.isEmpty() || reason.toByteArray(Charsets.UTF_8).size > 200) {
             throw refuse("a require's reason is a text of 1 to 200 bytes")
         }
+        if ('`' in reason) throw refuse("a require's reason holds no backtick")
         return " else '" + reason.replace("\\", "\\\\").replace("'", "''") + "'"
     }
 

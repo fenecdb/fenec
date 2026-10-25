@@ -1170,12 +1170,15 @@ public sealed class Query
     // " else '<reason>'" for a require's reason: written into the text, a quote doubled and a backslash escaped,
     // as FenecQL takes it -- never a parameter, as the count is not: it is the statement's own words, by which a
     // caller tells one refusal from another. 1 to 200 bytes of UTF-8, as the parser holds it: bytes, not chars,
-    // so "ş" counts 2.
+    // so "ş" counts 2. No backtick: the refusal quotes its statement with them, and the reason is read back as
+    // its words up to the first "(`".
     static string ReasonClause(string? reason)
     {
         if (reason is null) return "";
         if (reason.Length == 0 || Encoding.UTF8.GetByteCount(reason) > 200)
             throw Builder.Refuse("a require's reason is a text of 1 to 200 bytes");
+        if (reason.Contains('`'))
+            throw Builder.Refuse("a require's reason holds no backtick");
         return $" else '{reason.Replace("\\", "\\\\").Replace("'", "''")}'";
     }
 

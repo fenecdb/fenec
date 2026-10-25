@@ -1544,12 +1544,21 @@ def _require_clause(n: Any, reason: Any = None) -> str:
 # quote doubled and a backslash escaped, as FenecQL takes it -- never a
 # parameter, as the count is not: it is the statement's own words, by which
 # a caller tells one refusal from another. 1 to 200 bytes of UTF-8, as the
-# parser holds it: bytes, not characters, so "ş" counts 2.
+# parser holds it: bytes, not characters, so "ş" counts 2; a lone surrogate
+# is no text UTF-8 can send, refused as one rather than a UnicodeEncodeError.
+# No backtick: the refusal quotes its statement with them, and the reason is
+# read back as its words up to the first "(`".
 def _reason_clause(reason: Any) -> str:
     if reason is None:
         return ""
-    if not isinstance(reason, str) or not reason or len(reason.encode("utf-8")) > 200:
+    try:
+        size = len(reason.encode("utf-8")) if isinstance(reason, str) else 0
+    except UnicodeEncodeError:
+        size = 0
+    if not 1 <= size <= 200:
         raise _err("a require's reason is a text of 1 to 200 bytes")
+    if "`" in reason:
+        raise _err("a require's reason holds no backtick")
     return " else '" + reason.replace("\\", "\\\\").replace("'", "''") + "'"
 
 

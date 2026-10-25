@@ -71,11 +71,13 @@ impl Error {
     /// The reason a statement's `require <n> else '<reason>'` gave, where
     /// that refused it: the statement's own words, which a caller tells one
     /// refusal from another by. The engine writes the count's words after
-    /// it in parentheses -- a verb and a collection in backticks, then
-    /// numbers -- and a name holds no space, parenthesis or backtick, so
-    /// the last `` (` `` opens them, whatever the reason holds. Found by
-    /// its bytes: `rfind` of a pattern of several took the string searcher
-    /// into the browser module, 7.8 KB.
+    /// it in parentheses, a verb and a collection in backticks, and the
+    /// parser refuses a backtick in a reason, so the first `` (` `` opens
+    /// them. The first, never the last: a quoted collection's name may hold
+    /// one (`set "x (`y" ...`), and the last read the reason as "my reason
+    /// (`set x". A message with no reason ends in the count's digits, never
+    /// in `)`. Found by its bytes: `rfind` of a pattern of several took the
+    /// string searcher into the browser module, 7.8 KB.
     pub fn reason(&self) -> Option<&str> {
         let Error::Unmet(m) = self else {
             return None;
@@ -83,7 +85,7 @@ impl Error {
         if !m.ends_with(')') {
             return None;
         }
-        match m.as_bytes().windows(3).rposition(|w| w == b" (`") {
+        match m.as_bytes().windows(3).position(|w| w == b" (`") {
             Some(0) | None => None,
             Some(at) => m.get(..at),
         }
@@ -124,15 +126,16 @@ mod tests {
         let count = "(`get a` answered 0 rows, and requires 1)";
         let said = |r: &str| Error::Unmet(format!("{r} {count}"));
         assert_eq!(said("no such account").reason(), Some("no such account"));
-        // Whatever the reason holds, parentheses and backticks among it.
-        for r in [
-            "sold out (for now)",
-            "see (`docs`)",
-            "a ) (` b",
-            "ödül (`x`) yok",
-        ] {
+        // Parentheses in the reason; no backtick, which the parser refuses.
+        for r in ["sold out (for now)", "a ) ( b", "ödül (x) yok"] {
             assert_eq!(said(r).reason(), Some(r), "{r}");
         }
+        // A quoted collection's name holding the count's opening: the
+        // reason ends at the first, not the last.
+        let named = Error::Unmet("my reason (`set x (`y` wrote 0 rows, and requires 1)".into());
+        assert_eq!(named.reason(), Some("my reason"));
+        let none = Error::Unmet("`set x (`y)` wrote 0 rows, and requires 1".into());
+        assert_eq!(none.reason(), None);
         // A count with no reason before it, and every other error, say none.
         assert_eq!(
             Error::Unmet(count[1..count.len() - 1].into()).reason(),

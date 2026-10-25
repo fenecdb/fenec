@@ -238,6 +238,21 @@ fn a_require_s_reason_comes_back_in_the_412_beside_at() {
     let (status, body) = c.query("del accounts where name = \"nobody\" require 1");
     assert_eq!(status, 412, "{body}");
     assert!(!body.contains("reason"), "{body}");
+    // A quoted collection's name holding the count's opening, `` (` ``:
+    // the reason is the message up to the first, where the last answered
+    // "my reason (`set x".
+    let (status, body) = c.query("create collection \"x (`y\" (a int)");
+    assert_eq!(status, 200, "{body}");
+    let set = "set \"x (`y\" {a: 1} where a = 5 require 1 else 'my reason'";
+    let (status, body) = c.query(set);
+    assert_eq!(status, 412, "{body}");
+    assert!(body.ends_with(r#","reason":"my reason"}"#), "{body}");
+    let (status, body) = c.post(
+        "/batch",
+        &[line("get accounts limit 1", ""), line(set, "")].join("\n"),
+    );
+    assert_eq!(status, 412, "{body}");
+    assert!(body.ends_with(r#""at":1,"reason":"my reason"}"#), "{body}");
 }
 
 /// `get ... require <n>` guards a read in a `/batch`: a balance that is no

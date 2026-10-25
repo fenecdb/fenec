@@ -2201,13 +2201,20 @@ func requireClause(o opts) (string, error) {
 // quote doubled and a backslash escaped, as FenecQL takes it -- never a
 // parameter, as the count is not: it is the statement's own words, by which
 // a caller tells one refusal from another. 1 to 200 bytes of UTF-8, as the
-// parser holds it: len counts bytes, so "ş" counts 2.
+// parser holds it: len counts bytes, so "ş" counts 2. A string that is not
+// UTF-8 is refused: encoding/json would send each bad byte as U+FFFD, three
+// bytes, so its length is not the text's. No backtick: the refusal quotes
+// its statement with them, and the reason is read back as its words up to
+// the first "(`".
 func reasonClause(reason *string) (string, error) {
 	if reason == nil {
 		return "", nil
 	}
-	if *reason == "" || len(*reason) > 200 {
+	if *reason == "" || len(*reason) > 200 || !utf8.ValidString(*reason) {
 		return "", refuse("a require's reason is a text of 1 to 200 bytes")
+	}
+	if strings.Contains(*reason, "`") {
+		return "", refuse("a require's reason holds no backtick")
 	}
 	escaped := strings.ReplaceAll(strings.ReplaceAll(*reason, `\`, `\\`), "'", "''")
 	return " else '" + escaped + "'", nil

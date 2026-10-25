@@ -1279,11 +1279,16 @@ public struct Query: Sendable {
     // UTF-8, as the parser holds it: bytes, not characters, so "ş" counts
     // two. Escaped scalar by scalar, not by Character: a quote followed by
     // a combining mark is one Character to Swift, which a search for "'"
-    // passes over, and the lexer would end the text at it.
+    // passes over, and the lexer would end the text at it. No backtick,
+    // scalar by scalar too: the refusal quotes its statement with them, and
+    // the reason is read back as its words up to the first "(`".
     private static func reasonClause(_ reason: String?) throws -> String {
         guard let reason else { return "" }
         if reason.isEmpty || reason.utf8.count > 200 {
             throw FenecError.builder("a require's reason is a text of 1 to 200 bytes")
+        }
+        if reason.unicodeScalars.contains("`") {
+            throw FenecError.builder("a require's reason holds no backtick")
         }
         var escaped = String.UnicodeScalarView()
         for u in reason.unicodeScalars {

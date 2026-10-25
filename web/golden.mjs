@@ -525,6 +525,17 @@ c('rows sends require with its reason', ['from', 'coupons'], ['where', 'code', '
 c('a get reason goes before a lookup', ['from', 'orders'], ['where', 'id', 3], ['require', 1, { reason: 'no such order' }], ['lookup', 'lines', { on: 'order_id', limit: 5 }], Q);
 c('a later require takes its own reason or none', docs, ['require', 1, { reason: 'one' }], ['require', 2], Q);
 c('a get reason past 200 bytes is refused', docs, ['require', 1, { reason: 'x'.repeat(201) }], Q);
+// A reason is written as given but its quote and backslash: a double quote,
+// a line end and a character of four bytes go in as they are -- 200 bytes
+// of four-byte characters are 50 of them, 100 UTF-16 units. A backtick is
+// refused: the refusal quotes its statement with them, and the reason is
+// read back as its words up to the first "(`".
+c('a reason keeps its double quote', docs, ['where', 'id', 1], ['toDelete', { require: 1, reason: 'say "no"' }]);
+c('a reason runs over lines', docs, ['where', 'id', 1], ['toDelete', { require: 1, reason: 'one\ntwo' }]);
+c('a reason of characters of four bytes', docs, ['where', 'id', 1], ['toDelete', { require: 1, reason: '🦊'.repeat(50) }]);
+c('a reason of characters of four bytes past 200 is refused', docs, ['where', 'id', 1], ['toDelete', { require: 1, reason: `${'🦊'.repeat(50)}x` }]);
+c('a reason holds no backtick', docs, ['where', 'id', 1], ['toDelete', { require: 1, reason: 'see `docs`' }]);
+c('a get reason holds no backtick', docs, ['require', 1, { reason: 'a (` b' }], Q);
 
 // `order` and `limit` pick the rows an update or a delete writes, and
 // `{ returning }` answers them: a job queue's claim, ack and pop.

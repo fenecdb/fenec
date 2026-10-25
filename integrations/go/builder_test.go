@@ -749,6 +749,21 @@ func TestBuilderIsImmutable(t *testing.T) {
 	}
 }
 
+// A reason that is not UTF-8 is refused: encoding/json would send each bad
+// byte as U+FFFD, three bytes, so its length is not the text's.
+func TestAReasonNotUTF8IsRefused(t *testing.T) {
+	for _, reason := range []string{"\xff", "a\xc3b", "\xed\xa0\x80"} {
+		_, _, err := fenecdb.From("t").Where("id", "=", 1).ToDelete(fenecdb.Require(1), fenecdb.Reason(reason))
+		if err == nil || !strings.Contains(err.Error(), "a text of 1 to 200 bytes") {
+			t.Fatalf("%q: %v", reason, err)
+		}
+		_, _, err = fenecdb.From("t").Require(1, fenecdb.Reason(reason)).ToFenecQL()
+		if err == nil || !strings.Contains(err.Error(), "a text of 1 to 200 bytes") {
+			t.Fatalf("%q read: %v", reason, err)
+		}
+	}
+}
+
 func TestBuilderTakesMapsAndStructs(t *testing.T) {
 	type note struct {
 		Title string    `json:"title"`

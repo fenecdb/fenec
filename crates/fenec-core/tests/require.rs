@@ -506,6 +506,16 @@ fn a_reason_is_a_text_of_the_statement() {
     assert!(e.contains("at most 200 bytes, not 201"), "{e}");
     let e = refused(&format!("get a require 1 else '{}x'", "ş".repeat(100)));
     assert!(e.contains("at most 200 bytes, not 201"), "{e}");
+    // A backtick, which the refusal quotes its statement with: the reason
+    // is read back as the message up to the first `` (` ``.
+    for sql in [
+        "get a require 1 else 'see (`docs`)'",
+        "set a {n: 1} where id = 1 require 1 else 'a ) (` b'",
+        "del a where id = 1 require 1 else \"`\"",
+    ] {
+        let e = refused(sql);
+        assert!(e.contains("reason holds no backtick"), "{sql}: {e}");
+    }
     for (sql, found) in [
         ("del a where id = 1 require 1 else", "end of input"),
         ("del a where id = 1 require 1 else 5", "5"),
@@ -542,17 +552,17 @@ fn an_unmet_require_says_its_reason() {
     // One without a reason says none.
     let e = run(&mut db, "del accounts where name = \"nobody\" require 1").unwrap_err();
     assert_eq!(e.reason(), None);
-    // A `get`'s, alone, whatever its reason holds.
+    // A `get`'s, alone, parentheses and all.
     let e = db
         .query(
-            &parse("get accounts where name = \"nobody\" limit 1 require 1 else 'no (`such`) one'"),
+            &parse("get accounts where name = \"nobody\" limit 1 require 1 else 'no (such) one'"),
             &[],
         )
         .unwrap_err();
-    assert_eq!(e.reason(), Some("no (`such`) one"));
+    assert_eq!(e.reason(), Some("no (such) one"));
     assert_eq!(
         e,
-        Error::Unmet("no (`such`) one (`get accounts` answered 0 rows, and requires 1)".into())
+        Error::Unmet("no (such) one (`get accounts` answered 0 rows, and requires 1)".into())
     );
     // The transfer, each guard saying why: the block stops at the one that
     // failed, says its reason, and nothing of it lands.
@@ -578,4 +588,18 @@ fn an_unmet_require_says_its_reason() {
     assert_eq!(int(one(&db, "get accounts select sum(balance)")), 200);
     assert_eq!(int(one(&db, "get journal count")), 0);
     assert!(transfer(&mut db, &stmts, "a0", "a1", 10, 1).is_ok());
+    // A quoted collection's name holding the count's opening, `` (` ``:
+    // the reason is the message up to the first, never the last, which
+    // read it as "my reason (`set x".
+    run(&mut db, "create collection \"x (`y\" (a int)").unwrap();
+    for sql in [
+        "set \"x (`y\" {a: 1} where a = 5 require 1 else 'my reason'",
+        "del \"x (`y\" where a = 5 require 1 else 'my reason'",
+        "select a from \"x (`y\" where a = 5 require 1 else 'my reason'",
+    ] {
+        let e = run(&mut db, sql).unwrap_err();
+        assert_eq!(e.reason(), Some("my reason"), "{sql}: {e}");
+    }
+    let e = run(&mut db, "del \"x (`y\" where a = 5 require 1").unwrap_err();
+    assert_eq!(e.reason(), None, "{e}");
 }

@@ -109,6 +109,8 @@ const REASON: &str = "`else` after `require <n>` takes its reason in quotes: \
                       `require 1 else 'no such account'`";
 const REASON_PARAM: &str = "a `require`'s reason is written in the statement, never a parameter, \
                             as its count is: `require 1 else 'no such account'`";
+const REASON_TICK: &str = "a `require`'s reason holds no backtick, which its refusal quotes the \
+                           statement with: `require 1 else 'no such account'`";
 
 /// The words a clause of a `get` or a join begins with, which no alias SQL
 /// writes without `as` is.
@@ -2199,6 +2201,14 @@ impl Parser {
                 "a `require`'s reason is at most {MAX_REASON} bytes, not {}",
                 reason.len()
             ));
+        }
+        // The refusal quotes its statement with backticks after the reason,
+        // and `Error::reason` reads the reason back as the message up to the
+        // first `` (` ``: one in the reason would end it there. A quoted
+        // collection name may hold one, so the count's words cannot be
+        // where the reason's end is looked for.
+        if reason.bytes().any(|b| b == b'`') {
+            return self.err(REASON_TICK);
         }
         self.next();
         Ok(Some(Require {

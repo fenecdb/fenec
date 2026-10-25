@@ -1543,13 +1543,15 @@ function requireClause(opts) {
 // quote doubled and a backslash escaped, as FenecQL takes it -- never a
 // parameter, as the count is not: it is the statement's own words, which a
 // caller tells one refusal from another by. 1 to 200 bytes of UTF-8, as the
-// parser holds it.
+// parser holds it, and no backtick: the refusal quotes its statement with
+// them, and the reason is read back as its words up to the first "(`".
 const encoder = new TextEncoder();
 function reasonClause(reason) {
   if (reason === undefined || reason === null) return '';
   if (typeof reason !== 'string' || reason === '' || encoder.encode(reason).length > 200) {
     throw new FenecError("a require's reason is a text of 1 to 200 bytes");
   }
+  if (reason.includes('`')) throw new FenecError("a require's reason holds no backtick");
   return ` else '${reason.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`;
 }
 

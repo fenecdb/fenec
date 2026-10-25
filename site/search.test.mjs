@@ -141,9 +141,13 @@ test('a question the words miss finds its page by its meaning', () => {
     // keeping, and the archive's object storage and sealing and the
     // half-precision vectors speak of keeping data too. 3rd while 128 of
     // them had no vector. 5th since a `require`'s reason went into eleven
-    // pages (2026-10-26): docs/mobile#connect, the words' last hit, 41st,
-    // fell off their list as the new text moved BM25's weights -- no
-    // vector changed -- and docs/mobile#file, 5th, is the page's first.
+    // pages (2026-10-26): "telefonda" matches only through its prefix
+    // `tel` (tell, tells, telling), docs/mobile#connect's one hit "tell",
+    // 40th of the words' list (DEPTH 40) before and 45th now -- the new
+    // text's "tell" and "tells" lowered the prefix's IDF, and the section
+    // grew from 461 words to 489 -- so the words no longer add to its
+    // meaning's rank, and docs/mobile#file, 5th, is the page's first. No
+    // vector changed. Back to 4 with the prefix's scoring fixed.
     ['telefonda veri saklamak', 'docs/mobile', 5],
     ['dosyanın büyümesini durdurmak', 'docs/server#compaction', 3],
   ]) {
