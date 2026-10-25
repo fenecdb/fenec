@@ -140,7 +140,7 @@ tenants, and which ones are open depends on who asked last.</p>
 layer</a>, <code>FenecHttp.live</code>, the studio served by a node — reaches
 its tenants through the router once the router has
 <code>--http-cors &lt;origin&gt;</code>, read as <code>fenec-server</code>
-reads it (<a href="/docs/http#security">Security</a>): <code>*</code> or one
+reads it (<a href="/docs/http-access#security">Security</a>): <code>*</code> or one
 origin. The router answers a browser's preflight itself, before it looks the
 tenant up, and puts the CORS headers on every answer it gives. Its own — an
 unknown tenant's <code>404</code>, a standby's <code>503</code>, an
@@ -336,7 +336,7 @@ own <code>--http-token</code> and <code>--admin-token</code> are not bound.
 The router forwards <code>Authorization</code> as it came and holds no keys,
 so the node is what enforces it, behind the router or reached directly.
 What a scoped token writes to a tenant is checked against its rules as on a
-single file (<a href="/docs/http#scoped-access">Scoped access</a>).</p>
+single file (<a href="/docs/http-access#scoped-access">Scoped access</a>).</p>
 
 <p>Every token is also read from the environment, which keeps it off a
 command line every user of the machine reads with <code>ps</code>: a node's

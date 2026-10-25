@@ -454,7 +454,7 @@ since, and say how.
    that runs it -- a `/batch` again for each line, a write's `WITH CHECK`
    and a row's fields by its list, a scoped stream again whenever that
    collection is written, its rows entering and leaving as the answer
-   moves (http.html, Rules that read another collection). `positions read
+   moves (http-access.html, Rules that read another collection). `positions read
    where courier in (get orders select courier where customer = $jwt.sub
    and (status = "assigned" or status = "picked"))` is the rule, and
    Plover keeps `courier_loc` all the same: the beat writes the order

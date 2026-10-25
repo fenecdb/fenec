@@ -477,7 +477,7 @@ for (;;) {
     a claim may make of a job — <code>where run_at &lt;= now() and
     new.owner = $jwt.sub and new.attempts = attempts + 1</code>, so no
     claim is made for another worker or wipes the count a dead letter
-    keeps (<a href="/docs/http#scoped-access">Scoped access</a>).</li>
+    keeps (<a href="/docs/http-access#scoped-access">Scoped access</a>).</li>
   <li><b>Not on a sync replica.</b> A replica would pick its own rows and
     answer them, and the server its own: a claim there is refused, and goes
     to the server itself.</li>

@@ -216,7 +216,7 @@ answered. One that landed while the lease ran and is answered after it
 lapsed — its process stopped or starved between the two, its machine
 suspended, or its fsync or its wait for the replicas' streams outlasting
 the lease — is answered <code>500</code> with <code>"outcome":
-"unknown"</code> (<a href="http.html#statuses">statuses</a>): it is in the
+"unknown"</code> (<a href="http-reference.html#statuses">statuses</a>): it is in the
 node's file, and its tenant may have been failed over without it or may
 still be on the node with it, which the node cannot know. Sent with an
 <code>Idempotency-Key</code>, send it again with the same key: the node

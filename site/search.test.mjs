@@ -49,6 +49,12 @@ test('the index holds every page', () => {
     'sharding-read-replicas', 'sharding-reference', 'sharding-design']) {
     assert.ok(pages.has(`docs/${p}`), `no section of docs/${p}`);
   }
+  // docs/benchmarks and docs/http were a page each: an overview, or the way
+  // in, and the pages their sections went to.
+  for (const p of ['benchmarks-ycsb', 'benchmarks-requests', 'benchmarks-text', 'benchmarks-vector',
+    'benchmarks-size', 'http', 'http-reference', 'http-access']) {
+    assert.ok(pages.has(`docs/${p}`), `no section of docs/${p}`);
+  }
 });
 
 test('a known query finds its page first', () => {

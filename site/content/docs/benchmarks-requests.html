@@ -1,0 +1,314 @@
+<!--
+title: Concurrency and request benchmarks — fenecdb
+description: Many writers and the readers beside them against SQLite, what one request to fenec-server costs and where its time goes, and what loading rows costs against PostgreSQL with pgvector.
+-->
+
+<h1>Concurrency and request benchmarks</h1>
+<p class="kicker">Writers and readers at once, what one request to
+<code>fenec-server</code> costs and where its time goes, and what loading rows
+costs.</p>
+
+<h2 id="concurrency">Writers and readers at once</h2>
+
+<p>fenecdb and SQLite both allow one writer at a time. This measures what
+that costs when many want to write, and how fast readers go meanwhile.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">fenecdb</th><th class="n">SQLite</th></tr></thead>
+<tbody>
+<tr><td>durable writes/s, 1 / 4 / 16 writers</td><td class="n">252 / 487 / <b>516</b></td><td class="n">248 / 248 / 258</td></tr>
+<tr><td>writes/s without an fsync, 1 / 4 / 16 writers</td><td class="n"><b>1 497 k</b> / 821 k / 611 k</td><td class="n">128 k / 128 k / 126 k</td></tr>
+<tr><td>reads/s from 4 threads, alone</td><td class="n"><b>7 061 k</b>, p99 0.8 µs</td><td class="n">1 111 k, p99 16.5 µs</td></tr>
+<tr><td>… beside 4 writers</td><td class="n"><b>701 k</b>, p99 75 µs</td><td class="n">344 k, p99 79 µs</td></tr>
+<tr><td>… beside blocks of 1 000 writes</td><td class="n"><b>2 010 k</b>, p99 2.5 µs, the longest 0.5–1.2 ms</td><td class="n">630 k, p99 59 µs, the longest 0.4–1.9 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+<ul>
+  <li><b>Durable writes scale with the writers.</b> Sixteen writers share
+    their disk syncs; SQLite's stay flat.</li>
+  <li><b>A block of writes holds the readers only while it lands.</b> Its
+    rows are built and encoded beside them first, and its buffer is written
+    after the lock is let go.</li>
+  <li><b>A long read does not hold the writers.</b> It reads what it pinned
+    with no lock held, so a write waits milliseconds beside it, not the
+    read's whole length.</li>
+</ul>
+
+<p>Writers beside long reads: four threads each putting a row every half a
+millisecond into a million events, two reading one by id as often, and a long
+read every second — the longest any write waited, under the lock as before
+and pinned, over two runs.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">the read</th><th class="n">under the lock</th><th class="n">pinned</th></tr></thead>
+<tbody>
+<tr><td>a read-only batch of three aggregates</td><td class="n">151–158 ms</td><td class="n">183–389 ms</td><td class="n"><b>4.4–5.2 ms</b></td></tr>
+<tr><td>an aggregate of 50 000 groups</td><td class="n">0.66–0.75 s</td><td class="n">800–854 ms</td><td class="n"><b>2.5–9.0 ms</b></td></tr>
+<tr><td>a full scan</td><td class="n">61–65 ms</td><td class="n">118–119 ms</td><td class="n"><b>2.8–10.8 ms</b></td></tr>
+</tbody>
+</table>
+</div>
+
+<details class="deep"><summary>Method and details</summary>
+<p>fenecdb and SQLite both take one writer at a time. What that costs when
+many want to write, and what readers wait meanwhile, measured in one process:
+fenecdb's threads share one database behind a lock, as <code>fenec-server</code>
+does; SQLite's hold a connection each, WAL, with a 30 s busy timeout. A row a
+write, a row by id a read, one run on an M1 after idle minutes. Durable is an fsync
+per commit, <code>F_FULLFSYNC</code> for both (Rust's <code>sync_data</code>
+on macOS; <code>PRAGMA fullfsync</code> for SQLite, <code>synchronous=FULL</code>);
+without one, fenecdb's writes stay in its buffer and SQLite's reach the
+operating system (<code>synchronous=NORMAL</code>).</p>
+
+<pre data-lang="bash">make concurrency-bench
+</pre>
+
+<p><b>Durable writes scale with the writers.</b> fenecdb's fsync runs after
+its lock is released, and a write an earlier fsync already covered waits for
+none, so sixteen writers share their fsyncs; SQLite syncs a commit while it
+holds the write lock. Without an fsync, one fenecdb writer is twelve times
+SQLite's, and handing the lock between sixteen costs more than half of that. A
+write, or a <code>/batch</code> of them, holds the
+lock only while it runs — microseconds for a row — and there is no
+transaction held open across requests to keep the readers or the other
+writers waiting. A block of 1 000 writes — a <code>/batch</code>'s — held
+it while it ran, about half a millisecond, and readers waited for it, where
+SQLite's WAL reads the last commit meanwhile: 213 k reads a second, the
+longest wait 4.8 ms. Most of that half millisecond had nothing to do with the
+database as the lock holds it — each row built from the statement and its
+parameters, its values made the fields' types, encoded, and freed once
+written — and a block's rows are now built and encoded under the shared
+lock, beside the readers, the write lock held only to land them, about
+0.15 ms; whatever the database decides, the ids, a value already held, the
+indexes, is decided under the lock as before, and the file is the same byte
+for byte. A REST insert of 1 000 rows read its body under the write lock as
+well: a read beside them waited 0.4 ms at the median for rows of a text and
+an int, 3.3 ms with a 128-dim vector each, where the body is now read with
+no lock held and its rows built beside the readers, 0.08 and 0.2 ms. The
+native library builds an app's write of many rows the same way, and a read
+beside writes of 1 000 128-dim rows waits 0.3 ms rather than 0.9. The rest
+of the longest waits were the disk: on macOS a write that
+takes a file's dirty pages past each 8 MB waits for it, 1.5 to 11 ms, and the
+buffer was written under the lock as it filled. It is written once the lock
+is let go now, and the handover — the documents written since the open
+pointed at their places in the file — runs in pieces of 16 384 writes,
+0.3 ms each, as the next block starts, with nothing left to write. Until
+it also ran by count the longest wait was 17.4 ms: it ran once the
+documents reached 16 MB, which for rows this small was 930 000 of them.</p>
+
+<p><b>A long read is pinned.</b> A read took the shared lock for as long as
+it ran, and a write waited for every read, so an aggregate over a million
+events held every write — and every read by id behind a waiting write — for
+its whole 0.8 s. Now a long read takes the shared lock only to pin what it
+reads: each collection's id index copied, 12 bytes a row, its stored
+documents shared, 0.26 to 0.87 ms for the million rows. It then reads with
+no lock held, on the database as it stood at the pin, and answers what the
+read under the lock would have; alone it takes what it took, 151.9 ms
+against 151.4 for the batch. The writes beside it waited at most what they
+wait with no long read at all, a few milliseconds of handovers and the copy
+of the segment the pin shares. A read an index answers is short, and still
+reads under the lock: indexes change in place, and copying one would cost
+the read it spares. The same over HTTP, a ledger's reconciliation every
+second beside four clients sending transfers (<code>make
+recon-bench</code>), four runs each in turns: the transfers' longest wait
+went from 187–512 ms, 36 of them past 50 ms in every run, to 5.4–29 ms and
+none in three runs; the fourth met one stall of 385 ms, four transfers past
+50 ms, of the kind both servers met in the round with no reconciliation at
+all (118–223 ms). Those had two causes, both gone: in three runs since, the
+transfers' longest wait was 1.9–10.4 ms, none past 50.</p>
+
+<p><b>A write waits for no index's growth and no fsync.</b> A
+<code>@unique</code> index holds a key a row, and its table grew whole: the
+write that found it full moved every key into one twice its size, under the
+write lock. The ledger's journal passing 1.8 million entries held one
+transfer, and every request behind it, 120 to 137 ms in every run; four
+million puts one at a time waited 7, 19, 49, 109 and 235–267 ms at each
+doubling from 229 376 keys (<code>make growth-bench</code>). Past 114 688
+keys the table is now 256 that grow on their own, and the longest put is
+2.5 to 3.6 ms. Each key keeps its hash beside it, so a lookup hashes it
+once — 83 to 93 ns over four million keys against 121 to 144 in the
+shards before, 24 to 34 under that size against 33 to 42 — and a table
+grows without hashing a key again, for 8 bytes a key. A text index's terms grew the same way, 276 to
+324 ms at 3.7 million terms, and are 256 tables now too, the longest put
+5 ms. And a vector index's table of the vectors it holds, which finds one
+written again, was made again from every vector once half full: 242 to
+281 ms at a million vectors of 128 dimensions, 1.45 s at 524 288 of 768.
+It grows from what it holds now, a 256th at a time, and no put waits for
+it. The first write after an open made it by reading every vector once —
+275 to 441 ms over 1.1 million of 128 dimensions, 33 to 169 on every core;
+it makes it now from four bytes a vector the file keeps beside the graph,
+and that first write took 16 to 31 ms there, 4.4 to 27 over 300 000 of
+768 against 68 to 312, the open as fast as it was.
+And the two writes still made under the lock —
+the 1 MB buffer's once it is full, and a handover's — waited for the
+disk while the server's periodic fsync held it, 52 ms of macOS's
+<code>F_FULLFSYNC</code>; they are put off until it is done now. The rest
+of those first-round stalls was the bench's own: <code>--warm</code> built
+an index its warm-up had not read just as the round began, and it reads
+that one too now.</p>
+</details>
+
+<h2 id="requests">A request over HTTP</h2>
+
+<p>What one request to <code>fenec-server</code> costs a client on the same
+machine, over HTTP. Most of each round trip is the network stack, not the
+server's work.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">HTTP, p50</th><th class="n">8 clients</th></tr></thead>
+<tbody>
+<tr><td>a row by id</td><td class="n"><b>0.022 ms</b></td><td class="n">149 268/s</td></tr>
+<tr><td>filter, limit 10</td><td class="n"><b>0.032 ms</b></td><td class="n">107 322/s</td></tr>
+<tr><td><code>near</code>, top 10</td><td class="n"><b>0.057 ms</b></td><td class="n">66 071/s</td></tr>
+<tr><td>put a row</td><td class="n"><b>0.022 ms</b></td><td class="n">129 476/s</td></tr>
+</tbody>
+</table>
+</div>
+
+<details class="deep"><summary>Method and details</summary>
+<p>What one request costs a client of <code>fenec-server</code>, on loopback: a
+row by id, a filter with a limit, a <code>near</code> for the top ten and a
+put, over 10 000 rows of 128 dimensions, asked by one client at a time — the
+round trip's p50 — and by eight at once. Each is <code>POST /query</code>
+with the parameters beside the text, on a kept-alive connection. One run
+on an M1, after idle minutes.</p>
+
+<pre data-lang="bash">make pgvector-up      # optional: PostgreSQL's arm, skipped without it
+make requests-bench
+</pre>
+
+<p><b>Most of a round trip is the loopback.</b> For a row by id the
+server's own work is a few microseconds: one read and one write on the
+socket, and the statement. <code>POST /query</code> keeps the statement a
+text parsed to, so it does not read its text again for each request, and an
+answer goes out in one write.</p>
+
+<p>PostgreSQL with pgvector, asked the same in SQL, answers a row by id in
+0.142 ms and a <code>near</code> in 0.653 ms, from
+inside Docker's virtual machine on the same Mac, where its empty query alone
+takes 0.127 ms. The network, not the engine, is most of that
+difference, and the bench prints the empty query beside the rest so that it
+reads that way.</p>
+</details>
+
+<h2 id="round-trip">One request's round trip, taken apart</h2>
+<p>A <a href="benchmarks-ycsb.html">YCSB</a> read by key (a 1 KB record of ten fields) and an update of one
+field, one client over 100 000 records, the client's parts and the
+process's CPU from <code>getrusage</code>, fenec-server's phases from a
+build with <code>--features timing</code> (<code>GET /_timing</code>), and
+PostgreSQL's bind and execute from its own log; means but the totals, which
+are medians (<code>make roundtrip-bench</code>):</p>
+<div class="tbl">
+<table>
+<thead><tr><th>a read by key</th><th class="n">fenec-server, Mac</th><th class="n">fenec-server, Docker</th><th class="n">PostgreSQL, Docker</th></tr></thead>
+<tbody>
+<tr><td>round trip, p50</td><td class="n">0.025 ms</td><td class="n"><b>0.288 ms</b></td><td class="n">0.333 ms</td></tr>
+<tr><td>inside the server</td><td class="n">0.010 ms</td><td class="n">0.023 ms</td><td class="n">0.016 ms, bind and execute</td></tr>
+<tr><td>its parts</td><td class="n" colspan="2">HTTP 1.1 / 2.1 µs, JSON and the parsed statement 0.7 / 1.4, run 2.6 / 5.2, the row as JSON 1.7 / 2.4, the send 3.0 / 9.8</td><td class="n">executor 9.2 µs</td></tr>
+<tr><td>the client's CPU</td><td class="n">0.006 ms</td><td class="n">0.030 ms</td><td class="n">0.055 ms</td></tr>
+<tr><td>the server's system calls</td><td class="n">&nbsp;</td><td class="n">a receive, a writev</td><td class="n">two receives, a send, an epoll_pwait</td></tr>
+<tr><td>the rest: the kernel and the network</td><td class="n">0.012 ms</td><td class="n">about 0.25 ms</td><td class="n">about 0.26 ms</td></tr>
+<tr><td>a scan of 50 records, p50</td><td class="n">&nbsp;</td><td class="n"><b>0.454-0.479 ms</b><br><small>0.619-0.630 before</small></td><td class="n">0.582 ms</td></tr>
+<tr><td>the scan inside the server</td><td class="n">&nbsp;</td><td class="n"><b>0.050-0.060 ms</b><br><small>0.213-0.220 before</small></td><td class="n">0.237 ms, bind and execute</td></tr>
+<tr><td>the scan's answer, as the container sent it</td><td class="n">&nbsp;</td><td class="n">56.9 KB of JSON, 0 page faults<br><small>37 before</small></td><td class="n">53.4 KB of binary rows</td></tr>
+<tr><td>a durable update, p50</td><td class="n">4.0 ms (<code>F_FULLFSYNC</code>)</td><td class="n"><b>0.325 ms</b><br><small>0.624 before the sync log</small></td><td class="n">0.378 ms</td></tr>
+</tbody>
+</table>
+</div>
+<ul>
+  <li><b>Docker's port forwarding is most of a request,</b> for both:
+    about 0.25 ms of a 0.29 ms read. What either server does is a tenth
+    of it, so a statement sent by an id rather than its text, or rows in a
+    binary form rather than JSON, would save a microsecond or two of 290
+    and are not worth a protocol of their own.</li>
+  <li><b>The durable gap was an fsync of a file that grew.</b> On ext4 it
+    commits the journal as well: 356 µs for a 300-byte append and its
+    <code>fdatasync</code> in the VM, 65 µs for the same bytes written where
+    the file already reached, which is how PostgreSQL's WAL is written. A
+    durable write now syncs a log of fixed size beside the file, and the
+    file is synced once the log is full (<a href="file-format.html">File
+    format</a>): 392 -> 92 µs of a durable update's server time.</li>
+  <li><b>A scan was fenec-server's own.</b> Fifty 1 KB records are 56.9
+    KB of JSON against PostgreSQL's 53.4 KB of binary rows, each handed to
+    the network card at once, so the bytes were not it: the server spent
+    213-220 µs inside on them, half decoding each row's ten fields into
+    values one look-up at a time and half writing them out a byte at a time,
+    and took 37 page faults a scan, the container's allocator (musl) giving
+    the answer's memory back to the system after each and faulting it in
+    again. A plain <code>get</code> is now written as JSON straight from the
+    stored rows under the read lock, eight bytes tested at a time for
+    escaping, into a buffer the connection keeps: 50-60 µs, no fault, and a
+    read by id 22.4 -> 17.7 µs inside. The answer is the same JSON, byte for
+    byte, so no client changed. <code>make roundtrip-bench RT_ARGS="--measure
+    read,scan50"</code> counts the bytes, packets and page faults.</li>
+  <li><b>What was the client's:</b> Python's <code>Client</code> opened a
+    connection a request, 152 µs a read by id on the Mac against 63 over
+    the one it keeps now; Go's, .NET's and JavaScript's clients kept theirs
+    already.</li>
+</ul>
+
+<h2 id="loading">Loading rows</h2>
+
+<p>Loading 100 000 rows of a text, an int and a 128-dim vector, every way
+a client can send them. With no vector index they go in as JSON arrays
+over HTTP at 212 820 rows a second, against PostgreSQL's <code>COPY</code>
+at 56 232; with an HNSW index kept up to date as they land, at about
+18 000 to 19 000, against pgvector's 410.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">no vector index, rows/s</th><th class="n">HNSW kept</th></tr></thead>
+<tbody>
+<tr><td>in process, <code>put</code> of 1 000</td><td class="n">921 665</td><td class="n">20 425</td></tr>
+<tr><td>HTTP, <code>POST /docs</code> of 1 000</td><td class="n">212 820</td><td class="n">19 151</td></tr>
+<tr><td>HTTP, <code>POST /query</code>, a <code>put</code> of 1 000</td><td class="n">94 662</td><td class="n">17 483</td></tr>
+<tr><td>HTTP, <code>POST /batch</code> of single puts</td><td class="n">145 811</td><td class="n">18 325</td></tr>
+<tr><td>PostgreSQL + pgvector, <code>COPY</code></td><td class="n">56 232</td><td class="n">410</td></tr>
+<tr><td>PostgreSQL + pgvector, <code>INSERT</code> of 1 000</td><td class="n">29 662</td><td class="n">403</td></tr>
+</tbody>
+</table>
+</div>
+
+<ul>
+  <li><b>Without a vector index, reading the vectors' text is the
+    cost.</b></li>
+  <li><b>With one, the index is the cost.</b> A batch of single puts goes
+    as fast as an array.</li>
+</ul>
+
+<details class="deep"><summary>Method and details</summary>
+<p>What loading 100 000 rows of a text, an int and a 128-dim vector costs,
+each way a client can send them, into an empty collection: with the
+vector's HNSW graph kept as the rows land, and with no vector index.
+<code>fenec-server</code> on loopback, 1 000 rows a request —
+<code>POST /docs</code> with a JSON array; a <code>put</code> of 1 000 sent
+to <code>POST /query</code>; a <code>POST /batch</code> of single puts.
+PostgreSQL with pgvector is sent the same rows by <code>COPY</code> and by
+<code>INSERT</code>s of 1 000, with <code>synchronous_commit = off</code>, as
+fenec-server's writes reach the disk within <code>--sync 250</code>. One
+run on an M1, after idle minutes.</p>
+
+<pre data-lang="bash">make pgvector-up      # optional: PostgreSQL's arm, skipped without it
+make load-bench
+</pre>
+
+<p><b>Without a vector index, the vectors' text is the cost.</b> Each
+row's vector is 128 numbers written out, read straight into its
+<code>f32</code>s wherever it comes from — a JSON array, a parameter, a
+FenecQL literal — in one pass that finds each number's end. In process the
+rows arrive parsed, which is what the rest can at most reach. PostgreSQL
+answers from inside Docker's virtual machine on the same Mac, whose network
+carries every byte.</p>
+
+<p><b>With the graph kept, the graph is the cost.</b> Every way lands
+close to linking the vectors in process. A <code>/batch</code>'s vectors are
+linked together, 512 at a time on every core, whether they came a row a
+statement or 1 000 a put: linked a row at a time, as they were before, the
+same rows went in at 5 400 rows/s. PostgreSQL's HNSW index takes each row on
+its own, on one core.</p>
+</details>
