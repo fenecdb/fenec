@@ -163,7 +163,27 @@ browser, React, Node, Python, Go, .NET, Rust, SwiftUI, Jetpack Compose and
 Flutter -- each a folder to open and run, with a live list, filters, and
 full-text and vector search.
 
-**Shell.** `cargo build --release -p fenec-cli`, then:
+**Binaries.** `fenec`, the shell, and `fenec-server`, the HTTP server, for macOS
+and Linux on arm64 and x86_64 (not Windows yet; the image runs anywhere):
+
+```bash
+brew install fenecdb/tap/fenecdb               # Homebrew
+curl -fsSL https://fenecdb.com/install.sh | sh # ~/.fenecdb/bin, no sudo
+sudo apt install ./fenecdb_X.Y.Z-1_amd64.deb   # or: sudo dnf install ./fenecdb-X.Y.Z-1.x86_64.rpm
+```
+
+The script downloads the release from GitHub and checks the tarball against
+the release's `SHA256SUMS` before it unpacks it; it touches no shell startup
+file, only prints the `PATH` line to add. Read it first with
+`curl -fsSL https://fenecdb.com/install.sh | less`
+([`site/install.sh`](site/install.sh)). The `.deb` and `.rpm` are attached to
+each release after 0.1.11, for amd64 and arm64, with their checksums in
+`SHA256SUMS`. The [Quickstart](https://fenecdb.com/docs/quickstart) has each
+with its first run; the tap's formula is
+[`packaging/homebrew`](packaging/homebrew).
+
+**Shell.** Installed as above, `fenec data.fenec`; from a clone,
+`cargo build --release -p fenec-cli`, then:
 
 ```bash
 ./target/release/fenec data.fenec              # interactive

@@ -27,6 +27,7 @@ make size-report   # where the module's bytes go (BASE=main, BIN=fenec-server, F
 make ffi           # the native library for apps (crates/fenec-ffi); TARGET=... another, JNI=1 for Kotlin
 make sync-scenarios-check   # both runners of integrations/sync-scenarios.json passed every scenario (after make test)
 make packages      # the PyPI, npm and NuGet packages as a release publishes them, installed and used
+make packaging-test    # site/install.sh against a release of its own on localhost, and the Homebrew formula held to its script
 make version V=X.Y.Z   # one version wherever a release reads it (RELEASING.md)
 make agents-md     # AGENTS.md written again from this file
 make builder-golden   # integrations/builder-golden.json written again from the JS builder (web/golden.mjs)
@@ -1001,6 +1002,26 @@ checks.](docs/design/integrations.md#deploy)** Tokens go in env files or
 copy`, never `sync`; a standby router's unit conflicts with its primary's,
 promoted by `POST /_replication/promote` and the units switched at once;
 `tests/datadog.rs` holds the alerts to scrapes.
+
+**[A release is installed from its own files, each checked before it is
+used.](docs/design/integrations.md#install-channels)** Homebrew's formula, the
+site's `install.sh` and the `.deb` and `.rpm` all install the binaries
+`release.yml` built and rebuild none, and a published release's assets are
+never replaced (`publish` only adds what is missing), since all three name them
+by checksum. The formula is written by `tools/homebrew-formula.py` from the
+release's `SHA256SUMS`: `--check` rewrites it from its own version and sums for
+`fenecdb/fenecdb` and compares (a hand edit of the text or the repository, not
+of a sum), and CI's `--verify` holds those sums to the release's real
+tarballs. `packages.yml` pushes it after the publish, since a draft's URLs are
+not public, never for a pre-release or a version older than the tap's, one run
+at a time; `HOMEBREW_TAP_TOKEN` is an environment secret of `homebrew` and
+reaches `git` through its environment alone. `install.sh` has nothing but
+functions, assignments and comments before `main "$@"` on its last line
+(`site/build.py` holds it), takes curl or a wget that checks certificates,
+checks the sum before it unpacks, touches no shell file and evals nothing
+(`site/test_install.sh`). A package is installed and run in a container before
+it is kept (`tools/linux-packages-check.sh`). A new channel names what it
+installs by its checksum.
 
 ## Conventions
 
