@@ -504,7 +504,8 @@ dotnet-test:
 ## The docs' example for each language over HTTP, against a real
 ## fenec-server: Python (the fenecdb client), Java, PHP and Ruby from
 ## containers of their own (Docker), JavaScript, Go, C# and Rust with the
-## Node, Go, .NET and Rust on the machine
+## Node, Go, .NET and Rust on the machine; then the docs' statements held to
+## those programs and the HTTP page's curl tab run as written (Python 3)
 languages-test:
 	integrations/languages/run-tests.sh
 

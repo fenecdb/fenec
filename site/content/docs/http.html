@@ -23,8 +23,8 @@ as <code>$1</code>, <code>$2</code>, ... in <code>params</code>.</p>
 
 <div class="langs" data-langs>
 
-<div class="lang" data-name="curl">
-<pre data-lang="bash">curl -s http://127.0.0.1:8080/query \
+<div class="lang" data-name="curl" data-keep="false">
+<pre data-lang="bash" data-label="shell">curl -s http://127.0.0.1:8080/query \
   -d '{"query": "create collection if not exists docs (title text @text, year int @sorted)"}'
 # {"message":"collection `docs` created"}
 
@@ -42,7 +42,8 @@ curl -s http://127.0.0.1:8080/query \
   -d '{"query": "get docs select title match title $1 fuzzy", "params": ["oasys"]}'
 # [{"title":"Night at the oasis","_score":0.62239116}]
 
-curl -s -w ' %{http_code}\n' http://127.0.0.1:8080/query -d '{"query": "get nowhere"}'
+curl -s -w ' %{http_code}\n' http://127.0.0.1:8080/query \
+  -d '{"query": "get nowhere"}'
 # {"error":"collection `nowhere`"} 404</pre>
 </div>
 
@@ -53,9 +54,15 @@ curl -s -w ' %{http_code}\n' http://127.0.0.1:8080/query -d '{"query": "get nowh
 <p>The programs send the token <code>secret</code> as <code>Authorization:
 Bearer</code>, which a server started with <code>--http-token secret</code>
 asks for; this one has none set, so it ignores it, and so the
-<code>curl</code> examples here leave it out. They are the programs of <a
-href="languages.html">Your language</a>, run against a real server on every
-change, each tab the start of that page's: the query builders, batches and
+<code>curl</code> examples here leave it out. They assume a fresh file: each
+<code>put</code> makes a row with no id, so a second run writes every row
+again.</p>
+
+<p>Each language's tab is the start of the same tab on <a
+href="languages.html">Your language</a>, which the build copies it from, so
+the two cannot say different things. <code>make languages-test</code> holds
+that page's statements to the programs it runs against a real server, and runs
+the <code>curl</code> tab as it is written here. The query builders, batches and
 typed errors follow there, and so do Swift, Kotlin and Dart, which keep the
 database in the app.</p>
 

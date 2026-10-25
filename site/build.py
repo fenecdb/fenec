@@ -58,12 +58,13 @@ def minify(body, ext):
 # order of what a reader is doing: Start gets a first query running, Clients
 # is how an app talks to the database, Guides are what one builds with it,
 # Reference is where one looks a thing up, Operate is for whoever runs a
-# server, and Design is why it is built as it is and how it measures against
-# others. A page that fits two groups sits with the task that brings the
-# reader to it: HTTP endpoint is in Clients, for the reader with no SDK for
-# their language, its route list being that client's reference; File format
-# is Reference, the place one looks a byte up, though it is also why the file
-# is as it is.
+# server, and Design and comparisons is why it is built as it is and how it
+# measures against others. A page that fits two groups sits with the task that
+# brings the reader to it: HTTP endpoint is in Clients, for the reader with no
+# SDK for their language, its route list being that client's reference (the
+# Reference group's Limits points there); File format is Reference, the place
+# one looks a byte up, though it is also why the file is as it is; Studio is
+# Operate, an admin page the server serves.
 NAV = [
     ("Start", [
         ("docs/index", "Overview"),
@@ -78,11 +79,11 @@ NAV = [
         ("docs/integrations", "Integrations"),
         ("docs/mcp", "Agents and MCP"),
     ]),
-    # What an app adds Redis for, a page a family of patterns: the first says
-    # which page holds each, and is named for what it replaces now that no
-    # group is.
     ("Guides", [
         ("docs/sync", "Sync"),
+        # What an app adds Redis for, a page a family of patterns: this one
+        # says which page holds each, and is named for what it replaces now
+        # that no group is.
         ("docs/redis", "Instead of Redis"),
         ("docs/queues", "Job queues"),
         ("docs/geo", "Points and distances"),
@@ -90,7 +91,6 @@ NAV = [
         ("docs/microservices", "Services and events"),
         ("docs/serverless", "Serverless and Cloudflare"),
         ("docs/import", "Import"),
-        ("docs/studio", "Studio"),
     ]),
     ("Reference", [
         ("docs/fenecql", "FenecQL"),
@@ -100,15 +100,16 @@ NAV = [
     ]),
     ("Operate", [
         ("docs/server", "Server"),
+        ("docs/studio", "Studio"),
         ("docs/replication", "Replication"),
         ("docs/sharding", "Tenants and sharding"),
         ("docs/monitoring", "Monitoring"),
         ("docs/datadog", "Datadog and others"),
         ("docs/grafana", "Grafana"),
     ]),
-    # The comparisons are labelled "vs ...", since the group no longer says
+    # The comparisons are labelled "vs ...", since the group does not say
     # what the three are beside.
-    ("Design", [
+    ("Design and comparisons", [
         ("docs/concepts", "How it works"),
         ("docs/benchmarks", "Benchmarks"),
         ("docs/compare", "Compare"),
@@ -367,29 +368,55 @@ def docs_map():
 
 
 # The tabs of Your language that talk to a server with the HTTP client the
-# language has, as the HTTP endpoint page shows them: Swift, Kotlin and Dart
-# embed the database in an app, and their first example opens a file.
+# language has, as the HTTP endpoint page shows them. The others embed the
+# database in an app and their first example opens a file, so they stay on
+# Your language; a tab in neither list is a build error, or a new HTTP
+# language would be skipped here with nothing said.
 HTTP_TABS = ("Python", "TypeScript", "Go", "Rust", ".NET", "Java", "PHP", "Ruby")
+EMBEDDED_TABS = ("Swift", "Kotlin", "Dart")
 LANG_TAB = re.compile(r'<div class="lang" data-name="([^"]+)">\n([\s\S]*?)\n</div>')
-LEADING_CODE = re.compile(r'(?:<pre[^>]*>[\s\S]*?</pre>\n)+')
+CODE_BLOCK = re.compile(r'<pre[^>]*>[\s\S]*?</pre>\n')
+
+
+def first_example(name, body):
+    """A tab's first example: its install line, if it has one, then the
+    program, and nothing after that. A tab goes on from there with prose and
+    the builder's example, and the example is cut at the prose: with the
+    prose gone a third block would be taken in with no word said, so a tab
+    that is not an install line (labelled `install`) and one program, or a
+    program alone, is an error."""
+    blocks, at = [], 0
+    while (m := CODE_BLOCK.match(body + "\n", at)):
+        blocks.append(m.group(0))
+        at = m.end()
+    installs = ['data-label="install"' in b for b in blocks]
+    if installs not in ([False], [True, False]):
+        raise SystemExit(
+            f"docs/languages.html's `{name}` tab does not start with an install line "
+            "(labelled `install`, optional) and one program, then prose: docs/http.html "
+            f"takes that much of it, and found {len(blocks)} blocks in a row")
+    return "".join(blocks)
 
 
 def language_tabs():
-    """The first example of each of Your language's tabs in `HTTP_TABS` --
-    its install line and the program, up to the prose that goes on to the
-    builder -- as the tabs of another page's `data-langs` box. Those
-    programs are the ones `make languages-test` runs, so the HTTP endpoint
-    page takes them from the page they are held to, not a copy that would
-    drift from it."""
+    """The first example of each of Your language's tabs in `HTTP_TABS`, as
+    the tabs of another page's `data-langs` box: the HTTP endpoint page's
+    examples are the languages page's, taken from it when the page is read,
+    so the two cannot say different things (`make languages-test` holds that
+    page's statements to the programs it runs)."""
     src = open(os.path.join(ROOT, "content", "docs", "languages.html"), encoding="utf-8").read()
     tabs = {name: body for name, body in LANG_TAB.findall(src)}
+    unplaced = [n for n in tabs if n not in HTTP_TABS + EMBEDDED_TABS]
+    missing = [n for n in HTTP_TABS + EMBEDDED_TABS if n not in tabs]
+    if unplaced or missing:
+        raise SystemExit(
+            "docs/languages.html's tabs are not the ones docs/http.html is made for: "
+            f"{'a tab named ' + ', '.join(unplaced) if unplaced else 'no tab named ' + ', '.join(missing)}"
+            " -- put it in HTTP_TABS (a language the server is reached from with the "
+            "language's own HTTP client) or EMBEDDED_TABS (one that opens a file) in build.py")
     out = []
     for name in HTTP_TABS:
-        code = LEADING_CODE.match(tabs.get(name, "") + "\n")
-        if code is None:
-            raise SystemExit(f"docs/languages.html has no `{name}` tab starting with code, "
-                             "which docs/http.html takes its examples from")
-        out.append(f'<div class="lang" data-name="{name}">\n{code.group(0).rstrip()}\n</div>\n')
+        out.append(f'<div class="lang" data-name="{name}">\n{first_example(name, tabs[name]).rstrip()}\n</div>\n')
     return "\n".join(out)
 
 

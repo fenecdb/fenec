@@ -68,8 +68,11 @@ search are planned together rather than stacked on each other.</p>
 
 <h2 id="guides">Where to go next</h2>
 
-<p>Pick the route that matches what you are doing. <a href="#pages">Every
-page</a> is listed below them.</p>
+<p>Pick the route that matches what you are doing. The sidebar files pages by
+what they are instead, so a few sit under another heading there: FenecQL and
+From SQL are Reference, the place to start writing queries, and Build from
+source is Contribute. <a href="#pages">Every page</a> is listed below the
+routes.</p>
 
 <h3>New here</h3>
 
@@ -79,11 +82,9 @@ page</a> is listed below them.</p>
   <li><a href="quickstart.html">Quickstart</a>
     <p>Install a release, a package or the image, write a row and query it: in a browser tab, on a server or in the shell.</p></li>
   <li><a href="languages.html">Your language</a>
-    <p>Python, JavaScript, Go, Rust, .NET, Java, PHP, Ruby, Swift, Kotlin and Dart: one program in each, run on every change.</p></li>
+    <p>Python, JavaScript, Go, Rust, .NET, Java, PHP, Ruby, Swift, Kotlin and Dart: one program in each, tested against a real server.</p></li>
   <li><a href="sql.html">From SQL</a>
     <p>The SQL it reads as written, what it refuses and what to write instead, and where the meaning is not SQL's.</p></li>
-  <li><a href="compare.html">Compare</a>
-    <p>Beside PostgreSQL, SQLite and PGlite: when to choose each.</p></li>
 </ul>
 
 <h3>Build an app</h3>
@@ -107,6 +108,8 @@ page</a> is listed below them.</p>
     <p>fenecdb as an agent's search and memory tool over the Model Context Protocol.</p></li>
   <li><a href="import.html">Import</a>
     <p>A collection from SQLite or a live PostgreSQL table in one command.</p></li>
+  <li><a href="serverless.html">Serverless and Cloudflare</a>
+    <p>A database in a Durable Object, or a function talking to a server.</p></li>
 </ul>
 
 <h3>Run it in production</h3>
@@ -114,16 +117,16 @@ page</a> is listed below them.</p>
 <ul class="cards">
   <li><a href="server.html">Server</a>
     <p>Running <code>fenec-server</code>: flags, tokens, durability, limits, containers.</p></li>
+  <li><a href="studio.html">Studio</a>
+    <p>The admin pages the server can serve: collections, rows, a query editor and the server's numbers.</p></li>
   <li><a href="replication.html">Replication</a>
     <p>Read replicas, promotion, archives and backups restored to a moment, every tenant of a node archived at once.</p></li>
   <li><a href="sharding.html">Tenants and sharding</a>
     <p>A file per tenant behind a router that fails nodes over; regions, one URL for all of them, reads near the client, and a kit to deploy them.</p></li>
-  <li><a href="serverless.html">Serverless and Cloudflare</a>
-    <p>A database in a Durable Object, or a function talking to a server.</p></li>
   <li><a href="monitoring.html">Monitoring</a>
     <p>Metrics, dashboards, a slow-statement log, an audit log and traces.</p></li>
-  <li><a href="studio.html">Studio</a>
-    <p>The admin pages the server can serve: collections, rows, a query editor and the server's numbers.</p></li>
+  <li><a href="datadog.html">Datadog and others</a>
+    <p>Under Datadog, New Relic, Elastic and Grafana Cloud: the metrics check, the logs, a dashboard and traces.</p></li>
 </ul>
 
 <h3>The details</h3>
@@ -137,6 +140,8 @@ page</a> is listed below them.</p>
     <p>Segments, the mapped file, one writer, and why there is no page cache; the four ways it ships and how the crates fit together.</p></li>
   <li><a href="benchmarks.html">Benchmarks</a>
     <p>YCSB against SQLite, PostgreSQL, MongoDB and Redis, writers beside readers, requests and search, each with its method.</p></li>
+  <li><a href="compare.html">Compare</a>
+    <p>Beside PostgreSQL, SQLite and PGlite: when to choose each.</p></li>
   <li><a href="build.html">Build from source</a>
     <p>Clone the repository, build with cargo and make, run the tests.</p></li>
 </ul>

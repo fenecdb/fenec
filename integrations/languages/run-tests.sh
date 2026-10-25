@@ -8,6 +8,9 @@
 # in integrations/go) with the Go, C# (HttpClient, and the FenecDb SDK in
 # integrations/dotnet) with the .NET and Rust (ureq) with the Rust on the
 # machine.
+# Last, docs_check.py holds the docs to these programs: the statements of
+# each tab on Your language are its program's, and the HTTP endpoint page's
+# curl tab is run as written.
 # Each language gets a server of its own over a new file, so every program
 # starts from an empty database and makes the same collection, on a port
 # the system picks: a run never meets another, or any other server, on one.
@@ -29,10 +32,17 @@ trap 'stop; rm -rf "$dir"' EXIT INT TERM
 
 # Outside loopback, so a container reaches it: a token is required there.
 # On :0, the port read off the server's `listening on: http://<address>` line.
+# `serve <name> open` is the docs' own: loopback and no token, as the HTTP
+# endpoint page's curl commands (which send none) are written for.
 serve() {
     rm -f "$dir/server.log"
-    "$root/target/debug/fenec-server" --file "$dir/$1.fenec" \
-        --http 0.0.0.0:0 --http-token "$token" 2>"$dir/server.log" &
+    if [ "${2:-}" = open ]; then
+        "$root/target/debug/fenec-server" --file "$dir/$1.fenec" \
+            --http 127.0.0.1:0 2>"$dir/server.log" &
+    else
+        "$root/target/debug/fenec-server" --file "$dir/$1.fenec" \
+            --http 0.0.0.0:0 --http-token "$token" 2>"$dir/server.log" &
+    fi
     server=$!
     i=0
     until grep -q "listening on: http://.* " "$dir/server.log" 2>/dev/null; do
@@ -125,3 +135,15 @@ fi
 serve rust
 (cd "$here/rust" && FENEC_URL="$local_url" FENEC_TOKEN="$token" "$cargo" run -q)
 stop
+
+# The docs against these programs: the statements each HTTP tab of Your
+# language sends are the ones its program does, and the HTTP endpoint page's
+# curl tab is run as written, against a server with no token and a new file
+# (docs_check.py).
+if command -v python3 >/dev/null 2>&1; then
+    serve docs open
+    python3 "$here/docs_check.py" "$local_url"
+    stop
+else
+    missing python3 "the docs' check"
+fi

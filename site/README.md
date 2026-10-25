@@ -39,9 +39,10 @@ is the release's number, from the workspace's `Cargo.toml` -- the one place
 banner moves with a release instead of being found and edited;
 `{{docs_map}}` is every page of `NAV` by group, for the docs index; and
 `{{language_tabs}}` is the first example of each HTTP language's tab on
-`languages.html` -- the programs `make languages-test` runs -- as the tabs of
-the HTTP endpoint page, so the two cannot say different things. All are
-filled before the claims are checked and before the search and `llms.txt` read
+`languages.html` as the tabs of the HTTP endpoint page, so the two cannot say
+different things (`make languages-test` holds that page's statements to the
+programs it runs, and runs the HTTP page's curl tab as written:
+`integrations/languages/docs_check.py`). All are filled before the claims are checked and before the search and `llms.txt` read
 the page, and a version in prose that is a fact about the past (a comparison
 checked against a competitor's page on a day, a benchmark's build) stays as
 written. The Quickstart installs that release, so its steps use only what the
