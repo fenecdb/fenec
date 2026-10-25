@@ -1,6 +1,6 @@
 # Integrations and deploy
 
-The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *Integrations and deploy*: `integrations/`, the Grafana data source and the `deploy/` kit. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *Integrations and deploy*: `integrations/`, the Grafana data source, the desktop app and the `deploy/` kit. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Integrations
 
@@ -115,6 +115,134 @@ and `@grafana/ui` with it -- sat at 0% CPU for ten minutes, so the logic
 jest runs lives in modules importing types alone. `site/build.py` writes
 the editor's FenecQL colours into `src/fenecql/highlight.js` as it writes
 the studio's.
+
+## Studio desktop
+
+**The desktop app is a window on a studio a `fenec-server` serves, one server
+per file** (`integrations/studio-desktop`, Electrobun 2.0.4, macOS on Apple
+silicon, beta). The app bundles `fenec-server` and starts `fenec-server
+--file <path> --studio --http 127.0.0.1:0` for each open file, with a random
+32-byte token in `FENEC_HTTP_TOKEN` (the environment: `ps` shows every user's
+arguments), finds it by the `listening on:` line on stderr, as every harness
+of this repository finds a server on port 0, and opens a window on its own
+`/_studio/`; closing the window sends SIGTERM, which syncs and writes the
+checkpoint. A saved server is a window on that server's own studio, same
+origin, so no CORS, its token in the Keychain (`Bun.secrets`, service the app's
+identifier, name `connection:<id>`: Electrobun has no keychain API, and the
+`security` command-line fallback was dropped because `add-generic-password -w`
+puts the secret in argv). The server is started in `server.ts` and a token
+reaches a page in `session.ts`, each the one place, because two changes are
+waiting on them: `--exit-on-stdin-close` (a server whose app was killed sees
+its stdin close, and `strays.ts`, which stops what an earlier run left by the
+arguments of the pid it noted, goes) and a frozen `window.fenecHost.session`
+the studio reads before storage.
+
+Windows. A studio window is `sandbox: true` (no bridge to Bun, only the
+event-only `__electrobunSendToHost`, which `checks/sandbox.mjs` holds to the
+six globals Electrobun's sandboxed preload defines) with navigation rules for
+the server's origin (the constructor's `navigationRules` option did not take in
+2.0.4: a navigation to another origin reported `allowed: true`; the setter does)
+and links out as web addresses to the browser. The preload writes
+`sessionStorage["fenec-studio"]` only where `location.origin` is the
+server's; `test/session.test.ts` runs it as a page would, including a token
+that tries to leave its string. Failures are windows of the app's own
+(`messages.ts`, a bundled sandboxed page that draws with `textContent`),
+never `Utils.showMessageBox`: that is a synchronous native call in an `async`
+function, so the main process's JavaScript, every server's supervision and the
+quit handler stood still until someone clicked (a check that never clicked held
+the app for good). `exitOnLastWindowClosed` is false: the default quits as the
+last window's close handlers return, too soon for a server's SIGTERM to finish
+while the app still holds its lock; the app stays in the Dock, as a document
+app does, and stops its servers itself on quit (`before-quit` held until they
+have). A second open of a file the app is still starting a server for waits for
+that one: a second server would find the first's lock and tell the user,
+wrongly, that another program has the file.
+
+New database. Electrobun 2.0.4 has no save dialog, so the window takes a folder
+from the folder dialog and a name, and `createDatabase` makes the file with
+`open(path, "wx")`, which refuses a name that exists whatever its case (APFS),
+and then starts a server on it: `fenec-server` takes a zero-length file as a
+new database (an 8-byte head). It does not truncate or otherwise write to a file
+that is not one: the signature is read first and refused (`invalid fenecdb
+signature`), and the app says so and nothing changed (a check holds it). A server
+that then fails to start does not leave the empty file behind.
+
+The test variant. The checks drive the app through a control file and read its
+reports, which a shipped app must not read: `build.bun.define` makes
+`__TESTABLE__` a constant, `testhooks.ts` is imported only behind it, and
+`FENEC_DESKTOP_TEST_BUILD=1` builds the same app with it true under its own
+identifier (so its `userData` and Keychain service are its own: a run never
+touches an install's recent files or saved servers), into `build-test/`.
+`checks/release.mjs` reads the shipped app's main bundle (out of the
+self-extractor's `.tar.zst`, without running it) and fails on any hook marker,
+and on the test variant's lacking one, so a rename cannot make it pass by
+looking for what was never there. The checks wait for events -- a fact the app
+reports, a process leaving, a page drawing -- and wait out a time only for what
+must not happen (`waitNone`, 1.2 s, a link that must not be opened).
+
+Toolchain. `electrobun init` installed Hutch (the build tool) in `~/.hutch` and
+appended two lines to `~/.zshrc`, and the npm package's resolver would, were
+its download to fail, run that installer. `scripts/electrobun.mjs` runs the
+package's own resolver with `HUTCH_HOME` in the project (`.hutch-home/`,
+ignored) and an `installHutch` that refuses; the archive is checked against
+Electrobun's release index by the resolver, and `electrobun` is an exact
+version in a lock file, so nothing is fetched that is not named by a hash or a
+version. The npm package's `exports` map every subpath to a stub, so the
+resolver is required by path.
+
+The first launch. A stable Electrobun build is a self-extractor: the first run
+unpacks the app in place with an installer window and starts it as a process of
+its own, and the first process stays in its event loop, so quitting the app
+leaves it alive (seen unsigned, from `open` and from a harness). The checks do
+one launch first (`warmup`) and end the helper. Not verified, for want of a
+Developer ID certificate: that an in-place unpacking leaves a signed and
+notarized bundle's seal whole, and that Hutch gives the bundled `fenec-server`
+the hardened runtime (`desktop.yml`'s signing job fails if `codesign` says
+otherwise).
+
+Rejected. webview-bun with `bun build --compile` (an 89.8 MB binary, studio
+visible in 0.87 s): `Webview.run()` blocks the JavaScript thread in the native
+loop, so with a `setInterval` and a SIGTERM handler installed it ticked 0 times
+in 5 s and ignored SIGTERM; nothing in JavaScript can supervise the server while
+a window is open, and it has no menus, no file dialog and one process per
+window. Tauri is the better long-term shell (a save panel, a signing and
+installing story on all three systems, `keyring`, an updater, single-instance,
+and `fenec-http` could run in the app's own process: no child, no orphan, no
+stderr parsing, the process's own `fcntl` lock) and a larger rewrite in Rust
+outside the zero-dependency set (allowed under `integrations/`) at 3-10 MB for
+the shell instead of Bun's 63; re-decide before Windows. No server at all, the
+studio's local mode over the file's bytes, reads a 100 000-row file (8.3 MB)
+in 5.3 ms in Node and the 64 MB graph file in 101 ms, and is the wrong design
+for a file: the module has no mmap and the file is loaded whole into wasm
+linear memory (+39 MB for the 8.3 MB file, +268 MB, 4.2x, for the 64 MB one,
+never given back, wasm32 capped near 2-4 GB where the server opens a 10 GB
+file on an 8 GB machine), writes would cross an RPC to Bun to be appended with
+an fsync policy of our own (WKWebView has no File System Access API, and the
+window would need the RPC bridge, so no sandbox), the `<file>.lock` is an
+`fcntl` record lock a page cannot take, and it is a second engine on one thread
+without `--warm`, auto-compact, `@ttl` sweeps, `/_changes`, MCP, the admin view
+or metrics. It stays right for the site's playground.
+
+Measured on a MacBook Air (MacBookAir10,1, Apple M1, 8 GB), macOS 26.1, with
+other work running (load average 3 to 4), by `scripts/measure.mjs` on the test
+variant after its first launch, five runs each, warm page cache (not a reboot):
+
+| | 50 rows | 100 000 rows (8.7 MB) |
+|---|---|---|
+| studio showing the collections, from launching the executable | 436-529 ms, median 443 | 443-452 ms, median 445 |
+| `fenec-server` listening | 138-211 ms | 142-204 ms |
+| idle RSS, the app's processes and WebKit's | 250-251 MB | 274-276 MB |
+| ... of which Bun and the launcher, WebKit, the server | 139, 106-107, 5 | 139, 107-110, 27 |
+| quit, with the server's checkpoint | 183-449 ms | 326-449 ms |
+
+The DMG is 23.6 MB (the update archive 22.6 MB), the unpacked app 74.7 MB (Bun
+63.6, `fenec-server` 4.4), against 23.0 MB and 71 MB for the spike: the icon,
+three pages and the failure wording. RSS counts a shared page in every process
+that maps it, so a total is an upper bound, and a window is a server process:
+the server's share is per open file. Not taken again: the first launch from the
+DMG (3.7 s, n=1, in the spike) and the 100 000 x 128 file with a graph (64 MB,
+server 145 MB, total 392 MB there). The figures are the test variant's, which is
+the shipped app plus the hooks (10 KB of JavaScript).
 
 ## deploy
 

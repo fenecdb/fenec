@@ -1,6 +1,6 @@
 <!--
 title: Studio — fenecdb
-description: fenec studio, the admin pages fenec-server serves with --studio: collections, rows, edits, a query editor, the schema, live rows and the server's numbers in a browser, with the token you paste and no authority of its own. The site's playground is the same studio over a database in your tab.
+description: fenec studio, the admin pages fenec-server serves with --studio: collections, rows, edits, a query editor, the schema, live rows and the server's numbers in a browser, with the token you paste and no authority of its own. The site's playground is the same studio over a database in your tab, and a Mac app (beta) opens a database file in it.
 -->
 
 <h1>Studio</h1>
@@ -9,7 +9,8 @@ their rows and their schema in a browser, the edits you make there, a
 query editor, the rows as they change and the server's own numbers. Start
 the server with <code>--studio</code> and open <code>/_studio/</code>, or
 try it on the <a href="../playground.html">Playground</a>, where it runs
-over a database in your own tab.</p>
+over a database in your own tab. On a Mac there is an app too
+(<a href="#desktop">Desktop app</a>).</p>
 
 <h2>Turn it on</h2>
 
@@ -376,6 +377,48 @@ content security policy names.</p>
 </div>
 <figcaption>On a phone, light and dark: the collections slide in from the side.</figcaption>
 </figure>
+
+<h2 id="desktop">Desktop app (beta)</h2>
+
+<p>On a Mac with Apple silicon the studio is also an app: open a database
+file, make a new one, or connect to a server, with no server of your own to
+start. It is not published for download yet; build it from source.</p>
+
+<pre data-lang="bash">make studio-desktop
+
+open "integrations/studio-desktop/build/stable-macos-arm64/fenec studio.app"
+</pre>
+
+<ul>
+  <li><b>A file.</b> File, Open… (or New Database…, or a double-click in
+    Finder). The app starts a <code>fenec-server</code> it carries, on the
+    file, and opens a window on that server's own <code>/_studio/</code>, so
+    the window does what the studio does in a browser. Closing the window
+    stops the server once it has written its checkpoint.</li>
+  <li><b>A saved server.</b> A name, an address, a token and, for a tenant
+    node, a tenant. The token is kept in the Keychain, never in the app's own
+    files, and the window is on that server's studio, so there is no CORS to
+    set up. The server must run with <code>--studio</code>.</li>
+  <li><b>A message, not a blank window.</b> A file another program has open, a
+    server that stopped, one that cannot be reached, one with no studio and a
+    token it refuses each say so in a window of the app's own, with the way
+    forward.</li>
+  <li><b>macOS only for now,</b> Apple silicon, and not yet signed: an
+    unsigned build opens after <code>xattr -cr "fenec studio.app"</code>.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>A token is never in a URL or on a command line: a file's server is given
+a random one in its environment, and the window hands it to the studio's own
+session storage only on that server's origin, before any of the page's code
+runs. A studio window has no bridge to the app and cannot leave its server's
+origin: a link to another site opens in your browser.</p>
+<p>The build needs Node, npm and Rust, and fetches its build tool into the
+project's own directory: nothing is installed globally. The directory's
+<a href="https://github.com/fenecdb/fenec/tree/main/integrations/studio-desktop">README</a>
+has the build, the checks, the failures and what each says, the secrets that
+sign it and what a first signed build still has to be checked for.</p>
+</details>
 
 <h2 id="security">Security</h2>
 

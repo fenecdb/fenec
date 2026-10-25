@@ -1,0 +1,20 @@
+{
+	"name": "fenec-studio-desktop",
+	"version": "0.1.0",
+	"private": true,
+	"description": "fenec studio as a desktop app (beta): open a .fenec file through a bundled fenec-server, or connect to a server.",
+	"type": "module",
+	"scripts": {
+		"dev": "node scripts/electrobun.mjs dev",
+		"build": "node scripts/electrobun.mjs build --env=stable",
+		"icon": "sh scripts/make-icon.sh",
+		"typecheck": "node scripts/electrobun.mjs sync --env=stable && tsc -p .",
+		"test:unit": "node --test test/*.test.ts",
+		"checks": "node scripts/checks/run.mjs"
+	},
+	"devDependencies": {
+		"@types/bun": "1.4.0",
+		"electrobun": "2.0.4",
+		"typescript": "5.9.3"
+	}
+}

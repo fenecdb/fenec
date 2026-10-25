@@ -973,6 +973,19 @@ held to `integrations/builder-golden.json`; `make types-check` holds
 context or token, never the HTTP client's timeout; a store checks its
 names against FenecQL's and passes values as parameters.
 
+**[The desktop app is a window on a studio a `fenec-server` serves, one server per
+file.](docs/design/integrations.md#studio-desktop)** `integrations/studio-desktop`
+(Electrobun, macOS, beta) starts a server in one place (`server.ts`), its
+token in the environment, never argv, and a token reaches a page in one
+(`session.ts`, written only where `location.origin` is the server's); a
+studio window is `sandbox: true` and held to its origin, a saved server's
+token is in the Keychain alone, and every failure is a notice window, never
+a native alert (that blocks the main process, and every server's supervision
+with it). The shipped bundle holds none of the test hooks (`__TESTABLE__`,
+`checks/release.mjs`), the toolchain is fetched into `.hutch-home/`, never
+`~/.hutch` or a shell file (`scripts/electrobun.mjs`), and signing runs only
+where its secrets exist (`desktop.yml`).
+
 **[Grafana's data source binds a dashboard's values; it never splices
 them.](docs/design/integrations.md#grafana)** Names become `$n`s
 (`fenecql.go`); only `get`, `select` and `explain` go out.

@@ -14,9 +14,12 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 # page whose code declares none.
 FEATURES ?=
 SCHEMA ?= 1
+# `make studio-desktop STUDIO_SERVER=0.1.11`: the server the desktop app bundles
+# is that release's, not built from this checkout.
+STUDIO_SERVER ?=
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench fence-bench policy-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \
+.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench fence-bench policy-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \
 	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down grafana-check deploy-check drill memory clean \
@@ -100,6 +103,35 @@ studio-test: wasm
 	$(CARGO) build -p fenec-server -p fenec-shard
 	python3 site/build.py
 	cd studio && npm ci --no-audit --no-fund --loglevel=error && npm run e2e
+
+## fenec studio as a desktop app (beta; macOS on Apple silicon, see
+## integrations/studio-desktop/README.md): the server it bundles built from this
+## checkout (scripts/get-server.sh; STUDIO_SERVER=0.1.11 downloads that
+## release's asset instead and checks its SHA-256 against the release's
+## SHA256SUMS), then the unsigned .app and .dmg, in build/ and artifacts/ there.
+## The toolchain (Electrobun's Hutch, its Bun and runtime) is fetched into
+## .hutch-home/ in that directory on first use: nothing is installed globally
+## and no shell file is touched. With ELECTROBUN_DEVELOPER_ID set (and the
+## notarization secrets the README lists) it signs and notarizes too.
+studio-desktop:
+	cd integrations/studio-desktop && npm ci --ignore-scripts --no-audit --no-fund --loglevel=error
+	CARGO=$(CARGO) integrations/studio-desktop/scripts/get-server.sh $(STUDIO_SERVER)
+	cd integrations/studio-desktop && npm run icon && npm run build
+
+## The desktop app's checks: the release build (above) is held to carrying
+## none of the test hooks, the sources type-checked and the unit tests run
+## (names, remote probe, wording, the token hand-off script, get-server.sh,
+## the signing switches), then the test variant, the same app with the hooks
+## and an identifier of its own, is built and driven through every scripted
+## check (integrations/studio-desktop/scripts/checks): open, edit, close and
+## reopen a file, a file another program holds, a server that dies, the app
+## killed, the sandbox, saved servers and the Keychain, a new database, a file
+## from Finder. Needs a window server (a logged-in Mac); logs of a failure are
+## in $$SD_DIR (default: fenec-desktop-checks under the temp directory).
+studio-desktop-test: studio-desktop
+	cd integrations/studio-desktop && npm run typecheck && npm run test:unit
+	cd integrations/studio-desktop && FENEC_DESKTOP_TEST_BUILD=1 npm run build
+	cd integrations/studio-desktop && npm run checks
 
 ## studio/highlight.js and the Grafana data source's copy written again:
 ## site/highlight.js with build.py's FenecQL rules in it, the query editors'
