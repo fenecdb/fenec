@@ -100,6 +100,17 @@
 //! 'lobby']` those and one more -- and a text claim there is a list of one.
 //! A token whose claim lists more than [`MAX_CLAIM_VALUES`] is refused.
 //!
+//! **A claim names someone or is not there.** A rule naming a claim the
+//! token lacks does not apply, and neither does one naming a claim the
+//! token holds as `null`, as `""`, as an object, as a list where the rule
+//! reads one value, or as a list holding any of those ([`usable`]): bound,
+//! `owner = $jwt.sub` given `null` read every row with no owner. A rule
+//! only grants, so one that does not apply grants nothing. A claim a rule
+//! orders by (`level <= $jwt.clearance`) holds the field to its own kind
+//! ([`kind_held`]). The tenant claim is the one whose absence widens
+//! (`--jwt-unbound-tenants`): held as a value naming no tenant, it reaches
+//! none. A `sub` of `""` is no subject.
+//!
 //! **A rule may read another collection** through `in (get ...)`, its
 //! claims bound inside the inner `get` as anywhere in the filter:
 //!
@@ -395,6 +406,10 @@ struct Rule {
     /// `/_whoami` shows a token it applies to.
     text: Option<Arc<str>>,
     claims: Vec<String>,
+    /// Beside each of `claims`, whether the filter reads it as a list
+    /// wherever it reads it -- in an `in`'s list, or as the list `has`
+    /// looks in -- so that a token may give a list there ([`usable`]).
+    lists: Vec<bool>,
     role: Option<String>,
     /// The collections its inner `get`s read, at any depth: what a ring of
     /// rules reading each other is found by at startup ([`ring`]).
@@ -620,15 +635,19 @@ impl Access {
                 continue;
             }
             // A rule naming a claim the token lacks does not apply: a filter
-            // with a hole in it would match rows it was never meant to.
+            // with a hole in it would match rows it was never meant to. Nor
+            // does one naming a claim the token holds as `null`, `""` or a
+            // value the rule cannot compare where it reads it ([`usable`]):
+            // bound, each was such a hole. A rule grants and never takes
+            // away, so one that does not apply grants nothing.
             let mut values = Vec::with_capacity(r.claims.len());
-            for c in &r.claims {
+            for (c, &list) in r.claims.iter().zip(&r.lists) {
                 match claim(c) {
                     Some(Value::List(l)) if l.len() > MAX_CLAIM_VALUES => {
                         return Err("a list claim the policy reads holds more than 1 000 values")
                     }
-                    Some(v) => values.push(v.clone()),
-                    None => continue 'rules,
+                    Some(v) if usable(v, list) => values.push(v.clone()),
+                    _ => continue 'rules,
                 }
             }
             rules.push(Bound {
@@ -648,18 +667,24 @@ impl Access {
             Scope::held(&mut rules);
         }
         // Anything but a text or a list of texts names no tenant: a number
-        // or an object compared as text could be made to match.
+        // or an object compared as text could be made to match. Only a
+        // token without the claim names none, which `--jwt-unbound-tenants`
+        // takes for every tenant: one holding it as `null`, `""`, a number
+        // or a list of no tenant's name is held to none, since the issuer
+        // meant to bind it -- `"tenant": user.tenant` minted `null` for a
+        // user without one, and that token reached every tenant.
         let tenants = match claim(&self.demands.tenant_claim) {
-            Some(Value::Text(t)) => Some(vec![t.clone()]),
+            None => None,
+            Some(Value::Text(t)) if !t.is_empty() => Some(vec![t.clone()]),
             Some(Value::List(l)) => Some(
                 l.iter()
                     .filter_map(|v| match v {
-                        Value::Text(t) => Some(t.clone()),
+                        Value::Text(t) if !t.is_empty() => Some(t.clone()),
                         _ => None,
                     })
                     .collect(),
             ),
-            _ => None,
+            Some(_) => Some(Vec::new()),
         };
         let expires = match claim("exp") {
             Some(Value::Int(i)) => Some((*i).max(0) as u64 * 1000),
@@ -670,8 +695,11 @@ impl Access {
             .iter()
             .any(|r| r.ops & READ != 0 && r.read_fields.is_some());
         Ok(Scope {
+            // `""` is no one: taken for a subject, its Idempotency-Keys were
+            // kept under the server token's own, whose answers it was then
+            // replayed.
             subject: match claim("sub") {
-                Some(Value::Text(s)) => Some(s.clone()),
+                Some(Value::Text(s)) if !s.is_empty() => Some(s.clone()),
                 _ => None,
             },
             expires,
@@ -914,6 +942,11 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         let Statement::Select(sel) = stmt else {
             unreachable!("a get parses as a select")
         };
+        // `$3` beside one claim bound nothing it stood for: every request
+        // under the rule panicked, the claims' list one short.
+        if sel.filter.as_ref().map_or(0, Expr::max_param) > claims.len() {
+            return Err("parameters are `$jwt.<claim>` in a policy".into());
+        }
         // An inner `get` reads another collection, as the token's own `get`
         // would, and is answered before each statement under its lock
         // ([`Scope::bound`]): a document being written is tested on its
@@ -942,6 +975,10 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         (true, Some(f)) => relaxed(f.clone(), &|name| name.starts_with(NEW)),
         _ => None,
     };
+    let mut alone = vec![false; claims.len()];
+    if let Some(f) = &filter {
+        read_alone(f, &mut alone);
+    }
     Ok(Rule {
         collection: (collection != "*").then(|| collection.to_string()),
         ops,
@@ -953,9 +990,62 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         transition,
         text,
         claims,
+        lists: alone.iter().map(|a| !a).collect(),
         role,
         reads,
     })
+}
+
+/// Marks in `alone` each claim `e` reads as one value somewhere: anywhere
+/// but an `in`'s list, which [`bind`] spreads a list claim into, and the
+/// list `has` looks in -- inner `get`s' filters, where a rule's claims
+/// also go, among them.
+fn read_alone(e: &Expr, alone: &mut [bool]) {
+    match e {
+        Expr::Param(k) => alone[*k] = true,
+        Expr::In(x, items) => {
+            read_alone(x, alone);
+            for i in items.iter().filter(|i| !matches!(i, Expr::Param(_))) {
+                read_alone(i, alone);
+            }
+        }
+        Expr::Has(x, y) => {
+            if !matches!(**x, Expr::Param(_)) {
+                read_alone(x, alone);
+            }
+            read_alone(y, alone);
+        }
+        Expr::InSelect(x, sel) => {
+            read_alone(x, alone);
+            if let Some(f) = &sel.filter {
+                read_alone(f, alone);
+            }
+        }
+        e => e.each_child(&mut |c| read_alone(c, alone)),
+    }
+}
+
+/// Whether a claim's value is one a rule can be held to where it reads it
+/// (`list`: only ever as a list, [`Rule::lists`]): a text that is not
+/// empty, a finite number or a bool, or there a list of those. Anything
+/// else is taken for a claim the token lacks, and the rule naming it does
+/// not apply. Bound as it came, `"sub": null` made `owner = $jwt.sub` the
+/// filter `owner = null`, which every row whose owner is null or missing
+/// matches -- every row written before `alter collection notes add field
+/// owner text` -- and an app minting `null` for an anonymous user handed
+/// each of them those rows, to read, `set` and `del`; `""` read the rows an
+/// app stored with no owner as `""`, and a `null` in a list claim the rows
+/// `room in [...]` found with no room. An object compares with nothing a
+/// filter holds a field to, nor a list where one value is read: neither
+/// names anyone, so neither is let stand for someone.
+fn usable(v: &Value, list: bool) -> bool {
+    match v {
+        Value::Text(t) => !t.is_empty(),
+        Value::Int(_) | Value::Bool(_) => true,
+        Value::Float(f) => f.is_finite(),
+        Value::List(items) => list && items.iter().all(|i| usable(i, false)),
+        _ => false,
+    }
 }
 
 /// The collections the inner `get`s of a rule's filter read, at any depth,
@@ -1201,7 +1291,13 @@ fn bind(e: &Expr, values: &[Value]) -> Expr {
         Expr::Or(x, y) => Expr::Or(b(x), b(y)),
         Expr::Not(x) => Expr::Not(b(x)),
         Expr::IsNull(x) => Expr::IsNull(b(x)),
-        Expr::Cmp(op, x, y) => Expr::Cmp(*op, b(x), b(y)),
+        Expr::Cmp(op, x, y) => {
+            let cmp = Expr::Cmp(*op, b(x), b(y));
+            match kind_held(*op, x, y, values) {
+                Some(held) => Expr::And(Box::new(cmp), Box::new(held)),
+                None => cmp,
+            }
+        }
         Expr::Like(x, y) => Expr::Like(b(x), b(y)),
         Expr::Has(x, y) => Expr::Has(b(x), b(y)),
         Expr::Arith(op, x, y) => Expr::Arith(*op, b(x), b(y)),
@@ -1230,6 +1326,50 @@ fn bind(e: &Expr, values: &[Value]) -> Expr {
             Expr::Call(f.clone(), args.iter().map(|a| bind(a, values)).collect())
         }
     }
+}
+
+/// What holds the other side of `x op y` to the kind of the claim on one
+/// side, where `op` orders (`<`, `<=`, `>`, `>=`): `None` where it does
+/// not, or neither side is a claim. A filter orders two values of other
+/// kinds by kind (`cmp_value`) -- every bool below every number, every
+/// number below every text -- so `level <= $jwt.clearance` given the text
+/// `"top"` admitted every row of an `int` field, and `name >= $jwt.from`
+/// given `5` every row of a `text` one. Here a value of another kind is
+/// neither below the claim nor above it: on the side the comparison
+/// leaves open, the other side is held to the edge of the claim's kind --
+/// `> true` below a number and `< ""` above it, `>= ""` below a text and
+/// `<` the byte `0xFF` above it -- above every text, whose UTF-8 never
+/// holds that byte, and below every kind ranked above texts, bytes ranking
+/// with them (a vector literal, the next kind, is refused beside a json
+/// field) -- and `<= true` above a bool; below one only `null` is, which
+/// orders against nothing. A time asked to be below a text claim is held
+/// out by `>= ""`: a JWT's times are numbers (RFC 7519's NumericDate). `=`, `!=`
+/// and `in` never take one kind for another (`cmp_value` is not `Equal`
+/// across kinds) and ask nothing more.
+fn kind_held(op: CmpOp, x: &Expr, y: &Expr, values: &[Value]) -> Option<Expr> {
+    // `other op claim`, or `claim op other` turned around: `below` where
+    // the other side is asked to be below the claim.
+    let lower = matches!(op, CmpOp::Lt | CmpOp::Le);
+    let upper = matches!(op, CmpOp::Gt | CmpOp::Ge);
+    let (other, claim, below) = match (x, y) {
+        _ if !lower && !upper => return None,
+        (o, Expr::Param(k)) => (o, &values[*k], lower),
+        (Expr::Param(k), o) => (o, &values[*k], upper),
+        _ => return None,
+    };
+    let (op, edge) = match (claim, below) {
+        (Value::Int(_) | Value::Float(_), true) => (CmpOp::Gt, Value::Bool(true)),
+        (Value::Int(_) | Value::Float(_), false) => (CmpOp::Lt, Value::Text(String::new())),
+        (Value::Text(_), true) => (CmpOp::Ge, Value::Text(String::new())),
+        (Value::Text(_), false) => (CmpOp::Lt, Value::Bytes(vec![0xFF])),
+        (Value::Bool(_), false) => (CmpOp::Le, Value::Bool(true)),
+        _ => return None,
+    };
+    Some(Expr::Cmp(
+        op,
+        Box::new(bind(other, values)),
+        Box::new(Expr::Lit(edge)),
+    ))
 }
 
 /// A list of texts as JSON, `null` for none.
@@ -1513,6 +1653,7 @@ impl Scope {
     pub fn reaches(&self, name: &str) -> std::result::Result<(), &'static str> {
         match &self.tenants {
             Some(names) if names.iter().any(|n| n == name) => Ok(()),
+            Some(names) if names.is_empty() => Err("this token's tenant claim names no tenant"),
             Some(_) => Err("this token is for another tenant"),
             None if self.unbound => Ok(()),
             None => Err("this token names no tenant, and this node serves tenants"),
@@ -2829,5 +2970,140 @@ mod tests {
             .collect();
         let claims = format!(r#"{{"sub":"a","rooms":[{}]}}"#, many.join(","));
         assert!(a.scope(&a.mint(&claims).unwrap(), 0).is_err());
+    }
+
+    /// A claim held as `null`, `""`, an object, a list where one value is
+    /// read or a list holding any of those is a claim the token lacks: the
+    /// rule naming it does not apply. Where a rule reads a claim as a list
+    /// alone -- an `in`'s list, the list `has` looks in -- a list is a
+    /// value, every value in it one.
+    #[test]
+    fn a_claim_no_rule_can_compare_is_no_claim() {
+        let a = access(
+            "notes read where owner = $jwt.sub\n\
+             rooms read where id in [$jwt.rooms, 0]\n\
+             posts read where $jwt.rooms has room\n\
+             mixed read where room in $jwt.rooms or owner = $jwt.rooms\n\
+             teams read where team in (get members select team where user = $jwt.sub)\n\
+             members read where user = $jwt.sub\n",
+        );
+        let lists = |name: &str| {
+            let r = a
+                .rules
+                .iter()
+                .find(|r| r.collection.as_deref() == Some(name));
+            r.unwrap().lists.clone()
+        };
+        assert_eq!(lists("notes"), [false]);
+        assert_eq!(lists("rooms"), [true]);
+        assert_eq!(lists("posts"), [true]);
+        assert_eq!(lists("mixed"), [false]);
+        assert_eq!(lists("teams"), [false]);
+
+        let readable = |claims: &str| {
+            let s = a.scope(&a.mint(claims).unwrap(), 0).unwrap();
+            ["notes", "rooms", "posts", "mixed", "teams"]
+                .into_iter()
+                .filter(|c| s.readable(c))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            readable(r#"{"sub":"a","rooms":["r1",2]}"#),
+            ["notes", "rooms", "posts", "teams"]
+        );
+        assert_eq!(readable(r#"{"sub":"a","rooms":"r1"}"#).len(), 5);
+        assert_eq!(readable(r#"{"sub":7,"rooms":[]}"#).len(), 4);
+        assert_eq!(readable(r#"{"sub":true,"rooms":1.5}"#).len(), 5);
+        for nobody in [
+            r#"{"sub":null,"rooms":null}"#,
+            r#"{"sub":"","rooms":""}"#,
+            r#"{"sub":{"id":"a"},"rooms":{"r":1}}"#,
+            r#"{"sub":["a"],"rooms":["r1",null]}"#,
+            r#"{"sub":[],"rooms":["r1",""]}"#,
+            r#"{"sub":[null],"rooms":[["r1"]]}"#,
+            r#"{"rooms":["r1",{"r":1}]}"#,
+        ] {
+            assert!(readable(nobody).is_empty(), "{nobody}");
+        }
+        // `$3` beside one claim stood for nothing, and every request under
+        // the rule panicked.
+        for bad in [
+            "notes read where owner = $3",
+            "notes read where owner = $jwt.sub or x = $2",
+        ] {
+            assert!(Access::new(SECRET, bad).is_err(), "{bad}");
+        }
+    }
+
+    /// `""` is no one: a subject of `""` kept its Idempotency-Keys under
+    /// the server token's. A tenant claim present but naming no tenant
+    /// reaches none, even where a token without the claim reaches every one.
+    #[test]
+    fn an_empty_subject_is_none_and_a_tenant_claim_naming_none_reaches_none() {
+        let a = access("").demanding(Demands {
+            unbound_tenants: true,
+            ..Demands::default()
+        });
+        let scope = |claims: &str| a.scope(&a.mint(claims).unwrap(), 0).unwrap();
+        assert_eq!(scope(r#"{"sub":""}"#).subject(), None);
+        assert_eq!(scope(r#"{"sub":5}"#).subject(), None);
+        assert_eq!(scope(r#"{"sub":"a"}"#).subject(), Some("a"));
+        assert_eq!(scope(r#"{"sub":"a"}"#).reaches("acme"), Ok(()));
+        assert_eq!(scope(r#"{"tenant":["acme",""]}"#).reaches("acme"), Ok(()));
+        assert_eq!(
+            scope(r#"{"tenant":"acme"}"#).reaches("globex"),
+            Err("this token is for another tenant")
+        );
+        for none in ["null", "\"\"", "0", "false", "{}", "[]", "[null, \"\", 3]"] {
+            assert_eq!(
+                scope(&format!(r#"{{"tenant":{none}}}"#)).reaches("acme"),
+                Err("this token's tenant claim names no tenant"),
+                "{none}"
+            );
+        }
+    }
+
+    /// An ordered comparison with a claim holds the other side to the
+    /// claim's kind, on the side the comparison leaves open; `=` asks
+    /// nothing more.
+    #[test]
+    fn an_ordered_claim_is_held_to_its_kind() {
+        let a = access(
+            "files read where level <= $jwt.c\n\
+             people read where $jwt.c < name\n\
+             notes read where owner = $jwt.c\n",
+        );
+        let filter = |c: &str, collection: &str| {
+            let s = a
+                .scope(&a.mint(&format!(r#"{{"c":{c}}}"#)).unwrap(), 0)
+                .unwrap();
+            s.filter(collection, READ).unwrap().unwrap()
+        };
+        let held = |e: Expr| match e {
+            Expr::And(_, held) => match *held {
+                Expr::Cmp(op, _, edge) => Some((op, *edge)),
+                e => panic!("{e:?}"),
+            },
+            Expr::Cmp(..) => None,
+            e => panic!("{e:?}"),
+        };
+        let edge = |op, v| Some((op, Expr::Lit(v)));
+        let blank = || Value::Text(String::new());
+        assert_eq!(
+            held(filter("5", "files")),
+            edge(CmpOp::Gt, Value::Bool(true))
+        );
+        assert_eq!(held(filter("\"top\"", "files")), edge(CmpOp::Ge, blank()));
+        assert_eq!(held(filter("true", "files")), None);
+        assert_eq!(held(filter("5", "people")), edge(CmpOp::Lt, blank()));
+        assert_eq!(
+            held(filter("\"b\"", "people")),
+            edge(CmpOp::Lt, Value::Bytes(vec![0xFF]))
+        );
+        assert_eq!(
+            held(filter("false", "people")),
+            edge(CmpOp::Le, Value::Bool(true))
+        );
+        assert_eq!(held(filter("5", "notes")), None);
     }
 }
