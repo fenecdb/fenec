@@ -283,7 +283,9 @@ orders  update(status, delivered_at, run_at, claim)  where courier = $jwt.sub an
     lists, <code>room in [$jwt.rooms, "lobby"]</code> those and one more,
     and a text claim there is a list of one. It holds reads, writes
     (<code>WITH CHECK</code>: a post into a room the list does not hold is
-    403) and subscriptions alike. A token whose list claim holds more than
+    403) and subscriptions alike. A list holding a <code>null</code>, a
+    <code>""</code>, a list or an object is no claim, and the rule naming
+    it does not apply; <code>[]</code> is a list of none. A token whose list claim holds more than
     1 000 values is refused (401). A <code>role</code> claim may be a list
     too, and a rule <code>for</code> a role applies when the list holds
     it. Membership kept in another collection is a rule's <code>in (get
@@ -370,7 +372,15 @@ messages   read,insert  where room in (get members select room where user = $jwt
     gives claims naming no <code>exp</code> one an hour away. A rule with <code>for</code> applies
     to tokens whose <code>role</code> claim names that role, or lists it; rules on one
     collection widen each other; a rule whose filter names a claim the token
-    lacks does not apply. A subscription is checked when it opens, and
+    lacks does not apply, and grants nothing. Nor does one naming a claim
+    the token holds as <code>null</code>, as <code>""</code>, as an object,
+    or as a list where the rule reads one value: <code>"sub": null</code>
+    is no subject, and <code>owner = $jwt.sub</code> does not become
+    <code>owner = null</code>, which every row with no owner matches. A
+    number and a bool are values like any other. A policy names its
+    parameters by claim alone: one writing <code>$1</code> or
+    <code>$3</code> of its own stops the server at startup. A
+    subscription is checked when it opens, and
     ended at its token's <code>exp</code> with
     <code>event: error</code> and
     <code>{"error":"the token has expired","status":401}</code>: the
@@ -392,9 +402,11 @@ messages   read,insert  where room in (get members select room where user = $jwt
   <li><b>Tenants.</b> On a <code>--dir</code> node a token reaches
     <code>/t/&lt;t&gt;/</code> only when its <code>tenant</code> claim names
     <code>&lt;t&gt;</code> (a text, or a list holding it), and is refused
-    with 403 under every other tenant's prefix; one naming no tenant is
+    with 403 under every other tenant's prefix; one without the claim is
     refused there unless the node runs with
-    <code>--jwt-unbound-tenants</code> (<a href="/docs/sharding-reference#tokens">Tokens</a>).</li>
+    <code>--jwt-unbound-tenants</code>, and one holding it as
+    <code>null</code>, <code>""</code> or anything else naming no tenant is
+    refused even then (<a href="/docs/sharding-reference#tokens">Tokens</a>).</li>
 </ul>
 
 <p>The server's own <code>--http-token</code> keeps full access alongside.</p>

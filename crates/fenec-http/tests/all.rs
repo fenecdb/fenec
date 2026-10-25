@@ -9,6 +9,7 @@ mod api;
 mod archive;
 mod cdc;
 mod changes;
+mod claim_values;
 mod claims;
 mod empty_tokens;
 mod fields;
