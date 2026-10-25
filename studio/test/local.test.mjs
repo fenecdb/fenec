@@ -137,6 +137,36 @@ test('the first screen: an example run in the editor, the database said to be in
   await page.close();
 });
 
+test('a collection picked in the query view goes where the caret was put, a word apart, and nowhere else', { skip: skip() }, async () => {
+  const { page, frame } = await open();
+  const text = () => frame.$eval('#query', (e) => e.value);
+  const example = await text();
+  // An example opened, the caret never put: a pick leaves the text alone
+  // (it ran onto its end, `limit 10ordersevents`).
+  await frame.click('.coll[data-name="orders"] .coll-line');
+  await frame.click('.coll[data-name="events"] .coll-line');
+  assert.equal(await text(), example);
+  // Put after `get ` by a click and a key, a pick goes in there, apart from
+  // the word after it.
+  await frame.$eval('#query', (e) => (e.value = 'get where id = 1'));
+  await frame.click('#query');
+  await frame.$eval('#query', (e) => e.setSelectionRange(4, 4));
+  await frame.focus('#query');
+  await page.keyboard.press('ArrowLeft');
+  await page.keyboard.press('ArrowRight');
+  await frame.click('.coll[data-name="orders"] .coll-line');
+  assert.equal(await text(), 'get orders where id = 1');
+  // An empty editor takes a first statement, and the next pick replaces it
+  // while nobody has touched it.
+  await frame.$eval('#query', (e) => (e.value = ''));
+  await frame.click('.coll[data-name="orders"] .coll-line');
+  assert.equal(await text(), 'get orders limit 100');
+  await frame.click('.coll[data-name="events"] .coll-line');
+  assert.equal(await text(), 'get events limit 100');
+  assert.deepEqual(page.problems, []);
+  await page.close();
+});
+
 test('rows: browse, sort, filter, edit, insert and delete', { skip: skip() }, async () => {
   const { page, frame } = await open();
   await view(frame, 'rows', '.main .row:not(.pending)');
