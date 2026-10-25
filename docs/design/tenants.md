@@ -205,7 +205,21 @@ first round a third of its own lease after the start left a node without
 a lease from the end of a shorter one before it -- a router whose lease
 the record was raised to as well (`late_grants.rs`'
 `a_router_that_cannot_record_its_lease_renews_at_the_lease_it_grants`, 84
-of 113 samples without on e5b8413e). A thread finding the record raised
+of 113 samples without on e5b8413e). Each round after the first is due a
+third after the last was due, not after the last woke
+(`lease::round_due`), and one woken more than a third late counts from its
+wake, so at most two rounds come together -- one woken just under a third
+late, followed at once by the next, due as it starts -- and never the run
+of rounds a stopped process missed: counted from the wake, every wake's
+lateness put the rounds after it as late, and at background QoS, where a
+park of a second wakes up to 0.2 s late, the rounds of a 3 s lease came
+1.18 s apart on average and two of them up to 2.40 s, a node's next grant
+left 0.6 s to be late in before its lease lapsed; 1.00 s and 2.04-2.18 s
+now (a stand-in node timing the grants it was sent, four runs a side in
+ABBA turns, the same beside six busy loops). `lease_stalls.rs`'
+`the_leasing_thread_s_rounds_are_due_from_when_the_last_was_due` holds the
+leasing thread to it by what it works each round's due out as, not by a
+clock (`Router::rounds_on_schedule`). A thread finding the record raised
 by another of this router's waits for the standbys too before its grant
 (`standbys_sent`, at once once sent): each node's grant is a thread, and
 the second node's went while the first waited. What it does not cover: the first
@@ -365,7 +379,14 @@ to a third of a lease before the promotion, and a grant its primary sent
 after that round could still run as it failed the node over. `following`
 starts set, so one promoted before a round of its own counts from its first
 round too, and a router primary from its start from its first round, a
-third of a lease after it at most; a node without
+third of a lease after it at most. A node added since counts from its
+addition (`Leases::entry`), which no lease of the directory's can have
+named before: counted from the router's start, a node added a lease and a
+tenth into the router's life was lapsed before its first grant came back,
+and with that grant given up on -- a second at a 3 s lease, at background
+QoS beside busy loops -- it was failed over at once, every replica it kept
+dropped, as `lease_stalls.rs`' traces showed; the count moves on only with
+an answer heard, either way, so it never comes sooner than before. A node without
 `--lease` is never failed over on its own. A lease of a second: a node cut
 off stopped writing 386-406 ms after (697 when it ran its lease from its
 last renewal), its 10 tenants took writes again 1.27 to 1.36 s after. A

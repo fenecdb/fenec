@@ -311,8 +311,11 @@ router fails a node over on its own only under a lease, which the node
 runs on the boot clock (`lease::Moment`) from when it answered the grant
 the router acknowledged, never from a grant's reading (`grant_from`); a
 router counts a node by the directory's `leasing` record until the node
-ran one of its leases (`Leases::inherited`), and grants it one at a time,
-never with a list older than the last it sent (`Leases::turn`). Every
+ran one of its leases (`Leases::inherited`), from when it began leading
+or from the node's addition since (`Leases::entry`), and grants it one at a time,
+never with a list older than the last it sent (`Leases::turn`), its rounds
+each due a third of a lease after the last was due, not after it woke
+(`lease::round_due`). Every
 write path meets the engine's fence (`Database::set_fence`, in `commit`
 and `may_write`), every route answering a write asks
 `answered_under_lease` (500 `outcome: unknown` once lapsed), and a node
@@ -1068,10 +1071,14 @@ promoted by `POST /_replication/promote` and the units switched at once;
   Anywhere else the test asserts the event, the count or the order: the
   wait a refusal would take (`audit::would_wait`), a claim still held when a
   freeze returns, another tenant answered while a slow open is held at a
-  gate, a grant queued behind another (`Router::grants_waiting`). A timeout
+  gate, a grant queued behind another (`Router::grants_waiting`), the
+  rounds' grants a node took while another hangs (`Router::round_grants`),
+  where writes answered throughout measured the machine. A timeout
   a test gives its servers or clients bounds every request they make, not
   just the one it is about: a router's upstream timeout of 600 ms failed a
-  tenant's create at background QoS, and an SDK client's 100 ms left
+  tenant's create at background QoS, one of 10 s a replica's follow (a
+  rename on its node took 13 s beside eleven other suites), and an SDK
+  client's 100 ms left
   around a held claim's 400 failed nearly every run there.
 - A server a test or a harness starts listens on port 0 (`--http
   127.0.0.1:0`, `--listen 127.0.0.1:0`, Node's `listen(0)`) and is found

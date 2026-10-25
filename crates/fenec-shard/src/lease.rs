@@ -53,7 +53,9 @@
 //! A router that starts leasing -- a restart, or a standby promoted --
 //! counts every node as granted at that moment: a lease its predecessor
 //! granted just before it stopped may run as long, and a failover before it
-//! lapsed would make two primaries. A standby keeps forgetting every lease
+//! lapsed would make two primaries. A node added after that is counted from
+//! its addition, which no lease of the directory's can have named before
+//! ([`Leases::entry`]). A standby keeps forgetting every lease
 //! for as long as it follows, and its first round once promoted counts
 //! from then ([`Leases::leading`]), not from its last round while it
 //! followed, nor from its start. As long, or longer: the directory records
@@ -95,6 +97,26 @@ use std::time::{Duration, Instant};
 /// after. A tenth is two orders past any clock's drift.
 pub fn lapse(term: Duration) -> Duration {
     term + term / 10
+}
+
+/// When a round that starts `now` counts as due, the next one coming
+/// `period` after that: the moment it was due -- a `period` after the last
+/// was -- where it woke within a period of it, and `now` where it woke
+/// later still, a process stopped, so at most two rounds come together --
+/// one woken just under a period late followed at once by the next -- and
+/// never the run of rounds a stop missed. Counted from when each woke,
+/// every wake's lateness put
+/// the rounds after it as late: at background QoS, where a park of a
+/// second wakes up to 0.2 s late, the rounds of a 3 s lease came 1.18 s
+/// apart on average and two of them up to 2.40 s, so the next grant had
+/// 0.6 s to be late in before the node's lease lapsed, which beside busy
+/// loops it was; counted from when each was due, 1.00 s apart and two up
+/// to 2.04-2.18 s.
+pub fn round_due(last: Option<Instant>, now: Instant, period: Duration) -> Instant {
+    match last.map(|at| at + period) {
+        Some(due) if now < due + period => due,
+        _ => now,
+    }
 }
 
 /// `d` in whole milliseconds, as a grant names a lease.
@@ -142,6 +164,10 @@ pub struct Leases {
     granting: AtomicU64,
     /// The leasing thread, woken when the lease granted gets shorter.
     leasing: Mutex<Option<std::thread::Thread>>,
+    /// When the leasing thread's last round was due, and how many of its
+    /// rounds were due a third of a lease after the one before
+    /// ([`Leases::round_began`]).
+    schedule: Mutex<(Option<Instant>, u64)>,
 }
 
 #[derive(Clone)]
@@ -177,6 +203,8 @@ struct Held {
     /// A round's grant to it is under way: the next round sends it none
     /// ([`Leases::begin_grant`]).
     granting: bool,
+    /// How many of the rounds' grants it took ([`Leases::rounds`]).
+    rounds: u64,
     /// Its lease looked lapsed, and a failover of it waits for its turn to
     /// judge again ([`Leases::suspects`]).
     failing: bool,
@@ -223,6 +251,7 @@ impl Leases {
             said: AtomicBool::new(false),
             granting: AtomicU64::new(millis(term)),
             leasing: Mutex::new(None),
+            schedule: Mutex::new((None, 0)),
         }
     }
 
@@ -374,6 +403,26 @@ impl Leases {
         *self.leasing.lock().unwrap_or_else(|e| e.into_inner()) = Some(thread);
     }
 
+    /// The leasing thread's round counted as due at `due` began, the rounds
+    /// coming a `period` apart ([`round_due`]).
+    pub fn round_began(&self, due: Instant, period: Duration) {
+        let mut s = self.schedule.lock().unwrap_or_else(|e| e.into_inner());
+        if s.0.map(|at| at + period) == Some(due) {
+            s.1 += 1;
+        }
+        s.0 = Some(due);
+    }
+
+    /// How many of the leasing thread's rounds counted as due exactly a
+    /// third of a lease after the one before: what a test reads to know the
+    /// rounds are due from when the last was due ([`round_due`]) without
+    /// timing the machine. A round counted from when it woke is never due
+    /// that exactly, every wake late by a few nanoseconds at least; one
+    /// counted from its due is, unless it woke more than a period late.
+    pub fn rounds_on_schedule(&self) -> u64 {
+        self.schedule.lock().unwrap_or_else(|e| e.into_inner()).1
+    }
+
     /// Whether to say the record could not be written: once a process.
     pub fn say_unrecorded(&self) -> bool {
         !self.said.swap(true, Ordering::SeqCst)
@@ -476,20 +525,32 @@ impl Leases {
         self.nodes.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// `node`'s record, counted as granted when this router first knew it:
+    /// as it began leading, for every node the directory named then, or as
+    /// the node was added since -- which no lease of this directory's can
+    /// have named before. Counted from the router's start, a node added a
+    /// lease and a tenth into the router's life was lapsed before its first
+    /// grant came back, and one given up on -- a second at a 3 s lease, at
+    /// background QoS beside busy loops -- had it failed over, every replica
+    /// it kept dropped, before any lease of it could run.
     fn entry<'a>(&self, m: &'a mut HashMap<String, Held>, node: &str) -> &'a mut Held {
         let started = *self.started.lock().unwrap_or_else(|e| e.into_inner());
-        m.entry(node.to_string()).or_insert_with(|| Held {
-            acked: started,
-            acked_grant: None,
-            settled: started,
-            next: fenec_http::replication::fresh_id(),
-            unnumbered: false,
-            own: false,
-            epoch: None,
-            lost: false,
-            refuses: false,
-            granting: false,
-            failing: false,
+        m.entry(node.to_string()).or_insert_with(|| {
+            let known = started.max(Instant::now());
+            Held {
+                acked: known,
+                acked_grant: None,
+                settled: known,
+                next: fenec_http::replication::fresh_id(),
+                unnumbered: false,
+                own: false,
+                epoch: None,
+                lost: false,
+                refuses: false,
+                granting: false,
+                rounds: 0,
+                failing: false,
+            }
         })
     }
 
@@ -504,11 +565,21 @@ impl Leases {
         !std::mem::replace(&mut h.granting, true)
     }
 
-    /// A round's grant to `node` has ended.
-    pub fn end_grant(&self, node: &str) {
+    /// A round's grant to `node` has ended, `taken` where the node took it.
+    pub fn end_grant(&self, node: &str, taken: bool) {
         if let Some(h) = self.held().get_mut(node) {
             h.granting = false;
+            h.rounds += u64::from(taken);
         }
+    }
+
+    /// How many of the rounds' grants `node` took: what a test counts to
+    /// know a node is renewed round after round while something else hangs.
+    /// A grant given up on does not count -- a hang that had the healthy
+    /// nodes' grants time out would pass a count of grants that ended --
+    /// nor does one a failover or a create sends, which is not a round's.
+    pub fn rounds(&self, node: &str) -> u64 {
+        self.held().get(node).map_or(0, |h| h.rounds)
     }
 
     /// The epoch of the list `node` holds, as far as the router knows.
@@ -668,8 +739,9 @@ impl Leases {
         }
     }
 
-    /// Makes sure every node the directory names is counted from the
-    /// router's start, even one the router never reached.
+    /// Makes sure every node the directory names is counted from when this
+    /// router first knew it, even one the router never reached
+    /// ([`Leases::entry`]).
     pub fn know(&self, node: &str) {
         let mut m = self.held();
         self.entry(&mut m, node);
@@ -759,9 +831,9 @@ mod tests {
         // A round's grant to a node is one at a time.
         assert!(l.begin_grant("n1"));
         assert!(!l.begin_grant("n1"));
-        l.end_grant("n1");
+        l.end_grant("n1", true);
         assert!(l.begin_grant("n1"));
-        l.end_grant("n1");
+        l.end_grant("n1", true);
         // A standby forgets, and counts from the moment it leases again --
         // its first round once promoted, not its last round while it
         // followed: counted from that round 120 ms before, n1 would have
@@ -899,6 +971,51 @@ mod tests {
         l.leading(|| None);
         l.know("n1");
         assert!(l.suspects(before + Duration::from_millis(105)).is_empty());
+    }
+
+    /// A node added once the router leads is counted from when it was
+    /// added, not from the router's start: no lease of the directory's can
+    /// have named it before. Counted from the start, a node added a lease
+    /// and a tenth in was lapsed before its first grant came back.
+    #[test]
+    fn a_node_added_later_is_counted_from_its_addition() {
+        let l = Leases::new(Duration::from_millis(100));
+        l.leading(|| None);
+        l.know("n1");
+        // A sleep never ends early: the router has led past a lapse.
+        std::thread::sleep(Duration::from_millis(120));
+        let before = Instant::now();
+        l.know("n2");
+        assert_eq!(l.suspects(before), ["n1"]);
+        assert!(l.suspects(before + Duration::from_millis(105)).is_empty());
+        let after = Instant::now();
+        assert_eq!(l.suspects(after + Duration::from_millis(115)), ["n2"]);
+    }
+
+    /// A round woken late counts as due when it was, so the one after it is
+    /// as early as it would have been: counted from the wake, every round
+    /// after one woken late came as late, the leeway of each wake adding up.
+    /// One woken more than a round late -- the process stopped -- counts
+    /// from the wake, so the rounds it missed are not run back to back: at
+    /// most two come together, one woken just under a round late and the
+    /// next, due as it starts.
+    #[test]
+    fn a_round_woken_late_puts_none_after_it_late() {
+        let period = Duration::from_millis(1_000);
+        let start = Instant::now();
+        assert_eq!(round_due(None, start, period), start);
+        let mut due = start;
+        for late in [300, 370, 0, 999] {
+            let woke = due + period + Duration::from_millis(late);
+            let next = round_due(Some(due), woke, period);
+            assert_eq!(next, due + period, "a round woken {late} ms late");
+            due = next;
+        }
+        assert_eq!(due, start + period * 4, "the rounds drifted");
+        let stopped = due + period * 3;
+        assert_eq!(round_due(Some(due), stopped, period), stopped);
+        let at_two = due + period * 2;
+        assert_eq!(round_due(Some(due), at_two, period), at_two);
     }
 
     #[test]
