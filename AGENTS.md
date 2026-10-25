@@ -475,11 +475,14 @@ loops spawn through `accept::spawn`, which hands back the stream of a thread
 the system refused, and `accept::refuse` answers it on the accepting thread,
 non-blocking, counted by `reason` and marked `Fenec-Unserved`, which the
 entry and relays take as unrun, as a standby's 409 marked `Fenec-Follows`.
-It never closes one with the answer: its writing shut, the process's one
-lingering thread (`accept::linger`, made before the first accept) reads off
-its request until the client ends it, so no request meets a closed socket's
-reset; only past `LINGERING` (512) is it closed at once. Both listeners ask
-a queue of 1 024 (`accept::widen`).
+Its writing shut after the answer, it goes to the process's one lingering
+thread (`accept::linger`), which reads off its request until the client
+ends it, so no request meets a closed socket's reset. It is closed at once,
+the old way, only with no lingering thread, an answer not sent whole, or
+512 held (`most_held`: a quarter of `RLIMIT_NOFILE` where fewer); a body
+past 1 MiB, or a client still writing after 2 s, meets the reset after its
+answer. A new accept loop calls `accept::ready()`, which makes the thread,
+and `accept::widen` (a queue of 1 024) before its first accept.
 
 ### The HNSW graph
 

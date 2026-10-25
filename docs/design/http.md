@@ -558,8 +558,9 @@ every connection's, and a client that reads nothing must not hold it. The
 answer, a few hundred bytes into a new socket's empty send buffer, goes out
 whole in one write all the same, and where it would not it is let go of. The
 request is not waited for -- the answer does not hang on it -- and the
-socket is not closed with the answer either (below). Each is counted -- `fenec_connections_refused_total`
-and the router's `fenec_router_connections_refused_total`, by `reason`,
+socket is not closed with the answer either (below). Each is counted --
+`fenec_connections_refused_total` and the router's
+`fenec_router_connections_refused_total`, by `reason`,
 `ceiling` or `no_thread`, the ceiling's counted nowhere before, neither in
 `fenec_router_requests_total` -- and one with no thread is said in the log
 a minute apart at most by the monotonic clock (a wall clock set back held
@@ -618,10 +619,15 @@ reads each held socket again after a pause doubling from 1 ms to 64 ms
 connection within a look or two -- and waits on a condition variable while
 it holds none. It is made as an accept loop starts (`accept::ready`), so a
 process at its thread limit has it for the refusals it can make no thread
-for; where it could not be made, a refusal is closed as before. At most
-512 are handed over or held (`LINGERING`, `HOLDING`), a descriptor each,
-so clients that never end their connections cost 512 descriptors for 2 s,
-not the process's limit; past that a refusal is closed at once, as before.
+for; where it could not be made, a refusal is closed as before, and so is
+one whose answer did not go out whole. At most 512 are handed over or held
+(`LINGERING`, `HOLDING`), a descriptor each, or a quarter of the
+descriptors the process may open where that is fewer (`most_held`, the
+soft `RLIMIT_NOFILE`, read once: macOS gives a process 256 unless raised, a
+Linux shell 1 024), so clients that never end their connections cost 512
+descriptors for 2 s, not the process's limit; past that a refusal is closed
+at once, as before (`refuse_at_once`). The deploy kit's units count the
+512 in their `LimitNOFILE`.
 In the same runs: on Linux 13 406 refusals read as 13 406 503s and nothing
 else, `TCPAbortOnData` and `TCPAbortOnClose` 0 (another run: 22 424 of
 22 424); on macOS 32 063 of 32 063; through the router at its ceiling
@@ -631,7 +637,9 @@ peaked at 199 to 206 under `http.client` clients, whose threads end a
 connection slowly; the Rust client's 300 threads beside six busy loops on
 three cores held up to 417, and in one run passed 512 for 136 refusals of
 59 627, the throttled cgroup running the lingering thread rarely -- those
-closed as before, no client of them reading a reset.
+closed as before, no client of them reading a reset. Held to 256 by a
+container's 1 024 descriptors, the `http.client` clients read 13 714 of
+13 714 refusals, as at 512 (11 075 of 11 075).
 
 The listen queue is the other place a refused connection was lost. std's
 `TcpListener::bind` asks 128, and the Rust client's reconnecting threads
@@ -645,7 +653,10 @@ wait before the 503. Both accept loops listen again with a queue of 1 024
 128 on macOS, where nothing changes unless it is raised. The same runs
 overflowed it none. A flood past the queue is the kernel's to answer
 (SYN cookies). What remains a reset: past 512 held, a refusal with no
-lingering thread, a body past 1 MiB or a client still writing after 2 s.
+lingering thread or whose answer did not go out whole, a body past 1 MiB
+or a client still writing after 2 s -- and a node from before this, in a
+rolling upgrade, closes every refusal at once, which the router's one
+`writev` and its read after a failed write still answer.
 
 A test makes the next spawns fail (`Server::fail_spawns`,
 `Router::fail_spawns`, `#[doc(hidden)]`) by asking for a stack of 2 EiB,
@@ -658,15 +669,23 @@ fenec-shard's `no_thread.rs` -- a write through the router answered the
 node's 503 and not run, where it was a 502; the router's own; a relay
 asking the region's next router -- `upstream`'s
 `a_node_refusing_a_connection_as_it_takes_it_is_answered_by_its_refusal`
-(2 000 sends, failing on Linux with both of the router's fixes taken out)
-and `an_answer_in_before_the_body_went_out_whole_is_the_answer` (64 MiB,
+(2 000 sends to a stand-in node that closes each refusal at once,
+`accept::refuse_at_once`, `#[doc(hidden)]`: with both of the router's
+fixes taken out it failed 10 runs of 10 on Linux beside six busy loops,
+with either alone none of 5; a stand-in holding its refusals, `refuse`,
+resets nothing, and passed with both out) and
+`an_answer_in_before_the_body_went_out_whole_is_the_answer` (64 MiB,
 failing without the read after the write), `entry.test.js`'s router that
 refused the connection passed over, and `accept`'s unit tests -- the
-stream given back; an end, not a reset, after the answer -- each fail with
+stream given back; an end, not a reset, after the answer, held and closed
+at once, the latter failing without the accepting thread's read off: 10
+of 10 on Linux, `EPIPE` left after the end the shut writing sent first,
+and every run on macOS, `ECONNRESET` after the answer -- each fail with
 its part taken out. So do `accept`'s
 `a_request_after_the_refusal_is_read_off_not_reset`, fenec-http's
 `a_request_written_after_the_ceilings_refusal_is_read_off_not_reset` and
-fenec-shard's `a_request_written_after_the_routers_refusal_is_read_off_not_reset`:
+fenec-shard's
+`a_request_written_after_the_routers_refusal_is_read_off_not_reset`:
 three refused connections each, read to the answer's end -- where the
 refusal closed the socket, it had closed it by then -- then written a
 head and a 512 KiB body apart and ended, each over when it has no peer,
@@ -716,6 +735,6 @@ eight clients, 15 868-16 084 a second against 14 635-16 233 in the first
 two quartets (the third slowed both, 8 614 and 13 890 against 9 212 and
 15 735), p50 296-300 us against 293-303. On macOS, 32 clients kept alive at
 loads of 6.6 to 16: 124.1-165.2k against 131.6-158.7k, p50 115-201 us
-against 132-225. `fenec-server`'s `__text` grew 5 376 bytes and
-`fenec-shard`'s 5 312 (aarch64-apple-darwin): `linger`, `hold`, `ready`
-and `widen`.
+against 132-225. `fenec-server`'s `__text` grew 5 632 bytes and
+`fenec-shard`'s 5 632 (aarch64-apple-darwin): `linger`, `hold`, `ready`,
+`most_held` and `widen`; a refusal reads the descriptor limit once.

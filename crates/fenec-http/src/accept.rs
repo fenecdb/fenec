@@ -31,7 +31,7 @@ use std::cell::Cell;
 use std::io::{self, Read};
 use std::net::{Shutdown, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread::Builder;
 use std::time::{Duration, Instant};
 
@@ -49,7 +49,8 @@ pub const NO_THREAD: &str = "no thread for the connection: the server is at its 
 /// forwards, its own connection having been served.
 pub const UNSERVED_HEADER: &str = "Fenec-Unserved";
 
-/// Why a connection was answered on the accepting thread and closed.
+/// Why a connection was answered on the accepting thread and ended,
+/// unserved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// Past `--max-connections`.
@@ -154,16 +155,37 @@ pub fn spawn(
 /// whose request had arrived unread was reset as it closed, on macOS and on
 /// Linux alike: a client writing its body after its head had the write fail
 /// `EPIPE`, the 503 unread, and macOS handed some a reset before the answer
-/// it had received. Where no thread holds it -- none could be made, or
-/// [`LINGERING`] are held already -- what has arrived is read off here, up
-/// to 64 KiB ([`DRAIN`]), and the socket closed, as before.
+/// it had received. Where no thread holds it -- none could be made, an
+/// answer did not go out whole, or [`most_held`] are held already -- what
+/// has arrived is read off here, up to 64 KiB ([`DRAIN`]), and the socket
+/// closed, as before ([`refuse_at_once`]).
 pub fn refuse(stream: TcpStream, answer: Response, why: Refusal) {
-    refuse_saying(stream, answer, why, || {});
+    refuse_saying(stream, answer, why, true, || {});
 }
 
-/// [`refuse`], `say` run while the answer's request id is the thread's, so
-/// a line it writes carries it ([`crate::request_id::log`]).
-fn refuse_saying(mut stream: TcpStream, answer: Response, why: Refusal, say: impl FnOnce()) {
+/// [`refuse`] where the connection is not held: what has arrived read off
+/// on this thread, up to [`DRAIN`], and the socket closed -- as every
+/// refusal was before it was held, as one is past [`most_held`] or with no
+/// lingering thread, and as a node from before answers a router in a
+/// rolling upgrade. A request still on its way meets the reset. A test's:
+/// the stand-in for such a node, whose refusals the router's one `writev`
+/// and its read after a failed write must still read as answers, and the
+/// way `accept`'s unit test reaches the read off on this thread.
+#[doc(hidden)]
+pub fn refuse_at_once(stream: TcpStream, answer: Response, why: Refusal) {
+    refuse_saying(stream, answer, why, false, || {});
+}
+
+/// [`refuse`], held where `hold` and a thread takes it, `say` run while the
+/// answer's request id is the thread's, so a line it writes carries it
+/// ([`crate::request_id::log`]).
+fn refuse_saying(
+    mut stream: TcpStream,
+    answer: Response,
+    why: Refusal,
+    hold: bool,
+    say: impl FnOnce(),
+) {
     REFUSED[why as usize].fetch_add(1, Ordering::Relaxed);
     let answer = answer.header(UNSERVED_HEADER, REFUSALS[why as usize]);
     crate::request_id::begin(None);
@@ -172,7 +194,7 @@ fn refuse_saying(mut stream: TcpStream, answer: Response, why: Refusal, say: imp
         // connection open for.
         let answered = answer.write(&mut stream, false, false).is_ok()
             && stream.shutdown(Shutdown::Write).is_ok();
-        let unheld = if answered {
+        let unheld = if answered && hold {
             linger(stream)
         } else {
             Err(stream)
@@ -218,9 +240,79 @@ pub fn widen(listener: &std::net::TcpListener) {
 const LINGER: Duration = Duration::from_secs(2);
 
 /// The most refused connections handed over or held at once, a descriptor
-/// each: past it, one is closed as it is answered, what has arrived read
-/// off first.
+/// each, where the process may open 2 048 or more ([`most_held`]): past
+/// it, one is closed as it is answered, what has arrived read off first.
 const LINGERING: usize = 512;
+
+/// [`LINGERING`], or a quarter of the descriptors the process may open
+/// where that is fewer -- macOS gives a process 256 unless it is raised, a
+/// shell on Linux 1 024 -- so the held refusals leave the rest to the
+/// connections it serves and its files. Read once.
+fn most_held() -> usize {
+    static MOST: OnceLock<usize> = OnceLock::new();
+    *MOST.get_or_init(|| open_files().map_or(LINGERING, |n| LINGERING.min(n / 4)))
+}
+
+/// The process's soft limit on open descriptors (`RLIMIT_NOFILE`), where
+/// this build knows the call's numbers: the crate takes no `libc`.
+#[cfg(any(
+    target_vendor = "apple",
+    all(
+        any(target_os = "linux", target_os = "android"),
+        any(
+            target_arch = "x86_64",
+            target_arch = "aarch64",
+            target_arch = "x86",
+            target_arch = "arm",
+            target_arch = "riscv64",
+            target_arch = "powerpc64",
+            target_arch = "s390x",
+            target_arch = "loongarch64"
+        )
+    )
+))]
+fn open_files() -> Option<usize> {
+    #[cfg(target_vendor = "apple")]
+    type Limit = u64;
+    #[cfg(not(target_vendor = "apple"))]
+    type Limit = std::ffi::c_ulong;
+    #[cfg(target_vendor = "apple")]
+    const RLIMIT_NOFILE: std::ffi::c_int = 8;
+    #[cfg(not(target_vendor = "apple"))]
+    const RLIMIT_NOFILE: std::ffi::c_int = 7;
+    #[repr(C)]
+    struct Rlimit {
+        cur: Limit,
+        max: Limit,
+    }
+    extern "C" {
+        fn getrlimit(resource: std::ffi::c_int, rlim: *mut Rlimit) -> std::ffi::c_int;
+    }
+    let mut r = Rlimit { cur: 0, max: 0 };
+    // SAFETY: `r` is the struct the call fills, alive across it.
+    let asked = unsafe { getrlimit(RLIMIT_NOFILE, &mut r) };
+    (asked == 0).then(|| usize::try_from(r.cur).unwrap_or(usize::MAX))
+}
+
+#[cfg(not(any(
+    target_vendor = "apple",
+    all(
+        any(target_os = "linux", target_os = "android"),
+        any(
+            target_arch = "x86_64",
+            target_arch = "aarch64",
+            target_arch = "x86",
+            target_arch = "arm",
+            target_arch = "riscv64",
+            target_arch = "powerpc64",
+            target_arch = "s390x",
+            target_arch = "loongarch64"
+        )
+    )
+)))]
+fn open_files() -> Option<usize> {
+    None
+}
 
 /// The most of a refused client's bytes read off while it is held: past
 /// them, a body still coming meets the reset, after the answer.
@@ -234,7 +326,7 @@ const LONGEST_LOOK: Duration = Duration::from_millis(64);
 /// Streams handed to the lingering thread, not yet taken, and its wake.
 static HANDED: Mutex<Vec<TcpStream>> = Mutex::new(Vec::new());
 static WAKE: Condvar = Condvar::new();
-/// Refused connections handed over or held: at most [`LINGERING`].
+/// Refused connections handed over or held: at most [`most_held`].
 static HOLDING: AtomicUsize = AtomicUsize::new(0);
 /// Whether the lingering thread runs; `STARTING` makes one at a time.
 static LINGERER: AtomicBool = AtomicBool::new(false);
@@ -242,7 +334,8 @@ static STARTING: Mutex<()> = Mutex::new(());
 
 /// Makes the process's lingering thread where none runs yet: each accept
 /// loop asks before its first connection, so a process at its thread limit
-/// has it already. False where it could not be made.
+/// has it already -- a new accept loop calls it, and [`widen`], before its
+/// first accept. False where it could not be made.
 pub fn ready() -> bool {
     if LINGERER.load(Ordering::Acquire) {
         return true;
@@ -251,6 +344,7 @@ pub fn ready() -> bool {
     if LINGERER.load(Ordering::Acquire) {
         return true;
     }
+    most_held();
     // Its stack holds a loop and no buffer: the buffer is the heap's.
     let made = Builder::new()
         .name("fenec-linger".into())
@@ -261,12 +355,12 @@ pub fn ready() -> bool {
 }
 
 /// Hands `stream`, answered and shut for writing, to the lingering thread,
-/// or gives it back where none runs or [`LINGERING`] are held.
+/// or gives it back where none runs or [`most_held`] are held.
 fn linger(stream: TcpStream) -> Result<(), TcpStream> {
     if !ready() {
         return Err(stream);
     }
-    if HOLDING.fetch_add(1, Ordering::Relaxed) >= LINGERING {
+    if HOLDING.fetch_add(1, Ordering::Relaxed) >= most_held() {
         HOLDING.fetch_sub(1, Ordering::Relaxed);
         return Err(stream);
     }
@@ -404,7 +498,7 @@ pub fn no_thread(unserved: Unserved, answer: Response, counted: &str) {
             .peer_addr()
             .map_or_else(|_| "?".into(), |p| p.to_string())
     });
-    refuse_saying(stream, answer, Refusal::NoThread, || {
+    refuse_saying(stream, answer, Refusal::NoThread, true, || {
         if let Some(from) = from {
             crate::log!(
                 "no thread for a connection from {from}: {error}; answered 503 with Retry-After. \
@@ -496,30 +590,77 @@ mod tests {
         rx.recv().unwrap();
     }
 
+    /// Ends `c` and waits for it to be over -- its end acknowledged, or
+    /// reset; either way it has no peer -- then the error a reset left on
+    /// it, if one came.
+    fn over(c: &TcpStream) -> Option<String> {
+        // Refused where a reset came first: the reset is what is asked.
+        let _ = c.shutdown(Shutdown::Write);
+        let by = Instant::now() + Duration::from_secs(30);
+        while c.peer_addr().is_ok() {
+            assert!(Instant::now() < by, "the connection never ended");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        match c.take_error() {
+            Ok(None) => None,
+            Ok(Some(e)) => Some(format!("after the end: {e}")),
+            Err(e) => Some(format!("its error: {e}")),
+        }
+    }
+
     /// A refusal is the answer and an end, not a reset: the request that
-    /// had arrived is read off before the close.
+    /// had arrived is read off before the close -- held, by the lingering
+    /// thread; closed at once ([`refuse_at_once`], past [`most_held`] or
+    /// with no lingering thread), here, up to [`DRAIN`]. Closed with the
+    /// request unread, the socket was reset: macOS's client read
+    /// `ECONNRESET` after the answer, and Linux's, which reads the end the
+    /// shut writing sent before it, was left `EPIPE`.
     #[test]
     fn a_refusal_ends_the_connection_after_its_answer() {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
-        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        c.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        type Refuse = fn(TcpStream, Response, Refusal);
+        let ways: [(&str, Refuse); 2] = [("held", refuse), ("at once", refuse_at_once)];
+        for (way, refusing) in ways {
+            let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            c.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            c.write_all(b"GET / HTTP/1.1\r\nHost: t\r\n\r\n").unwrap();
+            let (s, _) = l.accept().unwrap();
+            // The request in before the refusal, as a client's is: the
+            // peek waits for it, the one segment it went in.
+            let mut one = [0u8; 1];
+            assert_eq!(s.peek(&mut one).unwrap(), 1);
+            let answer = Response::retry_after(503, NO_THREAD, 1);
+            refusing(s, answer, Refusal::NoThread);
+            let mut out = String::new();
+            c.read_to_string(&mut out)
+                .unwrap_or_else(|e| panic!("{way}: the answer, then an end, not {e}"));
+            assert!(out.starts_with("HTTP/1.1 503 "), "{out}");
+            assert!(out.contains("\r\nRetry-After: 1\r\n"), "{out}");
+            assert!(out.contains("\r\nFenec-Unserved: no_thread\r\n"), "{out}");
+            assert!(out.ends_with(r#""retry_after":1}"#), "{out}");
+            assert_eq!(over(&c), None, "{way}");
+        }
+    }
+
+    /// The descriptors the process may open, as the call asks them, are
+    /// the ones a shell it starts reads: the call's numbers are this
+    /// system's, so [`most_held`] is a quarter of the real limit.
+    #[cfg(any(target_vendor = "apple", target_os = "linux"))]
+    #[test]
+    fn the_descriptor_limit_is_the_one_a_shell_reads() {
+        let shell = std::process::Command::new("sh")
+            .args(["-c", "ulimit -n"])
+            .output()
             .unwrap();
-        c.write_all(b"GET / HTTP/1.1\r\nHost: t\r\n\r\n").unwrap();
-        let (s, _) = l.accept().unwrap();
-        // The request in before the refusal, as a client's is: the peek
-        // waits for it, the one segment it went in.
-        let mut one = [0u8; 1];
-        assert_eq!(s.peek(&mut one).unwrap(), 1);
-        let answer = Response::retry_after(503, NO_THREAD, 1);
-        refuse(s, answer, Refusal::NoThread);
-        let mut out = String::new();
-        c.read_to_string(&mut out)
-            .expect("the answer, then an end: no reset");
-        assert!(out.starts_with("HTTP/1.1 503 "), "{out}");
-        assert!(out.contains("\r\nRetry-After: 1\r\n"), "{out}");
-        assert!(out.contains("\r\nFenec-Unserved: no_thread\r\n"), "{out}");
-        assert!(out.ends_with(r#""retry_after":1}"#), "{out}");
+        let said = String::from_utf8_lossy(&shell.stdout).trim().to_string();
+        let asked = open_files().expect("the limit asked");
+        match said.as_str() {
+            "unlimited" => assert!(asked >= 1 << 30, "{asked}"),
+            n => assert_eq!(Some(asked), n.parse().ok(), "a shell read {n}"),
+        }
+        assert_eq!(most_held(), LINGERING.min(asked / 4));
     }
 
     /// A body larger than a socket's send buffer, macOS's 128 KiB and
@@ -545,19 +686,9 @@ mod tests {
             .map_err(|e| format!("the head: {e}"))?;
         c.write_all(&vec![b' '; BODY])
             .map_err(|e| format!("the body: {e}"))?;
-        c.shutdown(Shutdown::Write)
-            .map_err(|e| format!("the end: {e}"))?;
-        // Over either way -- the end acknowledged, or reset -- a
-        // connection has no peer.
-        let by = Instant::now() + Duration::from_secs(30);
-        while c.peer_addr().is_ok() {
-            assert!(Instant::now() < by, "the connection never ended");
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        match c.take_error() {
-            Ok(None) => Ok(()),
-            Ok(Some(e)) => Err(format!("after the end: {e}")),
-            Err(e) => Err(format!("its error: {e}")),
+        match over(&c) {
+            None => Ok(()),
+            Some(e) => Err(e),
         }
     }
 

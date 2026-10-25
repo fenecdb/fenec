@@ -62,9 +62,10 @@ RestartSec=2s
 KillSignal=SIGTERM
 TimeoutStopSec=120s
 
-# Descriptors: a connection each (--max-connections 4000), and each open
-# tenant's file, its sync log and its lock -- 4000 + 3 x the open tenants,
-# with room. Raise with them.
+# Descriptors: a connection each (--max-connections 4000), the refused
+# connections held open while their requests are read off (512 at most),
+# and each open tenant's file, its sync log and its lock -- 4000 + 512 +
+# 3 x the open tenants, with room. Raise with them.
 LimitNOFILE=65536
 # Threads: a connection each, and a follower for each replica this node
 # holds, under systemd's DefaultTasksMax (15% of pid_max) unless set.
