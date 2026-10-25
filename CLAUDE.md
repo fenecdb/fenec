@@ -213,6 +213,20 @@ durability holds the disk (`Sink::syncing`).
 (Linux and Android, `synclog.rs`). Whatever renames a file into a
 database's place removes the log first, durably (`fs::forget_sync_log`).
 
+**[Every way a server stops is the one shutdown.](docs/design/durability.md#the-one-shutdown)**
+A signal's handler, `--exit-on-stdin-close`'s end of stdin
+(`request_shutdown`) and a failure of what runs beside the database -- a
+thread the start cannot make, the listener, `--follow`'s mirror
+(`stop_with`, its exit code) -- set one flag, `SHUTDOWN`, and the syncer
+that sees it, a file's or a node's, looking every `LOOK` (200 ms) whatever
+`--sync` is, syncs, checkpoints (only once it served, `serving`, and exit
+code 0, `checkpoints`) and exits holding the write lock. A new way down
+sets that flag and never exits on its own. What fails before anything
+writes the file or runs beside it -- a flag, the open, a port, both
+listeners bound straight after the open -- exits where it fails, having
+written only `<file>.lock` and what the open does: a file or a node's
+directory made where none was, a torn tail cut, a sync log written back.
+
 ### Replication and archives
 
 **[Replication ships only what is on disk, by the change counter.](docs/design/replication.md#replication)**
@@ -393,11 +407,13 @@ too.](docs/design/quotas.md#retry-after-in-bodies)** Write one with
 **[fenec studio is a page with no authority of its
 own.](docs/design/http.md#studio)** Its files are served before any token
 under a strict CSP, and it sends the pasted token as any client does, so
-the scope rewrite bounds it. Each statement is written in
-`studio/statements*.js`: values as parameters, a name only as FenecQL
-writes one, the typed `where` inside parentheses it cannot close. `make
-studio-highlight` copies `site/highlight.js` in, and `transport.test.mjs`
-holds the in-page answers to a server's.
+the scope rewrite bounds it. An app embedding it hands a frozen
+`window.fenecHost.session` over, taken for the page's own origin alone and
+never stored, with no sign-in or sign-out beside it. Each statement is
+written in `studio/statements*.js`: values as parameters, a name only as
+FenecQL writes one, the typed `where` inside parentheses it cannot close.
+`make studio-highlight` copies `site/highlight.js` in, and
+`transport.test.mjs` holds the in-page answers to a server's.
 
 **[An agent's MCP tool is a statement, held to the token as `/query`
 is.](docs/design/http.md#mcp)** A model's filter goes in parsed, never as

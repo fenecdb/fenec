@@ -59,10 +59,13 @@ jobs:
       # Bounded: a hung `swift test` held a runner for six hours.
       # test-strict.sh runs them again with Swift's cooperative pool cut to
       # one thread, where a call blocking a thread of it hangs at once.
+      # The binaries ci.yml's mobile job builds for the same tests: the
+      # read-routing tests put fenec-shard routers in front of two servers,
+      # and v0.1.11's run failed on the router this step had not built.
       - name: Swift (macOS, iOS simulator)
         timeout-minutes: 30
         run: |
-          cargo build -p fenec-server
+          cargo build -p fenec-server -p fenec-shard
           swift test
           integrations/swift/test-strict.sh
           integrations/swift/test-ios.sh

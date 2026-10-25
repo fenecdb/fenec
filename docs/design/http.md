@@ -112,6 +112,38 @@ loops on every core, three suites at once); a run filtered by name charges
 its first test with the `before` hook's 100 000-row seed, about 10 s, which
 is the hook's and not the router's.
 
+An app embedding the studio -- the desktop app's window on the
+`fenec-server` it started for a file (#381) -- hands it a session as
+`window.fenecHost.session`, `{server, token, tenant}`, frozen and written
+by a preload before the modules run. The preload defines it only where
+`location.origin` is the origin the app started or connected to, and names
+that origin as `server`: a preload runs in every document the window
+loads, and a page of another origin -- a redirect's, a proxy's sign-in
+page -- would read the token from it, which no check of the studio's can
+stop. Keeping the token from other origins is the app's; the studio's own
+check refuses only a session naming a server other than the page's. A
+preload in an isolated world -- Electron's under its default context
+isolation -- defines nothing the page sees: there it goes through
+`contextBridge.exposeInMainWorld`, whose copy must pass `Object.isFrozen`.
+`connect.js` reads it once as it loads, and only a plain object, since an
+element with the id `fenecHost` is `window.fenecHost` too by named access,
+its fields read once each, so a getter cannot answer one way to the check
+and another to the use; takes the session only frozen and naming the
+page's own origin, so the studio sends its token to no server but the one
+that served the page; and keeps nothing under a host: `save` writes
+nothing and a session in `sessionStorage` is not read. The spike's preload
+had written `sessionStorage["fenec-studio"]` for `saved()` to find, a
+private contract on a key that put the token in storage. `app.js` shows no
+Sign out and no sign-in form under a host: a refused token or a session it
+cannot take is said on a page of its own, since a token typed there would
+be a connection the app never sees; the expiry's toasts and a 401
+(`explain`) say to connect again from the app. The first load grew from
+66.3 to 67.3 KB gzipped. `e2e.test.mjs` holds it with a page that defines
+`fenecHost` before the document's scripts, as a preload does: the session
+taken and taken again on a reload, its token in no storage, another
+token's session in `sessionStorage` passed over, a refused token, and a
+session for another origin or not frozen sending no request.
+
 ## MCP
 
 **An agent's MCP tool is a statement, held to the token as `/query` is**

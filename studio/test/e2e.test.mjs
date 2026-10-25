@@ -1,8 +1,9 @@
 // The studio in a headless Chrome against a real fenec-server: signed in
 // with the server's token it browses, sorts, filters, edits and deletes;
 // signed in as one user, no other user's row reaches the grid, a count or
-// a facet. Every page is watched for a content security policy violation
-// and for a script a row's value could have run.
+// a facet. Embedded in an app, it takes the session the app hands over
+// and keeps it out of storage. Every page is watched for a content
+// security policy violation and for a script a row's value could have run.
 //
 //   cd studio && npm ci && npm run e2e      (make studio-test)
 //
@@ -613,6 +614,78 @@ test('as one user: no admin view, and the live view shows no other user\'s row',
 
   assert.deepEqual(p.problems, []);
   await p.close();
+});
+
+/**
+ * A page as an app's window opens one: `window.fenecHost` written before
+ * the studio's modules run, as a preload writes it, and every request the
+ * page sends recorded.
+ */
+async function hosted(session, { frozen = true } = {}) {
+  const p = await page();
+  p.requests = [];
+  p.on('request', (r) => p.requests.push(r.url()));
+  await p.evaluateOnNewDocument(
+    (session, frozen) => {
+      const s = frozen ? Object.freeze({ ...session }) : { ...session };
+      Object.defineProperty(window, 'fenecHost', { value: Object.freeze({ session: s }) });
+    },
+    session,
+    frozen,
+  );
+  await p.goto(`${server.url}/_studio/`);
+  return p;
+}
+
+/** What the page holds in storage, every key and value of both. */
+const stored = (p) => p.evaluate(() => JSON.stringify([Object.entries(sessionStorage), Object.entries(localStorage)]));
+
+test('embedded in an app: the session it hands over, never stored, and no form to sign in with', async () => {
+  // The app's session: the rows, as the server's token reads them, and no
+  // way to sign out of a connection the app holds.
+  const p = await hosted({ server: server.url, token: TOKEN, tenant: null });
+  await p.waitForSelector('.row:not(.pending)');
+  assert.equal(await p.$eval('.who-name', (e) => e.textContent), 'Server token');
+  assert.ok(!(await p.$$eval('.top-end button', (bs) => bs.map((b) => b.textContent))).includes('Sign out'));
+  assert.equal(await p.$('.signin'), null);
+  assert.ok(!(await stored(p)).includes(TOKEN), 'the token reached storage');
+
+  // A reload takes it from the app again, and a session a tab's storage
+  // holds -- another token's -- is not the app's, and is not taken.
+  const alice = jwt({ sub: 'alice', role: 'analyst' });
+  await p.evaluate((s) => sessionStorage.setItem('fenec-studio', s), JSON.stringify({ server: server.url, token: alice, tenant: null }));
+  await p.reload();
+  await p.waitForSelector('.row:not(.pending)');
+  assert.equal(await p.$eval('.who-name', (e) => e.textContent), 'Server token');
+  assert.deepEqual(p.problems, []);
+  await p.close();
+
+  // A token the server refuses: the app's connection was refused, said
+  // with the server's words, and no form to type another into.
+  const wrong = await hosted({ server: server.url, token: 'not-the-token', tenant: null });
+  await wrong.waitForSelector('.host-refused');
+  const said = await wrong.$eval('.host-refused', (e) => e.textContent);
+  assert.match(said, /connection was refused/);
+  assert.match(said, /refused the token/);
+  for (const gone of ['form', 'input', '#token', '.top-end']) assert.equal(await wrong.$(gone), null, gone);
+  assert.ok(!(await stored(wrong)).includes('not-the-token'), 'the token reached storage');
+  assert.deepEqual(wrong.problems, []);
+  await wrong.close();
+
+  // A session for another origin, or one the page could change, is none:
+  // its token goes nowhere.
+  for (const [session, opts] of [
+    [{ server: 'http://127.0.0.1:1', token: TOKEN, tenant: null }, {}],
+    [{ server: server.url, token: TOKEN, tenant: null }, { frozen: false }],
+  ]) {
+    const none = await hosted(session, opts);
+    await none.waitForSelector('.host-refused');
+    assert.match(await none.$eval('.host-refused', (e) => e.textContent), /no session for/);
+    assert.equal(await none.$('form'), null);
+    assert.ok(!none.requests.some((u) => u.startsWith('http://127.0.0.1:1') || /\/(_whoami|query|batch)$/.test(u)), none.requests.join('\n'));
+    assert.deepEqual(none.problems, []);
+    await none.close();
+  }
 });
 
 /** `notes` in each tenant, as many rows as given, at `url` (a node or a router). */

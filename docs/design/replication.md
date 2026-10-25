@@ -386,8 +386,9 @@ the next change from PostgreSQL would write over one, or a copy made again
 forget it. The follower stops at the server's shutdown flag, and the
 shutdown waits for it (`durability::before_shutdown`, 5 s at most, past which a
 copy still being made is left for the next start) before its checkpoint;
-an error it cannot wait out ends the process rather than leave it serving
-a mirror that no longer moves. This is why the PostgreSQL client is
+an error it cannot wait out stops the server rather than leave it serving
+a mirror that no longer moves -- through the one shutdown, exit code 1
+(`durability::stop_with`, [durability.md](durability.md#the-one-shutdown)). This is why the PostgreSQL client is
 `fenec-wire`'s, below the importer: in the server it made the importer
 depend on the server, which could then not run it. A message's length is
 held to PostgreSQL's gigabyte (`proto::MAX_MESSAGE`, its MaxAllocSize)

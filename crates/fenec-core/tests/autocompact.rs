@@ -2,7 +2,8 @@
 //! writes land, the policy says when, and the compact runs beside the
 //! database while writes go on (`compact_when_due`, `Compactor`). Every
 //! document has to come out as a twin that made the same writes and never
-//! compacted holds it, and the file has to stay near what it holds.
+//! compacted holds it, and each compact has to bring the file back to what
+//! it holds, but for what the writes it met wrote over.
 
 #![cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
 
@@ -103,9 +104,13 @@ fn write(rng: &mut Rng, ids: u64) -> String {
     }
 }
 
-fn seed(db: &mut Database, ids: u64) {
+/// The collection and a document an id; the largest record it appended to
+/// the file, 0 for a database with none.
+fn seed(db: &mut Database, ids: u64) -> u64 {
     exec(db, SCHEMA);
+    let mut largest = 0;
     for id in 1..=ids {
+        let before = db.garbage().file;
         exec(
             db,
             &format!(
@@ -116,7 +121,9 @@ fn seed(db: &mut Database, ids: u64) {
                 id
             ),
         );
+        largest = largest.max(db.garbage().file - before);
     }
+    largest
 }
 
 /// A policy that compacts a test's few megabytes.
@@ -125,6 +132,90 @@ fn small() -> CompactPolicy {
         ratio: 0.5,
         floor: 64 << 10,
         memory: false,
+    }
+}
+
+/// What a writer beside a `Compactor` holds each compact to, at its first
+/// write after the compact ends, the new file in place and nothing written
+/// since: what is dead there is no more than the writes the compact met
+/// could have written over. A compact that kept what was dead when it began
+/// is caught once that outweighs what those writes could have left, and
+/// what one keeps piles up from one compact to the next.
+///
+/// The bound is counted, not timed. A compact copies each document written
+/// meanwhile, a round at a time, and a copy leaves dead at most the version
+/// before it -- the image's, or an earlier round's -- and a delete's few
+/// bytes, less than the record that wrote that version: so no more copies
+/// than the writes it met, each leaving no more than the largest record a
+/// write appended. The writes it met are those since the last one that saw
+/// no compact running (`maintaining()`): that one is in the image of the
+/// next compact, and copied by none.
+///
+/// The file's peak against what it holds measured the machine instead.
+/// Past the point the file is due it grows by every write that lands before
+/// the compact's file takes its place, as many as the writer makes while
+/// the compactor rebuilds the graphs and writes the image: 2.3 to 3.0x
+/// here, idle, beside sixteen busy loops and in containers held to two and
+/// three cores, where the two threads get the same share, and 4.46x on
+/// GitHub's runner against a bound of 4. With the compactor's thread alone
+/// reniced to 10, on two cores beside two busy loops, 5.5 to 7.7x every
+/// run, each compact still bringing the file back to 1.04-1.07x; 16.5x at
+/// 19.
+struct Compacts {
+    mapped: bool,
+    /// The compacts seen to end.
+    ended: u64,
+    /// The writes since the last compact ended, or since the last write
+    /// that saw none running.
+    met: u64,
+    /// The largest record a write appended, the seed's among them.
+    largest: u64,
+}
+
+impl Compacts {
+    fn new(mapped: bool, largest: u64) -> Compacts {
+        Compacts {
+            mapped,
+            ended: 0,
+            met: 0,
+            largest,
+        }
+    }
+
+    /// Runs `stmt` under the write lock, once any compact that ended since
+    /// the last write is held to what it left dead.
+    fn write(&mut self, db: &RwLock<Database>, stmt: &Statement) {
+        let mut g = db.write().unwrap();
+        self.look(&g);
+        let running = g.maintaining();
+        let before = g.garbage().file;
+        g.execute(stmt).unwrap();
+        self.largest = self.largest.max(g.garbage().file - before);
+        self.met = match running {
+            true => self.met + 1,
+            false => 0,
+        };
+    }
+
+    /// Holds a compact that ended since the last look to what it left
+    /// dead: called with nothing written since it ended.
+    fn look(&mut self, g: &Database) {
+        let now = g.compactions();
+        if now == self.ended {
+            return;
+        }
+        let left = g.garbage();
+        assert!(
+            left.dead() <= self.met * self.largest,
+            "mapped {}: compact {now} left {} bytes dead, more than the {} writes \
+             it met could have written over, {} bytes each at the most: {left:?}",
+            self.mapped,
+            left.dead(),
+            self.met,
+            self.largest,
+        );
+        self.ended = now;
+        self.met = 0;
     }
 }
 
@@ -318,40 +409,43 @@ fn a_compact_past_the_cache_leaves_the_file_one_through_it_does() {
 /// Writes go on from one thread while a `Compactor` compacts the file
 /// again and again beside them, mapped and read into memory: every
 /// document comes out as the twin holds it, before and after the file is
-/// opened again, and the file never grows far past what it holds.
+/// opened again, and each compact leaves dead only what the writes it met
+/// wrote over ([`Compacts`]).
 #[test]
 fn a_file_compacted_on_its_own_under_writes_holds_what_its_twin_does() {
     for mapped in [true, false] {
         let path = tmp(&format!("load-{mapped}"));
         let mut db = fenec_core::fs::open_with(&path, mapped, Box::new(Ok)).unwrap();
         let mut twin = Database::new();
-        seed(&mut db, 300);
+        let mut compacts = Compacts::new(mapped, seed(&mut db, 300));
         seed(&mut twin, 300);
         let db = Arc::new(RwLock::new(db));
         let compactor = Compactor::start_every(&db, small(), Duration::from_millis(2)).unwrap();
         let mut rng = Rng(42);
-        let mut most = 0f64;
-        for i in 0..12_000 {
+        // 12 000 writes, and on until three compacts have ended: in 12 000
+        // alone a compactor scheduled late ended one. Bounded, should they
+        // never end.
+        let mut writes = 0u64;
+        while writes < 12_000 || compacts.ended < 3 {
+            assert!(
+                writes < 500_000,
+                "mapped {mapped}: {writes} writes and {} compacts",
+                compacts.ended
+            );
             let w = write(&mut rng, 300);
-            exec(&mut db.write().unwrap(), &w);
-            exec(&mut twin, &w);
-            if i % 100 == 0 {
-                let g = db.read().unwrap().garbage();
-                most = most.max(g.file as f64 / (g.live + g.kept).max(1) as f64);
+            let stmt = fenec_ql::parse_one(&w).unwrap();
+            compacts.write(&db, &stmt);
+            twin.execute(&stmt).unwrap();
+            writes += 1;
+            if writes.is_multiple_of(100) {
                 // Now and then a pause, as a write load has: the compact
                 // lands between writes, not only beside them.
                 std::thread::sleep(Duration::from_millis(1));
             }
         }
         drop(compactor);
-        let compactions = db.read().unwrap().compactions();
-        assert!(
-            compactions >= 3,
-            "mapped {mapped}: {compactions} compactions"
-        );
-        // Looked at every 2 ms, a compact due at half the file: the file is
-        // never long past twice what it holds.
-        assert!(most < 4.0, "mapped {mapped}: the file reached {most:.2}x");
+        // A compact the last writes met, which the drop waited out.
+        compacts.look(&db.read().unwrap());
         while let Some(r) = compact_when_due(&db, &small()) {
             r.unwrap();
         }
@@ -537,40 +631,37 @@ fn a_look_made_while_a_write_holds_the_lock_waits_for_it() {
 /// A writer that never pauses: each compact still runs and ends -- its
 /// catch-up copies the writes made meanwhile while the writer goes on, and
 /// takes the write lock only for the last few -- and the file comes back to
-/// what it holds each time rather than grow with every write.
+/// what it holds each time rather than grow with every write: each compact
+/// leaves dead only what the writes it met wrote over ([`Compacts`]).
 #[test]
 fn compacts_keep_up_with_a_writer_that_never_pauses() {
     for mapped in [true, false] {
         let path = tmp(&format!("steady-{mapped}"));
         let mut db = fenec_core::fs::open_with(&path, mapped, Box::new(Ok)).unwrap();
         let mut twin = Database::new();
-        seed(&mut db, 300);
+        let mut compacts = Compacts::new(mapped, seed(&mut db, 300));
         seed(&mut twin, 300);
         let db = Arc::new(RwLock::new(db));
         let compactor = Compactor::start_every(&db, small(), Duration::from_millis(2)).unwrap();
         let mut rng = Rng(77);
-        let (mut writes, mut most) = (0, 0f64);
-        // Until five compacts have run, each statement parsed before the
-        // lock is taken, as a server's are; bounded, should they never run.
-        while db.read().unwrap().compactions() < 5 {
-            assert!(writes < 500_000, "{writes} writes and no five compacts");
+        let mut writes = 0u64;
+        // Until five compacts have ended, each statement parsed before the
+        // lock is taken, as a server's are; bounded, should they never end.
+        while compacts.ended < 5 {
+            assert!(
+                writes < 500_000,
+                "mapped {mapped}: {writes} writes and {} compacts",
+                compacts.ended
+            );
             let w = write(&mut rng, 300);
             let stmt = fenec_ql::parse_one(&w).unwrap();
-            {
-                let mut g = db.write().unwrap();
-                g.execute(&stmt).unwrap();
-                if writes % 100 == 0 {
-                    let g = g.garbage();
-                    most = most.max(g.file as f64 / (g.live + g.kept).max(1) as f64);
-                }
-            }
+            compacts.write(&db, &stmt);
             twin.execute(&stmt).unwrap();
             writes += 1;
         }
         drop(compactor);
-        // Never long past twice what it holds: 2.5 to 2.8x here, beside ten
-        // busy loops on an 8-core machine as well.
-        assert!(most < 4.0, "mapped {mapped}: the file reached {most:.2}x");
+        // A compact the last writes met, which the drop waited out.
+        compacts.look(&db.read().unwrap());
         while let Some(r) = compact_when_due(&db, &small()) {
             r.unwrap();
         }

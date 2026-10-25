@@ -1,6 +1,6 @@
 # Durability
 
-The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *Durability*: a storage error stopping writes, buffered writes written behind the lock, and the sync log. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *Durability*: a storage error stopping writes, buffered writes written behind the lock, the sync log, and the one shutdown (added after the move). Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Storage errors
 
@@ -94,3 +94,115 @@ the machine (the process forgotten, the file cut back to the log's
 start) through a full log, a sync past an entry, a torn header, a file
 renamed in, a second open and two files of one stem, and fenec-core's
 and fenec-http's tests pass on Linux, where every file keeps one.
+
+## The one shutdown
+
+**Every way a server stops is the one shutdown** (`fenec-server`'s
+`durability`). `SIGINT`, `SIGTERM` and `SIGHUP` store `SHUTDOWN` in their
+handler, which is all a handler may safely do, and the thread that syncs
+-- `run_syncer` over a file, `serve_dir`'s loop over a node's tenants --
+sees it within `LOOK`, 200 ms (`wait_tick`): the held writes answered
+(`waits::end_all`), what was registered to run first (`before_shutdown`:
+`--follow`'s follower stopped with every change it applied on disk, the
+traces sent), then the final sync and the checkpoint, the write lock held
+to `process::exit`, so no write is answered between the sync and the exit.
+The syncers slept a whole `--sync` interval before they looked, so
+`--sync 5000` exited 5.04 s after the end of its stdin, its lock held
+against the app's next open of the file, and `--sync 60000` would have let
+docker's SIGKILL, 10 s after its SIGTERM, come before the final sync; the
+interval is still counted from the end of the last pass, so a flush comes
+as often as it did -- under writes, `--sync 250`'s flushes 260 ms apart
+before and after, and an idle `--sync 60000` server 10 ms of CPU in 30 s,
+the resolution `ps` reads it at. A failure of what runs beside the
+database goes the same way with an exit code (`stop_with`): the HTTP
+listener's `serve_on` ending (1), `--follow`'s mirror stopping (1) -- which
+exited the process from its own thread and so cut short a shutdown already
+under way, whose `before_shutdown` was waiting for it, the sync among what
+was cut -- and a thread the start cannot make (2, as it exited before).
+The mirror stores its code (`exit_with`), then tells that wait it has
+stopped, so the wait is not its `STOP_WAIT` and the exit cannot come before
+the code, and only then asks for the shutdown. A shutdown writes a
+checkpoint only once the HTTP thread started (`serving`, unless a stop was
+asked for before that thread was: read after it, the flag was a
+supervisor's answer to the thread's own `listening on` line 1 time in 200
+beside 16 busy loops, and a server that had served kept no graph) and only
+when it exits 0 (`checkpoints`), a server's or
+a node's (`Tenants::shutdown_with`): a checkpoint rewrites the whole file,
+and the review of #383 measured a file server of 100 000 64-dimension
+vectors whose port was held log `checkpoint written` at every failed start,
+its inode new and its file 26.4, 28.4, 28.9, 29.3 MB, each graph a part
+(the next open still linked 91 691 vectors), a `--dir --replica-of` standby
+rewrite its vector tenant at each, which `fenec-node.service`'s
+`Restart=on-failure` repeats, and `--follow` make its slot and publication
+and copy 200 000 rows within `STOP_WAIT` before it exited 1. A `--follow`
+server whose PostgreSQL refused it served before its mirror failed, and
+rewrote a file of 6 000 vectors at each of three tries, a new inode each
+time: a failure is not a stop asked for, and the graphs `link::keep` appends
+as they change keep the next open's linking short without a checkpoint.
+So both listeners, `--metrics`' and the HTTP one, are bound straight after
+the open -- before the guard `--follow` puts on it, the history settled
+(a failed `--promote` had forked and synced its file, 24 bytes, and a first
+start as a primary gave its file a history), and anything running beside
+the database: the graph keeper, the sweeper, a replica's follower, the
+mirror, the stdin thread, a node's tenants. Not before the open, whose
+reading of a large file a connection would wait out in the backlog. An open
+address without a token is refused with the flags, exit 2, before the open
+(`fenec_http::exposed`, which counts an empty token as none). What fails
+before anything writes the file or runs beside it -- a flag, the lock, the
+open, a port -- exits where it fails, with the exit codes it had: 1 for a
+file server's HTTP port, 2 for a node's and for `--metrics`'. It has
+written `<file>.lock` (`fenec_abi::lock::hold`, taken before the open and
+left on disk, as every server leaves it) and what the open writes, no
+more: a file, or a node's directory, made where none was (an empty file is
+8 bytes), a torn tail cut, and on Linux and Android a sync log's entries
+written back into the file (`synclog::recover`), the writes an earlier
+process had made durable. Taken
+before the tenants open, a node's port queues the connections that come
+while they do: a standby of 400 vector tenants took 1.36 to 1.67 s to
+answer, macOS kept 128 connections in its backlog and the rest of a burst
+had their SYNs sent again, for up to some 4 s, and through a router a
+request waits up to `--upstream-timeout` -- where before they were refused
+at once. No request was answered by a half-started node. On a node the
+signal handlers are installed once the tenants a standby follows are
+open, as before: a SIGTERM while they open stops it at once by the default
+action, rather than wait for each to open past a supervisor's grace. What
+its followers had applied by then is not lost to the primary: a replica
+asks from its file's own position, so the primary sends it again.
+`--exit-on-stdin-close` sets the flag (`request_shutdown`) from a thread
+that reads stdin to its end. An app
+that starts a server for a file it opened holds a pipe on the server's
+stdin, and when the app is killed (`kill -9`, a crash) the system closes
+the pipe, where no signal would have come: the desktop studio's spike
+(#381) found the orphaned server, its parent now pid 1, holding
+`<file>.lock`, so the file was refused to the app until its next launch
+reaped the server from a registry of pids. Watching the parent's pid was
+the alternative: a poll, late by its interval and fooled by a pid used
+again, and macOS has no `PR_SET_PDEATHSIG`. What arrives on stdin is read
+into a 4 KB buffer and dropped, so a parent's writes never block on a
+full pipe and nothing grows; a stdin handed over non-blocking is asked
+again every `LOOK` while it answers `WouldBlock`. `/dev/null`, or a stdin
+closed before the start, ends at once and so does the server, exit 0,
+which a parent that forgot the pipe learns at its first start. A terminal
+is refused at the start (exit 2): a server reading one from the background
+is stopped whole by `SIGTTIN`, its lock held -- the stuck server the flag
+is for -- and in a terminal Ctrl-C makes the same shutdown. So is a
+`--jwt-secret-file`, `--policy` or `--jwt-keys` that is stdin
+(`is_stdin`: by name or link, since macOS answers a stat of `/dev/fd/0`
+over a pipe with the device node's, or by device and inode), before it is
+read: read to its end, it would have been the server's end, and a parent
+holding the pipe open would have held the read for ever. A way down of
+its own, an exit from the stdin thread, would have been a second place to
+hold the lock to the exit, and one the `--dir` loop and the follower were
+never taught. `tests/stdin.rs` holds a file's and a node's shutdown to
+it, a long `--sync` to an exit well inside its interval, a server without
+the flag to never reading stdin, `/dev/null`, a terminal with the flag and
+without it, and a secret on stdin; `wait_tick`'s tests hold a tick to no
+sooner than its interval and a stop to long before it; `tests/start.rs`
+holds a file server, a first start as a primary and a standby whose port
+is held to an exit that leaves a file of vectors as it was, to the inode
+and the byte, a `--follow` server whose source refuses it to an exit 1
+with no checkpoint and the same inode, twice, and an open address with no
+token to an exit 2 before the file is made; and
+`tests/follow.rs` (against PostgreSQL) a held port to no slot or
+publication made, and a mirror that cannot go on to an exit 1 through the
+shutdown.

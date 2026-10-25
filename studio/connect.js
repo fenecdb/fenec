@@ -7,13 +7,45 @@
 // forgets it. It is sent as `Authorization: Bearer` to the server named
 // here, which the page's policy (`connect-src`) limits to this origin and
 // the one `--studio-connect` gave.
+//
+// An app embedding the studio hands its session over instead, frozen, as
+// `window.fenecHost.session` before these modules run -- on the server's
+// origin alone, which only the app can see to -- and it is never
+// stored: the app holds the connection, and a session written into
+// sessionStorage for the page to find was a private contract on a key that
+// kept the token in storage.
 
 import { connect } from './client.js';
 
 const KEY = 'fenec-studio';
 
-/** `{server, token, tenant}` this tab connected with, or `null`. */
+/** This page's own server: the studio is served by the server it reads. */
+export const here = () => location.origin;
+
+// Read once, as the modules load, so nothing the page draws later stands in
+// for it: an element with the id `fenecHost` is `window.fenecHost` too.
+const HOST = (() => {
+  const h = globalThis.fenecHost;
+  return h && typeof h === 'object' && [Object.prototype, null].includes(Object.getPrototypeOf(h)) ? h : null;
+})();
+
+/** Whether an app embeds the studio and holds its connection. */
+export const hosted = () => HOST !== null;
+
+/**
+ * `{server, token, tenant}` this tab connected with, or `null`. Under an
+ * app, the app's session alone, and only frozen and naming this page's own
+ * origin, so its token goes to no server but the one that served the page.
+ */
 export function saved() {
+  if (HOST) {
+    const s = HOST.session;
+    if (!s || typeof s !== 'object' || !Object.isFrozen(s)) return null;
+    // Each field read once: a getter answers the check and the use alike.
+    const { server, token, tenant } = s;
+    const ok = typeof server === 'string' && server.replace(/\/+$/, '') === here() && typeof token === 'string';
+    return ok && (tenant == null || typeof tenant === 'string') ? { server: here(), token, tenant: tenant || null } : null;
+  }
   try {
     const s = JSON.parse(sessionStorage.getItem(KEY) ?? 'null');
     return s && typeof s.server === 'string' ? s : null;
@@ -23,6 +55,7 @@ export function saved() {
 }
 
 export function save(s) {
+  if (HOST) return; // the app's to keep
   try {
     sessionStorage.setItem(KEY, JSON.stringify({ server: s.server, token: s.token, tenant: s.tenant ?? null }));
   } catch {
@@ -37,9 +70,6 @@ export function forget() {
     /* nothing kept */
   }
 }
-
-/** This page's own server: the studio is served by the server it reads. */
-export const here = () => location.origin;
 
 /**
  * A JSON Web Token's claims, read and not verified -- what the page shows
