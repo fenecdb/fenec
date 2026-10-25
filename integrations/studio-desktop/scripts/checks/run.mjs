@@ -10,7 +10,7 @@
 // goes, the app's own to <check>.app.log; a CI run uploads that directory
 // when it fails. A check that leaves a process behind is killed here, so the
 // next one starts clean, and fails for it.
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, rmSync, writeSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { D, HERE, IDENTIFIER, describe, mine } from './lib.mjs';
@@ -49,6 +49,9 @@ for (const name of names) {
   let left = mine();
   if (left.length) {
     console.log(`${name} left processes behind; killing them:\n${describe(left)}`);
+    // When each started, to tell a process that outlived the check from one started after it ended.
+    const started = spawnSync('ps', ['-o', 'pid=,lstart=', '-p', left.map((p) => p.pid).join(',')], { encoding: 'utf8', timeout: 30000 });
+    console.log(`started:\n${started.stdout}`);
     for (const p of left) {
       try {
         process.kill(p.pid, 'SIGKILL');
