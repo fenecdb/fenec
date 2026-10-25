@@ -25,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	fenecdb "github.com/fenecdb/fenec/integrations/go"
+	fenecdb "github.com/fenecdb/fenecdb/integrations/go"
 )
 
 const (

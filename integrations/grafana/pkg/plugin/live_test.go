@@ -22,7 +22,7 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 
-	fenecdb "github.com/fenecdb/fenec/integrations/go"
+	fenecdb "github.com/fenecdb/fenecdb/integrations/go"
 )
 
 const (

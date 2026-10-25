@@ -1139,7 +1139,7 @@ stop fenec-node</code>), on a cloud's notice where it gives one (Azure's
 Scheduled Events, GCE's <code>maintenance-event</code>), and where a host
 may pause it unannounced, keep the lease short: two primaries last no
 longer than the lease the node had left. The
-<a href="https://github.com/fenecdb/fenec/blob/main/deploy/RUNBOOK.md#known-gaps">runbook's
+<a href="https://github.com/fenecdb/fenecdb/blob/main/deploy/RUNBOOK.md#known-gaps">runbook's
 known gaps</a> say which pauses are counted and which are not. An answer that passed the second
 check just before its process stopped still goes out whenever the process
 runs again. A stall of sixteen rounds or more can leave a node without the
@@ -2261,10 +2261,10 @@ from an environment file (<a href="#deploying">Deploying it</a>).</p>
 
 <h2 id="deploying">Deploying it</h2>
 
-<p>The repository's <a href="https://github.com/fenecdb/fenec/tree/main/deploy"><code>deploy/</code></a>
+<p>The repository's <a href="https://github.com/fenecdb/fenecdb/tree/main/deploy"><code>deploy/</code></a>
 is a kit for running all of the above on machines of your own: systemd
 units, their environment files, alert rules, and the operator's
-<a href="https://github.com/fenecdb/fenec/blob/main/deploy/RUNBOOK.md">runbook</a>.
+<a href="https://github.com/fenecdb/fenecdb/blob/main/deploy/RUNBOOK.md">runbook</a>.
 <code>make drill</code> breaks a deployment of two regions on purpose, in
 Docker, and holds it to losing no acknowledged write.</p>
 

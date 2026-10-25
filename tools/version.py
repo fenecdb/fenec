@@ -82,7 +82,7 @@ def changelogs(v):
         text = p.read_text(encoding="utf-8")
         if re.search(rf"^## {re.escape(v)}$", text, flags=re.M):
             continue
-        entry = f"## {v}\n\nThe release notes: https://github.com/fenecdb/fenec/releases/tag/v{v}\n\n"
+        entry = f"## {v}\n\nThe release notes: https://github.com/fenecdb/fenecdb/releases/tag/v{v}\n\n"
         text, n = re.subn(r"^(# Changelog\n\n)", lambda m: m.group(1) + entry, text, count=1, flags=re.M)
         if n != 1:
             sys.exit(f"{p}: no '# Changelog' heading")
@@ -97,12 +97,15 @@ def examples(v):
     sub("examples/react/package.json", r'^(    "@fenecdb/react": )"[^"]+"', rf'\g<1>"^{v}"')
     sub("examples/python/requirements.txt", r"^fenecdb==\S+$", f"fenecdb=={v}")
     # The Go module is fetched by the tag release.yml pushes beside the release's.
-    sub("examples/go/go.mod", r"^(require github\.com/fenecdb/fenec/integrations/go )v\S+$", rf"\g<1>v{v}")
+    # Its path is the repository's name, which v0.1.11 and earlier (published
+    # as .../fenec/integrations/go) do not declare: the first release after
+    # them is the first this line resolves at.
+    sub("examples/go/go.mod", r"^(require github\.com/fenecdb/fenecdb/integrations/go )v\S+$", rf"\g<1>v{v}")
     sub("examples/dotnet/Notes.csproj", r'(<PackageReference Include="FenecDb" Version=")[^"]+(")', rf"\g<1>{v}\g<2>")
     # The crates are not on crates.io: Cargo takes them from the release's tag.
     for crate in ("fenec-core", "fenec-ql", "fenec-abi"):
         sub("examples/rust/Cargo.toml", rf'^({crate} = \{{ git = "[^"]+", tag = )"v[^"]+"', rf'\g<1>"v{v}"')
-    sub("examples/swift/Package.swift", r'(\.package\(url: "https://github\.com/fenecdb/fenec", from: )"[^"]+"', rf'\g<1>"{v}"')
+    sub("examples/swift/Package.swift", r'(\.package\(url: "https://github\.com/fenecdb/fenecdb", from: )"[^"]+"', rf'\g<1>"{v}"')
     sub("examples/kotlin-android/gradle.properties", r"^fenecVersion=.+$", f"fenecVersion={v}")
     sub("examples/flutter/pubspec.yaml", r"^version: .+$", f"version: {v}")
     for package in ("fenecdb", "fenecdb_flutter"):

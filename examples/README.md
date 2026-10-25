@@ -52,7 +52,7 @@ first:
 fenec-server --file notes.fenec --http 127.0.0.1:8080 --http-token secret
 ```
 
-A release binary is on the [releases page](https://github.com/fenecdb/fenec/releases),
+A release binary is on the [releases page](https://github.com/fenecdb/fenecdb/releases),
 or `cargo build --release -p fenec-server` builds one here. Every example
 reads `FENEC_URL` and `FENEC_TOKEN`; `secret` is a development default,
 never one to deploy.

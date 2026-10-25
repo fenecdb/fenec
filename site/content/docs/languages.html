@@ -16,13 +16,13 @@ Kotlin and Dart embed the database in the app, a file on the device
 <code>Fenec.connect</code>; their tabs run the same flow in their own
 tests. Each tab ends with a full example: one app, Notes, in every
 language, a folder of a few files to clone and run
-(<a href="https://github.com/fenecdb/fenec/tree/main/examples">examples</a>),
+(<a href="https://github.com/fenecdb/fenecdb/tree/main/examples">examples</a>),
 and beside them a whole shop in Next.js
-(<a href="https://github.com/fenecdb/fenec/tree/main/examples/shop">shop</a>),
+(<a href="https://github.com/fenecdb/fenecdb/tree/main/examples/shop">shop</a>),
 a double-entry payments ledger on Node
-(<a href="https://github.com/fenecdb/fenec/tree/main/examples/ledger">ledger</a>)
+(<a href="https://github.com/fenecdb/fenecdb/tree/main/examples/ledger">ledger</a>)
 and courier dispatch across tenants
-(<a href="https://github.com/fenecdb/fenec/tree/main/examples/dispatch">dispatch</a>).</p>
+(<a href="https://github.com/fenecdb/fenecdb/tree/main/examples/dispatch">dispatch</a>).</p>
 
 <h2 id="setup">Start a server</h2>
 
@@ -81,7 +81,7 @@ write once however often it is sent (<code>db.replayed</code>), and
 <code>AsyncClient</code> does the same in an event loop, the endpoints of
 its <code>collection(...)</code> awaited; LangChain and LlamaIndex have
 stores of their own (<a href="integrations.html">Integrations</a>).</p>
-<p><a href="https://github.com/fenecdb/fenec/tree/main/examples/python">Full example</a>: Notes, a CLI over the server with the builder, <code>match</code>, <code>fuse</code> and the change stream.</p>
+<p><a href="https://github.com/fenecdb/fenecdb/tree/main/examples/python">Full example</a>: Notes, a CLI over the server with the builder, <code>match</code>, <code>fuse</code> and the change stream.</p>
 </div>
 
 <div class="lang" data-name="TypeScript">
@@ -117,12 +117,12 @@ const hits = await db.from('docs').select('title').match('title', 'oasys', { fuz
 <p>The same code runs as plain JavaScript, without the types. In the
 browser there is no server at all: the same database runs in the page
 (<a href="javascript.html">JavaScript and TypeScript</a>).</p>
-<p><a href="https://github.com/fenecdb/fenec/tree/main/examples/node-server">Full example</a>: Notes from Node through <code>@fenecdb/web/client</code>, its live queries run on the server; in the page, <a href="https://github.com/fenecdb/fenec/tree/main/examples/web-local">web-local</a> and <a href="https://github.com/fenecdb/fenec/tree/main/examples/react">react</a>.</p>
+<p><a href="https://github.com/fenecdb/fenecdb/tree/main/examples/node-server">Full example</a>: Notes from Node through <code>@fenecdb/web/client</code>, its live queries run on the server; in the page, <a href="https://github.com/fenecdb/fenecdb/tree/main/examples/web-local">web-local</a> and <a href="https://github.com/fenecdb/fenecdb/tree/main/examples/react">react</a>.</p>
 </div>
 
 <div class="lang" data-name="Go">
-<pre data-lang="bash" data-label="install">go get github.com/fenecdb/fenec/integrations/go   # the standard library alone</pre>
-<pre data-lang="go" data-label="main.go">import fenecdb "github.com/fenecdb/fenec/integrations/go"
+<pre data-lang="bash" data-label="install">go get github.com/fenecdb/fenecdb/integrations/go   # the standard library alone</pre>
+<pre data-lang="go" data-label="main.go">import fenecdb "github.com/fenecdb/fenecdb/integrations/go"
 
 db := fenecdb.New("http://127.0.0.1:8080", fenecdb.WithToken("secret"))
 
@@ -154,7 +154,7 @@ n, err := docs.Where("title", "~", "Dunes").Count(ctx)</pre>
 <code>Batch</code>, <code>IdempotencyKey</code>, <code>After</code> for a
 replica, <code>Subscribe</code>, <code>Changes</code> and
 <code>WithTenant</code> cover the rest of the <a href="http.html">HTTP
-endpoint</a> (<a href="https://github.com/fenecdb/fenec/tree/main/integrations/go">integrations/go</a>);
+endpoint</a> (<a href="https://github.com/fenecdb/fenecdb/tree/main/integrations/go">integrations/go</a>);
 a refusal is an <code>*fenecdb.Error</code>, and a batch's says which
 statement stopped it (<code>At</code>, from 0).
 A <code>[]float32</code> goes out as the decimals that read back as each
@@ -193,7 +193,7 @@ var rows []struct {
 err := query(&amp;rows, "get docs select title, year where year &gt;= $1 order year desc limit $2", 2020, 5)</pre>
 <p><code>FenecError</code> is a struct of the status and the body's
 <code>error</code>.</p>
-<p><a href="https://github.com/fenecdb/fenec/tree/main/examples/go">Full example</a>: Notes, a CLI over the server with the builder, typed rows and a subscription.</p>
+<p><a href="https://github.com/fenecdb/fenecdb/tree/main/examples/go">Full example</a>: Notes, a CLI over the server with the builder, typed rows and a subscription.</p>
 </div>
 
 <div class="lang" data-name="Rust">
@@ -221,7 +221,7 @@ match query("get nowhere", json!([])) {
 }</pre>
 <p>Or embed the engine in your process, with no server
 (<a href="embedding.html">Embedded Rust</a>).</p>
-<p><a href="https://github.com/fenecdb/fenec/tree/main/examples/rust">Full example</a>: Notes with <code>fenec-core</code> embedded, a file and no server.</p>
+<p><a href="https://github.com/fenecdb/fenecdb/tree/main/examples/rust">Full example</a>: Notes with <code>fenec-core</code> embedded, a file and no server.</p>
 </div>
 
 <div class="lang" data-name=".NET">
@@ -258,7 +258,7 @@ classes by property name, any case; <code>BatchAsync</code>,
 <code>SubscribeAsync</code> as an <code>IAsyncEnumerable</code>,
 <code>ChangesAsync</code> and a <code>Tenant</code> option cover the rest
 of the <a href="http.html">HTTP endpoint</a>
-(<a href="https://github.com/fenecdb/fenec/tree/main/integrations/dotnet">integrations/dotnet</a>);
+(<a href="https://github.com/fenecdb/fenecdb/tree/main/integrations/dotnet">integrations/dotnet</a>);
 a refusal is a <code>FenecException</code>, and a batch's says which
 statement stopped it (<code>At</code>, from 0).
 A <code>float[]</code> or <code>ReadOnlyMemory&lt;float&gt;</code> goes out
@@ -285,7 +285,7 @@ var rows = await Query("get docs select title, year where year &gt;= $1 order ye
 var titles = rows.EnumerateArray().Select(r =&gt; r.GetProperty("title").GetString());</pre>
 <p>The body is serialised whole: <code>PostAsJsonAsync</code> streams it chunked,
 and the server wants a <code>Content-Length</code>.</p>
-<p><a href="https://github.com/fenecdb/fenec/tree/main/examples/dotnet">Full example</a>: Notes, a console app over the server with the builder, records and <code>SubscribeAsync</code>.</p>
+<p><a href="https://github.com/fenecdb/fenecdb/tree/main/examples/dotnet">Full example</a>: Notes, a console app over the server with the builder, records and <code>SubscribeAsync</code>.</p>
 </div>
 
 <div class="lang" data-name="Java">
@@ -369,7 +369,7 @@ hits = query("get docs select title match title $1 fuzzy", ["oasys"])</pre>
 </div>
 
 <div class="lang" data-name="Swift">
-<pre data-lang="text" data-label="Package.swift">.package(url: "https://github.com/fenecdb/fenec", from: "{{version}}")   // product "FenecDB"</pre>
+<pre data-lang="text" data-label="Package.swift">.package(url: "https://github.com/fenecdb/fenecdb", from: "{{version}}")   // product "FenecDB"</pre>
 <pre data-lang="swift" data-label="Search.swift">import FenecDB
 
 // Embedded: the database is a file the app holds, no server.
@@ -406,7 +406,7 @@ server through TLS: <code>URLSession</code> makes the requests; over it,
 <code>remote.batch([...], idempotencyKey:)</code> lands statements whole
 and <code>withIdempotencyKey</code> makes a write once
 (<a href="mobile.html#connect">Without a file</a>).</p>
-<p><a href="https://github.com/fenecdb/fenec/tree/main/examples/swift">Full example</a>: Notes, a SwiftUI app over a file, its list a <code>LiveQuery</code>, and a CLI.</p>
+<p><a href="https://github.com/fenecdb/fenecdb/tree/main/examples/swift">Full example</a>: Notes, a SwiftUI app over a file, its list a <code>LiveQuery</code>, and a CLI.</p>
 </div>
 
 <div class="lang" data-name="Kotlin">
@@ -447,7 +447,7 @@ server through TLS: <code>HttpURLConnection</code> makes the requests; over
 it, <code>remote.batch(listOf(...), idempotencyKey = id)</code> lands
 statements whole and <code>withIdempotencyKey</code> makes a write once
 (<a href="mobile.html#connect">Without a file</a>).</p>
-<p><a href="https://github.com/fenecdb/fenec/tree/main/examples/kotlin-android">Full example</a>: Notes, a Compose app over a file, its list a live <code>Flow</code>, and a JVM CLI.</p>
+<p><a href="https://github.com/fenecdb/fenecdb/tree/main/examples/kotlin-android">Full example</a>: Notes, a Compose app over a file, its list a live <code>Flow</code>, and a JVM CLI.</p>
 </div>
 
 <div class="lang" data-name="Dart">
@@ -488,7 +488,7 @@ apps</a>). A device reaches a server through TLS: <code>dart:io</code>'s
 <code>remote.batch([...], idempotencyKey: id)</code> lands statements whole
 and <code>withIdempotencyKey</code> makes a write once
 (<a href="mobile.html#connect">Without a file</a>).</p>
-<p><a href="https://github.com/fenecdb/fenec/tree/main/examples/flutter">Full example</a>: Notes, a Flutter app over a file, its list a <code>StreamBuilder</code> over a live query.</p>
+<p><a href="https://github.com/fenecdb/fenecdb/tree/main/examples/flutter">Full example</a>: Notes, a Flutter app over a file, its list a <code>StreamBuilder</code> over a live query.</p>
 </div>
 
 </div>

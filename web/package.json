@@ -49,7 +49,7 @@
   "homepage": "https://fenecdb.com/docs/javascript",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/fenecdb/fenec.git",
+    "url": "git+https://github.com/fenecdb/fenecdb.git",
     "directory": "web"
   },
   "publishConfig": {

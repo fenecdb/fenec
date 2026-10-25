@@ -3,11 +3,17 @@
 A client for fenec-server's HTTP endpoint, the standard library alone.
 
 ```sh
-go get github.com/fenecdb/fenec/integrations/go
+go get github.com/fenecdb/fenecdb/integrations/go
 ```
 
+The module's path follows the repository's name. v0.1.11 and earlier were
+published as `github.com/fenecdb/fenec/integrations/go`, before the
+repository became `fenecdb`, and declare that path: an app on one of them
+keeps importing it, and moves to the new path with the first release that
+declares it.
+
 ```go
-import fenecdb "github.com/fenecdb/fenec/integrations/go"
+import fenecdb "github.com/fenecdb/fenecdb/integrations/go"
 
 db := fenecdb.New("http://127.0.0.1:8080", fenecdb.WithToken("secret"))
 w, err := db.Exec(ctx, "put docs {title: $1, embed: $2}", "Dunes", []float32{0.9, 0.1, 0})

@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Report it privately, through GitHub:
-**https://github.com/fenecdb/fenec/security/advisories/new**
+**https://github.com/fenecdb/fenecdb/security/advisories/new**
 
 That form is visible only to the maintainers. Please do not open a public issue
 for a vulnerability, and please do not post a working exploit anywhere public

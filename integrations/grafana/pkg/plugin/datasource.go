@@ -19,7 +19,7 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 
-	fenecdb "github.com/fenecdb/fenec/integrations/go"
+	fenecdb "github.com/fenecdb/fenecdb/integrations/go"
 )
 
 var (

@@ -21,7 +21,7 @@
   "homepage": "https://fenecdb.com/docs/sync",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/fenecdb/fenec.git",
+    "url": "git+https://github.com/fenecdb/fenecdb.git",
     "directory": "integrations/react"
   },
   "publishConfig": {

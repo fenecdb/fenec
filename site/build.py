@@ -26,7 +26,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(ROOT)
 OUT = os.path.join(ROOT, "dist")
 
-REPO_URL = "https://github.com/fenecdb/fenec"
+REPO_URL = "https://github.com/fenecdb/fenecdb"
 
 # esbuild, when it happens to be on PATH. The generator itself stays
 # stdlib-only -- the repo's zero-dependency rule -- so a missing esbuild is a
