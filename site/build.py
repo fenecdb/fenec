@@ -94,6 +94,19 @@ NAV = [
     ]),
     ("Reference", [
         ("docs/fenecql", "FenecQL"),
+        # The reference this page once held, a page a family of statements,
+        # the general-database ones first and vectors last (the tour on
+        # docs/fenecql lists them); labelled as the pages are titled, since
+        # the group says what they are. A fragment of the old page is
+        # followed to its new one by moved.json.
+        ("docs/fenecql-reading", "Reading data"),
+        ("docs/fenecql-writing", "Writing data"),
+        ("docs/fenecql-schema", "Collections and types"),
+        ("docs/fenecql-indexes", "Indexes"),
+        ("docs/fenecql-lookup", "Lookup and subqueries"),
+        ("docs/fenecql-aggregates", "Aggregates and grouping"),
+        ("docs/fenecql-search", "Text search"),
+        ("docs/fenecql-vector", "Vector search"),
         ("docs/sql", "From SQL"),
         ("docs/limits", "Limits"),
         ("docs/file-format", "File format"),
@@ -420,17 +433,32 @@ def language_tabs():
     return "\n".join(out)
 
 
+# Where each section of the old, whole docs/fenecql went (`moved.json`, by
+# the fragment it had), for the one script on that page to follow: a
+# fragment never reaches the server, so no redirect rule can. check_links.py
+# holds every target to a page and an id that were built.
+MOVED = os.path.join(ROOT, "moved.json")
+
+
+def moved_map():
+    """moved.json as the object literal the page's script reads."""
+    with open(MOVED, encoding="utf-8") as f:
+        return json.dumps(json.load(f), separators=(",", ":"), sort_keys=True)
+
+
 def filled(raw):
     """A page's text with what the build writes into it: the release's
     number wherever the page says `{{version}}`, from the one place
     `make version` writes it (the workspace's Cargo.toml), so a release moves
     the install lines, the image's tag and the sample output with it; the
-    docs index's map of every page; and the HTTP endpoint page's tabs of
-    languages. Claims are checked against this text, as it is read."""
+    docs index's map of every page; the HTTP endpoint page's tabs of
+    languages; and the sections that moved off docs/fenecql (`{{moved}}`).
+    Claims are checked against this text, as it is read."""
     if "{{language_tabs}}" in raw:
         raw = raw.replace("{{language_tabs}}", language_tabs())
     return (raw.replace("{{version}}", workspace_version())
-               .replace("{{docs_map}}", docs_map()))
+               .replace("{{docs_map}}", docs_map())
+               .replace("{{moved}}", moved_map()))
 
 
 def read_page(path):
@@ -1276,7 +1304,10 @@ def page_text(body):
             href = re.sub(r"\.html(?=#|$)", "", urllib.parse.urljoin(f"{SITE}/docs/", href))
         return f"[{text}]({href})"
 
-    t = re.sub(r"<!--[\s\S]*?-->", "", body)
+    # A page's own script (docs/fenecql follows a moved fragment) is not
+    # text to read.
+    t = re.sub(r"<script[\s\S]*?</script>", "", body)
+    t = re.sub(r"<!--[\s\S]*?-->", "", t)
     t = re.sub(r"<pre([^>]*)>([\s\S]*?)</pre>", code, t)
     t = re.sub(r"<tr[^>]*>([\s\S]*?)</tr>", row, t)
     t = re.sub(r"<h1[^>]*>([\s\S]*?)</h1>", r"\n# \1\n", t)

@@ -1,0 +1,208 @@
+<!--
+title: Aggregates and grouping — FenecQL — fenecdb
+description: Aggregates in FenecQL: count, sum, avg, min, max, first and last, group and having, totals per group and bars by the minute.
+-->
+
+<h1>Aggregates and grouping</h1>
+<p class="kicker">Totals, counts and groups in the select list, and buckets of time.</p>
+
+<p>Put <code>count</code>, <code>sum</code>, <code>avg</code>,
+<code>min</code>, <code>max</code>, <code>first</code> or <code>last</code> in
+the select list to fold the rows a query finds into one, and add
+<code>group</code> for one row per distinct set of keys.</p>
+
+<p>Run in <a href="quickstart.html#in-the-shell">the shell</a>, answers and all; the timings are from one run.</p>
+
+<pre data-lang="text">fenec&gt; create collection sales (region text, qty int, price int, at timestamp);
+collection `sales` created
+fenec&gt; put sales [{region: "north", qty: 2, price: 500, at: "2026-05-03T09:10:00Z"}, {region: "north", qty: 1, price: 900, at: "2026-05-03T09:40:00Z"}, {region: "south", qty: 4, price: 300, at: "2026-05-03T10:05:00Z"}, {region: "south", qty: 3, price: 350, at: "2026-05-03T10:50:00Z"}, {region: "north", qty: 5, price: 400, at: "2026-05-03T11:15:00Z"}];
+5 records (196.33µs)
+fenec&gt; get sales select count(*) as n, sum(qty) as units, max(price) as top
+n  units  top
+-  -----  ---
+5  15     900
+(1 rows, 152.33µs)
+fenec&gt; get sales select region, count(*) as n, sum(qty * price) as revenue group region order revenue desc
+region  n  revenue
+------  -  -------
+north   3  3900
+south   2  2250
+(2 rows, 171.04µs)
+fenec&gt; get sales select bucket(at, 1h) as hour, sum(qty) as units group hour
+hour                  units
+--------------------  -----
+2026-05-03T09:00:00Z  3
+2026-05-03T10:00:00Z  7
+2026-05-03T11:00:00Z  5
+(3 rows, 149.96µs)
+fenec&gt; get sales select region, sum(qty) as units group region having sum(qty) &gt;= 8
+region  units
+------  -----
+north   8
+(1 rows, 168.46µs)
+</pre>
+
+<p>An aggregate folds any expression, <code>sum(qty * price)</code>;
+<code>bucket(at, 1h)</code> truncates a timestamp to the hour it falls in, and
+its intervals and time zones are under <a href="fenecql-reading.html#functions">Functions
+over a row</a>; and <code>having</code> keeps the groups it holds for. Bars, VWAP, distinct users
+and funnels are on <a href="analytics.html">Analytics and market data</a>.</p>
+
+<h2 id="aggregates">Aggregates</h2>
+
+<p>Put <code>count(*)</code>, <code>count(…)</code>, <code>count(distinct …)</code>,
+<code>sum</code>, <code>avg</code>, <code>min</code>, <code>max</code>,
+<code>first</code> or <code>last</code> in the select list to get totals.
+Add <code>group</code> for one row per distinct set of its keys' values;
+a list of the keys alone, <code>select city group city</code>, answers each
+set once, as SQL's <code>select distinct city</code> does.</p>
+
+<pre data-lang="fenecql">get orders select count(*), sum(total), avg(total), min(at), max(at)
+get orders select status, count(*), avg(total) where year = 2026 group status
+get orders select customer, sum(total) group customer order sum(total) desc limit 10
+get events select bucket(at, 1h) as hour, name, count(distinct user) as users group hour, name
+get ticks select bucket(at, 1m) as bar, first(px by at) as open, max(px) as high, min(px) as low,
+  last(px by at) as close, sum(qty) as volume where sym = $1 group bar
+get ticks select sym, sum(px * qty) / sum(qty) as vwap group sym
+get events select props.plan, sum(props.v) group props.plan
+</pre>
+
+<ul>
+  <li><b>Nulls are skipped</b>, as in SQL, by everything but
+    <code>count(*)</code>.</li>
+  <li><b>An aggregate folds any expression</b> — <code>sum(px * qty)</code>
+    — and an item can be an expression over aggregates and keys —
+    <code>sum(px * qty) / sum(qty)</code>.</li>
+  <li><b>Groups can be ordered and paged</b> by any column of the list.
+    Without <code>group</code>, <code>order</code>, <code>limit</code> and
+    <code>offset</code> pick the rows the one row folds: <code>get deliveries
+    where courier = $1 order at desc limit 50 select count(*), avg(km)</code>
+    is the latest 50.</li>
+  <li><b>A <code>lookup</code> hangs off the groups</b>, keyed by a column
+    of the list, and a <a href="fenecql-lookup.html#lookup-folds">lookup level's list may
+    aggregate</a>, each parent's children folded.</li>
+  <li><b>Aggregates do not combine</b> with <code>near</code> or
+    <code>match</code>.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>A select list with an aggregate in it folds the rows the query finds —
+through the same indexes any <code>where</code> reaches — into one row, or,
+with <code>group</code>, one row per distinct set of the keys' values. Each
+column answers under its name, in the order the list is written: the name
+<code>as</code> gives it, or for a field or an aggregate of one the text it
+was written as — <code>sum(total)</code>, <code>count(distinct user)</code>,
+<code>first(px)</code> (its <code>by</code> left out). Anything else needs
+<code>as</code>.</p>
+
+<ul>
+  <li><b>Keys.</b> <code>group</code> takes one key or several, each a field,
+    a path, or an expression — <code>group sym, bucket(at, 1m)</code>. A
+    name the list gives an item with <code>as</code> stands for that item,
+    before a field of the same name: <code>select bucket(at, 1h) as hour,
+    count(*) group hour</code>. A plain item of the list is a key itself, or
+    is refused as neither aggregated nor grouped by; an expression written
+    out again in <code>group</code> is not matched to the list's — name it
+    once, with <code>as</code>.</li>
+  <li><b><code>count(*)</code></b> counts rows. <b><code>count(distinct
+    e)</code></b> counts the values <code>e</code> takes, a null none, two
+    values the same when their encodings are — as <code>group</code> tells
+    its keys apart. It is exact: every value is held once a group, up to a
+    million over every group and item of the query — about 70 MB — and a
+    query past that is refused, never counted short.</li>
+  <li><b><code>sum</code> and <code>avg</code></b> take numbers: an
+    <code>int</code> sum is an <code>int</code>, and one past 64 bits is an
+    error rather than a wrapped number; a float among the values makes the
+    sum a <code>float</code>, and an average is one. <b><code>min</code> and
+    <code>max</code></b> take any value with an order — numbers,
+    <code>timestamp</code>, <code>text</code>, <code>bool</code> — a text
+    field's in its collation. A field whose type cannot be folded is refused
+    before any row is read, an expression's value at the first row that
+    cannot.</li>
+  <li><b><code>approx_count_distinct(e)</code></b> counts distinct values in a
+    HyperLogLog sketch of 2<sup>14</sup> registers, 16 KB a group at most,
+    with a standard error of 0.81% at any count and no million to stop at.
+    <code>hll_accumulate(e)</code> answers the sketch as bytes,
+    <code>hll_combine(s)</code> merges sketches and the function
+    <code>hll_estimate(s)</code> reads a count off one, so days kept as
+    sketches count a month. A query's sketches are held to 64 MB.</li>
+  <li><b><code>having &lt;expr&gt;</code></b> after <code>group</code> keeps
+    the groups it holds for, before <code>order</code> and
+    <code>limit</code>: it reads the keys, the list's columns by name and any
+    aggregate, <code>group user having count(*) &gt;= 2</code>. <code>count</code>
+    after it answers how many groups passed.</li>
+  <li><b><code>first(e by k)</code> and <code>last(e by k)</code></b> are
+    the value of <code>e</code> on the group's row least, or greatest, by
+    <code>k</code> — a bar's open and close are <code>first(px by
+    at)</code> and <code>last(px by at)</code>, whatever order the ticks
+    were written in. A tie on <code>k</code> goes to the row written first
+    for <code>first</code> and last for <code>last</code>; without
+    <code>by</code>, the order is the one the rows were written in. A row
+    whose value or key is null is passed over, as every aggregate passes a
+    null over. The query's <code>order</code> orders the groups, not the
+    rows inside them, so it says nothing to these.</li>
+  <li><b>Nulls are skipped</b>, as SQL skips them, by everything but
+    <code>count(*)</code>. Over no rows — or only nulls — a sum, an average,
+    a minimum and a maximum are <code>null</code>, not 0.</li>
+  <li><b>Groups</b> come out by their keys, in the order <code>group</code>
+    names them, the null key first, unless <code>order</code> names a column
+    of the list — <code>order sum(total) desc</code>, <code>order
+    vwap</code> — and <code>limit</code> and <code>offset</code> page them.</li>
+  <li><b>Ungrouped</b>, a list answers one row, which an order or a page
+    would have nothing to do with; so there <code>order</code>,
+    <code>limit</code> and <code>offset</code> pick the rows it folds, as
+    they pick a <code>get</code>'s page — an <code>@sorted</code> field's
+    index walked to it — and the one row folds those: <code>order at desc
+    limit 50 select avg(km)</code> is the mean of the latest 50, what SQL
+    writes as a subquery. Its keys are the rows' values; a column of the
+    list among them is refused.</li>
+  <li><b>A <code>lookup</code> after the list</b> hangs off its rows — the
+    groups, or the one row — and names a column of the list as the
+    parent's key: <code>get orders select courier, count(*) as n group
+    courier order n desc limit 10 lookup couriers on user = courier select
+    name</code> is the ten busiest couriers with their names. The column
+    holds a field's values: a key, its <code>bucket</code>, its
+    <code>min</code>, <code>max</code>, <code>first</code> or
+    <code>last</code>; a sum's or a count's is refused, having no type to
+    hold the child's key to. <code>required</code> there drops the groups
+    no child matches, before <code>order</code> and <code>limit</code>, and
+    <code>count</code> after <code>group</code> counts those kept.</li>
+  <li><b>What does not combine</b> is what ranks rows an aggregate
+    collapses: <code>near</code> and <code>match</code>.</li>
+</ul>
+
+<p><b>How it runs.</b> Every item is bound to the collection once a query:
+each field and path the list reads is decoded in one pass a row, a field
+folded as it is is read with nothing copied, and a <code>bucket</code> over
+a constant interval works the interval out once. Rows written in time order
+come a bucket at a time, so the group the row before went to is asked
+first. A <code>count(*)</code> by <code>bucket</code> of a
+<code>timestamp</code> or <code>int</code> field with an ordered index
+(<code>@sorted</code>, <code>@ttl</code>), whose filter is a range of that
+field and nothing more, reads the index's keys and no row; <code>explain</code>
+says so.</p>
+
+<p>A million rows in 100 groups, <code>select cat, count(*), avg(price) group
+cat</code>, took 80 ms in process where PostgreSQL 17 — one worker, as
+<code>make pgvector-up</code> runs it — took 189 ms of execution time on the
+same rows; the whole set's count, sum, minimum and
+maximum, 37 ms; the same groups over the tenth a <code>@sorted</code> range
+found, 9.3 ms. The rows are read, not an index: a filter narrows them, nothing
+precomputes the totals. The questions analytics and market data ask —
+bars, VWAP, distinct users, counts by the minute — are on <a
+href="/docs/analytics">Analytics and market data</a>, each with what it
+costs over a million rows.</p>
+</details>
+
+<h2 id="totals-per-group">Totals per group</h2>
+
+<pre data-lang="fenecql">get orders select status, count(*), sum(total) where year = 2026 group status
+  order sum(total) desc limit 3
+</pre>
+
+<h2 id="bars-by-the-minute">Bars by the minute</h2>
+
+<pre data-lang="fenecql">get ticks select bucket(at, 1m) as bar, first(px by at) as open, max(px) as high,
+  min(px) as low, last(px by at) as close, sum(qty) as volume
+  where sym = $1 and at >= $2 group bar
+</pre>

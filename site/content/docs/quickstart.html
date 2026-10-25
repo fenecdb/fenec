@@ -402,11 +402,11 @@ brackets close, so there <code>del notes</code> deletes every row before a
 <p>Fields and indexes can come later too, with no row rewritten:
 <code>alter collection notes add field mood text</code>, then
 <code>create index on notes (mood) @hash</code> over the rows already there
-(<a href="fenecql.html#changing-a-collection">Changing a collection</a>).
+(<a href="fenecql-schema.html#changing-a-collection">Changing a collection</a>).
 Search finds words typed wrong and half typed with <code>fuzzy</code> and
-<code>prefix</code> (<a href="fenecql.html#typos">Typos and words begun</a>), and
+<code>prefix</code> (<a href="fenecql-search.html#typos">Typos and words begun</a>), and
 <code>highlight()</code> and <code>snippet()</code> mark what matched (<a
-href="fenecql.html#highlights">Highlights and snippets</a>).</p>
+href="fenecql-search.html#highlights">Highlights and snippets</a>).</p>
 </details>
 
 <h2 id="apps">In an app, or in Rust</h2>
@@ -428,8 +428,8 @@ href="fenecql.html#highlights">Highlights and snippets</a>).</p>
   <li id="search-by-meaning"><b>Search by meaning.</b> A <code>vector&lt;N&gt;</code>
     field and an <code>@hnsw</code> index add <code>near</code> beside
     <code>match</code>, and <code>fuse</code> ranks both together: <a
-    href="fenecql.html#the-vector-clause">The vector clause</a>, <a
-    href="fenecql.html#hybrid">Hybrid search</a>, <a
+    href="fenecql-vector.html#the-vector-clause">The vector clause</a>, <a
+    href="fenecql-search.html#hybrid">Hybrid search</a>, <a
     href="http.html#vector-search">Vector search</a> over HTTP and <a
     href="javascript.html#search">A search page</a> in the browser. The vectors come from your
     embedding model: load them first and build the index after, as <a
