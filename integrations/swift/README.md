@@ -6,7 +6,7 @@ the browser module share their code and file format with -- on its own, or
 a replica a server keeps in step.
 
 ```swift
-.package(url: "https://github.com/fenecdb/fenecdb", from: "0.1.11")
+.package(url: "https://github.com/fenecdb/fenecdb", from: "0.1.12")
 // target: .product(name: "FenecDB", package: "fenecdb")
 ```
 
