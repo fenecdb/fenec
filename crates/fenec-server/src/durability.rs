@@ -7,18 +7,47 @@
 //!   -- when there is a vector index -- a checkpoint, otherwise every
 //!   restart would link the HNSW graph again from the documents.
 //! - Under `--exit-on-stdin-close` the end of stdin starts that same
-//!   shutdown ([`exit_on_stdin_close`]): every way a server stops sets one
-//!   flag, and the syncer that sees it is the only thing that exits.
+//!   shutdown ([`exit_on_stdin_close`]), and so does a failure of what runs
+//!   beside the database ([`stop_with`]): every way a server stops sets
+//!   one flag, and the syncer that sees it is the only thing that exits.
 
 use fenec_core::prelude::*;
 use std::io::Read;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Whether a shutdown signal arrived. The signal handler writes only this
 /// atomic; the syncer thread sees it and performs the final `sync`.
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// The code the shutdown exits with: 0, or the first [`stop_with`] gave.
+static EXIT_CODE: AtomicI32 = AtomicI32::new(0);
+
+/// How often a syncer looks at the shutdown flag, whatever its interval.
+/// Sleeping the whole interval first, `--sync 5000` exited 5 s after its
+/// stdin closed, holding `<file>.lock` against the app's next open of the
+/// file, and `--sync 60000` would have let docker's SIGKILL, 10 s after
+/// its SIGTERM, come before the final sync.
+pub const LOOK: Duration = Duration::from_millis(200);
+
+/// Waits out one interval of a syncer, `every`, from now: `true` once it
+/// has passed, `false` as soon as `stop` is set, which it looks at every
+/// [`LOOK`] meanwhile and once more at the end. The interval is counted
+/// from the call, after the last pass's work, as a plain sleep counted it,
+/// so the flushes come as often as they did.
+pub fn wait_tick(every: Duration, stop: &AtomicBool) -> bool {
+    let due = Instant::now() + every;
+    loop {
+        std::thread::sleep(due.saturating_duration_since(Instant::now()).min(LOOK));
+        if stop.load(Ordering::SeqCst) {
+            return false;
+        }
+        if Instant::now() >= due {
+            return true;
+        }
+    }
+}
 
 /// When writes are pushed to disk.
 ///
@@ -104,6 +133,21 @@ pub fn request_shutdown() {
     SHUTDOWN.store(true, Ordering::SeqCst);
 }
 
+/// [`request_shutdown`] for a failure: what runs beside the database -- the
+/// listener, `--follow`'s mirror -- stopped, and the server goes down the
+/// one shutdown and exits with `code`, the first given. Exiting where it
+/// failed would cut short a shutdown already under way, its sync among
+/// what was cut, and skip the sync of one that was not.
+pub fn stop_with(code: i32) {
+    let _ = EXIT_CODE.compare_exchange(0, code, Ordering::SeqCst, Ordering::SeqCst);
+    request_shutdown();
+}
+
+/// The code the shutdown exits with: 0 unless [`stop_with`] gave another.
+pub fn exit_code() -> i32 {
+    EXIT_CODE.load(Ordering::SeqCst)
+}
+
 /// `--exit-on-stdin-close`: a thread that reads stdin until it ends -- the
 /// other end of the pipe closed, or a read failed -- and then starts the
 /// shutdown SIGTERM starts.
@@ -123,7 +167,9 @@ pub fn request_shutdown() {
 /// once the pipe filled. Read from a terminal, a job sent to the background
 /// would be stopped whole by `SIGTTIN`, its lock held, so the flag refuses
 /// one (`main`). `/dev/null`, or a stdin closed before the start, ends at
-/// once, and the server with it.
+/// once, and the server with it. A stdin handed over non-blocking answers
+/// `WouldBlock` while the pipe is open and empty, which is no end: it is
+/// asked again every [`LOOK`], as a syncer looks at the flag.
 pub fn exit_on_stdin_close() -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("fenec-stdin".into())
@@ -135,6 +181,9 @@ pub fn exit_on_stdin_close() -> std::io::Result<()> {
                     Ok(0) => break None,
                     Ok(_) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(LOOK)
+                    }
                     Err(e) => break Some(e),
                 }
             };
@@ -187,8 +236,7 @@ fn write_lock(db: &RwLock<Database>) -> RwLockWriteGuard<'_, Database> {
 pub fn run_syncer(db: Arc<RwLock<Database>>, policy: SyncPolicy, checkpoint: bool) -> ! {
     let tick = policy.tick();
     loop {
-        std::thread::sleep(tick);
-        if shutdown_requested() {
+        if !wait_tick(tick, &SHUTDOWN) {
             shutdown(&db, checkpoint);
         }
         if !matches!(policy, SyncPolicy::Interval(_)) {
@@ -263,5 +311,39 @@ fn shutdown(db: &RwLock<Database>, checkpoint: bool) -> ! {
             Err(e) => fenec_http::log!("could not write the checkpoint: {e}"),
         }
     }
-    std::process::exit(0);
+    std::process::exit(exit_code());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A tick comes no sooner than its interval, as the sleep it replaced
+    /// did: the flushes of `--sync <ms>` are as far apart as they were.
+    #[test]
+    fn a_tick_comes_no_sooner_than_its_interval() {
+        let started = Instant::now();
+        assert!(wait_tick(
+            Duration::from_millis(450),
+            &AtomicBool::new(false)
+        ));
+        assert!(started.elapsed() >= Duration::from_millis(450));
+    }
+
+    /// A shutdown asked for in the middle of a long interval is seen long
+    /// before its end: the bound is the interval it stands against, half of
+    /// it, not the 200 ms it is looked at by.
+    #[test]
+    fn a_shutdown_is_seen_long_before_a_long_interval_ends() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let setter = Arc::clone(&stop);
+        let started = Instant::now();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            setter.store(true, Ordering::SeqCst);
+        });
+        assert!(!wait_tick(Duration::from_secs(60), &stop));
+        assert!(started.elapsed() < Duration::from_secs(30));
+        t.join().unwrap();
+    }
 }

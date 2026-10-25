@@ -202,7 +202,8 @@ stdin sees the pipe end however its parent ended, and stops rather than run on
 holding <code>&lt;file&gt;.lock</code> with nobody to answer. What the parent
 writes into the pipe is read and dropped. A terminal is refused: a server
 reading one from the background would be stopped whole by the system, its file
-held; there Ctrl-C does the same.</p>
+held; there Ctrl-C does the same. So is a secret, policy or keys file that is
+stdin, which would be read to its end.</p>
 
 <pre data-lang="js">import { spawn } from 'node:child_process';
 
@@ -211,7 +212,22 @@ const server = spawn('fenec-server', ['--file', path, '--http', '127.0.0.1:0', '
   stdio: ['pipe', 'ignore', 'pipe'],
   env: { ...process.env, FENEC_HTTP_TOKEN: token },
 });
+
+// Read stderr for as long as the server runs: a pipe nobody reads fills,
+// and the server's next log line waits for room.
+let head = '';
+let url = null;
+server.stderr.setEncoding('utf8').on('data', (text) => {
+  if (url) return;
+  head += text;
+  const at = /listening on: (http:\/\/\S+)\s/.exec(head);
+  if (at) ready((url = at[1]));
+});
 </pre>
+
+<p>The pipe's write end must stay in this process alone. A child it starts
+later that inherits it — a descriptor not marked close-on-exec — holds the
+server's stdin open after this process has gone, and the server runs on.</p>
 
 <p>When the disk refuses a write or a sync, the request fails with 500 —
 under <code>always</code>, before the client is told it succeeded — and every

@@ -214,10 +214,14 @@ durability holds the disk (`Sink::syncing`).
 database's place removes the log first, durably (`fs::forget_sync_log`).
 
 **[Every way a server stops is the one shutdown.](docs/design/durability.md#the-one-shutdown)**
-A signal or `--exit-on-stdin-close`'s end of stdin sets one flag
-(`durability::request_shutdown`), and the syncer that sees it, a file's or
-a node's, syncs, checkpoints and exits holding the write lock; a new way
-down sets that flag and never exits on its own.
+A signal's handler, `--exit-on-stdin-close`'s end of stdin
+(`request_shutdown`) and a failure of what runs beside the database -- a
+start, the listener, `--follow`'s mirror (`stop_with`, its exit code) --
+set one flag, `SHUTDOWN`, and the syncer that sees it, a file's or a
+node's, looking every `LOOK` (200 ms) whatever `--sync` is, syncs,
+checkpoints and exits holding the write lock. A new way down sets that
+flag and never exits on its own; only what fails before anything runs
+beside the open database exits where it fails, having nothing to sync.
 
 ### Replication and archives
 

@@ -382,19 +382,31 @@ content security policy names.</p>
 <p>An app that shows the studio in a window of its own — a desktop app over
 the server it started for a file — hands the page its session rather than
 having a token pasted. Before the page's modules run, from a preload script,
-it defines <code>window.fenecHost</code>:</p>
+it defines <code>window.fenecHost</code> — on the server's origin alone:</p>
 
-<pre data-lang="js">Object.defineProperty(window, 'fenecHost', {
-  value: Object.freeze({
-    session: Object.freeze({ server: location.origin, token, tenant: null }),
-  }),
-});
+<pre data-lang="js">// The origin of the server the app started, or the one it connected to.
+const ORIGIN = 'http://127.0.0.1:54321';
+
+// A preload runs in every page the window loads: a redirect's, a sign-in
+// page's. Any other origin gets nothing.
+if (location.origin === ORIGIN) {
+  Object.defineProperty(window, 'fenecHost', {
+    value: Object.freeze({
+      session: Object.freeze({ server: ORIGIN, token, tenant: null }),
+    }),
+  });
+}
 </pre>
 
+<p><b>Keeping the token from other origins is the app's job.</b> A page of
+another origin that finds <code>window.fenecHost</code> reads the token; the
+studio cannot hide it from one. Compare the origin as above, and keep the
+window on the server's origin.</p>
+
 <ul>
-  <li><b>The page's own server.</b> The session is taken only when it is
-    frozen and names the origin that served the page; otherwise the page
-    says the app handed it none, and its token is sent nowhere.</li>
+  <li><b>The page's own server.</b> The studio takes the session only when
+    it is frozen and names the origin that served the page; otherwise it
+    says the app handed it none, and does not send the token.</li>
   <li><b>Never stored.</b> The token is not written to session storage: a
     reload takes the session from the app again.</li>
   <li><b>The app holds the connection.</b> There is no sign-in form and no

@@ -7,9 +7,10 @@
 //! flag stdin is never read, so a server started with whatever stdin a
 //! shell gave it goes on as it did.
 
-use crate::support::{count, start, start_piped, tmp};
+use crate::support::{count, start, start_piped, tmp, try_start_with};
 use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Long enough for a loaded machine's shutdown; an exit is waited for, not
@@ -175,10 +176,16 @@ fn stdin_of_dev_null_ends_the_server_at_once() {
 }
 
 /// A terminal is refused at the start: reading one from the background
-/// would stop the whole server (SIGTTIN), its file's lock held.
+/// would stop the whole server (SIGTTIN), its file's lock held. Without
+/// the flag the terminal is nothing to the server, which starts.
 #[test]
-fn a_terminal_on_stdin_is_refused() {
+fn a_terminal_on_stdin_is_refused_with_the_flag_alone() {
     let (master, slave) = pty();
+    let free = try_start_with(&[], &[], Stdio::from(slave.try_clone().unwrap()))
+        .unwrap_or_else(|log| panic!("a terminal stopped a server without the flag:\n{log}"));
+    assert!(free.http().run("collections").starts_with('['));
+    drop(free);
+
     let child = Command::new(env!("CARGO_BIN_EXE_fenec-server"))
         .args(["--http", "127.0.0.1:0", "--exit-on-stdin-close"])
         .stdin(Stdio::from(slave))
@@ -192,14 +199,67 @@ fn a_terminal_on_stdin_is_refused() {
     assert!(log.contains("stdin is a terminal"), "{log}");
 }
 
+/// A secret read from stdin would end it: refused before it is read, the
+/// pipe still open, rather than waited on for an end that is the server's.
+#[test]
+fn a_secret_read_from_stdin_is_refused_with_the_flag() {
+    let policy = tmp("stdin", "policy.txt");
+    std::fs::write(&policy, "* read\n").unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_fenec-server"))
+        .args(["--http", "127.0.0.1:0", "--exit-on-stdin-close"])
+        .args(["--policy", policy.to_str().unwrap()])
+        .args(["--jwt-secret-file", "/dev/stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("could not start fenec-server");
+    let (code, log) = ended(child);
+    assert_eq!(code, 2, "{log}");
+    assert!(
+        log.contains("--jwt-secret-file /dev/stdin is stdin"),
+        "{log}"
+    );
+}
+
+/// The end of stdin is seen within the syncer's look, not at its next
+/// interval: a server syncing once a minute stops long before the minute
+/// is out -- the bound is that minute, half of it, not the look.
+#[test]
+fn a_long_sync_interval_does_not_hold_the_shutdown_back() {
+    let path = tmp("stdin", "minute.fenec");
+    let mut server = start_piped(&[
+        "--file",
+        path.to_str().unwrap(),
+        "--sync",
+        "60000",
+        "--exit-on-stdin-close",
+    ]);
+    let mut c = server.http();
+    c.run("create collection t (name text)");
+    c.run(r#"put t {name: "one"}"#);
+    drop(server.child.stdin.take());
+    let (code, log) = server
+        .exited(Duration::from_secs(30))
+        .expect("the shutdown waited for the sync interval");
+    assert_eq!(code, 0, "{log}");
+    assert_eq!(rows(&path, "t"), 1, "a write was lost\n{log}");
+}
+
 /// The exit code and stderr of a child that must end of its own accord,
-/// within [`EXIT`]; killed past it.
+/// within [`EXIT`]; killed past it. Its stderr is read within the same
+/// bound: a server another test spawned meanwhile can hold the pipe open.
 fn ended(mut child: Child) -> (i32, String) {
     let mut err = child.stderr.take().unwrap();
+    let log = Arc::new(Mutex::new(String::new()));
+    let sink = Arc::clone(&log);
     let reader = std::thread::spawn(move || {
-        let mut log = String::new();
-        let _ = err.read_to_string(&mut log);
-        log
+        let mut buf = [0u8; 4096];
+        while let Ok(n @ 1..) = err.read(&mut buf) {
+            sink.lock()
+                .unwrap()
+                .push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
     });
     let deadline = Instant::now() + EXIT;
     let status = loop {
@@ -209,11 +269,15 @@ fn ended(mut child: Child) -> (i32, String) {
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("the server did not end:\n{}", reader.join().unwrap());
+            panic!("the server did not end:\n{}", log.lock().unwrap());
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    (status.code().unwrap_or(-1), reader.join().unwrap())
+    while !reader.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let log = log.lock().unwrap().clone();
+    (status.code().unwrap_or(-1), log)
 }
 
 /// A pseudo-terminal: its master, and its slave to hand a child as stdin.

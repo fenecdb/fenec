@@ -98,16 +98,34 @@ and fenec-http's tests pass on Linux, where every file keeps one.
 ## The one shutdown
 
 **Every way a server stops is the one shutdown** (`fenec-server`'s
-`durability`). `SIGINT`, `SIGTERM` and `SIGHUP` set an atomic in their
+`durability`). `SIGINT`, `SIGTERM` and `SIGHUP` store `SHUTDOWN` in their
 handler, which is all a handler may safely do, and the thread that syncs
 -- `run_syncer` over a file, `serve_dir`'s loop over a node's tenants --
-sees it at its next tick: the held writes answered (`waits::end_all`),
-what was registered to run first (`before_shutdown`: `--follow`'s
-follower stopped with every change it applied on disk, the traces sent),
-then the final sync and the checkpoint, the write lock held to
-`process::exit`, so no write is answered between the sync and the exit.
-`--exit-on-stdin-close` sets the same flag (`request_shutdown`) from a
-thread that reads stdin to its end. An app
+sees it within `LOOK`, 200 ms (`wait_tick`): the held writes answered
+(`waits::end_all`), what was registered to run first (`before_shutdown`:
+`--follow`'s follower stopped with every change it applied on disk, the
+traces sent), then the final sync and the checkpoint, the write lock held
+to `process::exit`, so no write is answered between the sync and the exit.
+The syncers slept a whole `--sync` interval before they looked, so
+`--sync 5000` exited 5.04 s after the end of its stdin, its lock held
+against the app's next open of the file, and `--sync 60000` would have let
+docker's SIGKILL, 10 s after its SIGTERM, come before the final sync; the
+interval is still counted from the end of the last pass, so a flush comes
+as often as it did -- under writes, `--sync 250`'s flushes 260 ms apart
+before and after, and an idle `--sync 60000` server 10 ms of CPU in 30 s,
+the resolution `ps` reads it at. A failure of what runs beside the
+database goes the same way with an exit code (`stop_with`, 1): a start
+that fails once the database is open -- a listener that cannot bind, a
+thread that cannot be made, a replica's follower -- the HTTP listener's
+`serve_on` ending, and `--follow`'s mirror stopping, which exited the
+process from its own thread and so cut short a shutdown already under way,
+whose `before_shutdown` was waiting for it, the sync among what was cut.
+The mirror tells that wait it has stopped before it asks for the shutdown,
+so the wait is not its `STOP_WAIT`. Only what fails before anything runs
+beside the opened database -- a flag, the lock, the open, its history --
+exits where it fails, with nothing of its own to sync.
+`--exit-on-stdin-close` sets the flag (`request_shutdown`) from a thread
+that reads stdin to its end. An app
 that starts a server for a file it opened holds a pipe on the server's
 stdin, and when the app is killed (`kill -9`, a crash) the system closes
 the pipe, where no signal would have come: the desktop studio's spike
@@ -117,14 +135,22 @@ reaped the server from a registry of pids. Watching the parent's pid was
 the alternative: a poll, late by its interval and fooled by a pid used
 again, and macOS has no `PR_SET_PDEATHSIG`. What arrives on stdin is read
 into a 4 KB buffer and dropped, so a parent's writes never block on a
-full pipe and nothing grows. `/dev/null`, or a stdin closed before the
-start, ends at once and so does the server, exit 0, which a parent that
-forgot the pipe learns at its first start. A terminal is refused at the
-start (exit 2): a server reading one from the background is stopped whole
-by `SIGTTIN`, its lock held -- the stuck server the flag is for -- and in
-a terminal Ctrl-C makes the same shutdown. A way down of its own, an
-exit from the stdin thread, would have been a second place to hold the
-lock to the exit, and one the `--dir` loop and the follower were never
-taught. `tests/stdin.rs` holds a file's and a node's shutdown to it, a
-server without the flag to never reading stdin, `/dev/null` and a
-terminal.
+full pipe and nothing grows; a stdin handed over non-blocking is asked
+again every `LOOK` while it answers `WouldBlock`. `/dev/null`, or a stdin
+closed before the start, ends at once and so does the server, exit 0,
+which a parent that forgot the pipe learns at its first start. A terminal
+is refused at the start (exit 2): a server reading one from the background
+is stopped whole by `SIGTTIN`, its lock held -- the stuck server the flag
+is for -- and in a terminal Ctrl-C makes the same shutdown. So is a
+`--jwt-secret-file`, `--policy` or `--jwt-keys` that is stdin
+(`is_stdin`: by name or link, since macOS answers a stat of `/dev/fd/0`
+over a pipe with the device node's, or by device and inode), before it is
+read: read to its end, it would have been the server's end, and a parent
+holding the pipe open would have held the read for ever. A way down of
+its own, an exit from the stdin thread, would have been a second place to
+hold the lock to the exit, and one the `--dir` loop and the follower were
+never taught. `tests/stdin.rs` holds a file's and a node's shutdown to
+it, a long `--sync` to an exit well inside its interval, a server without
+the flag to never reading stdin, `/dev/null`, a terminal with the flag and
+without it, and a secret on stdin; `wait_tick`'s tests hold a tick to no
+sooner than its interval and a stop to long before it.

@@ -78,7 +78,8 @@ pub fn start_piped(args: &[&str]) -> Server {
         .unwrap_or_else(|log| panic!("fenec-server ended before it listened:\n{log}"))
 }
 
-fn try_start_with(args: &[&str], env: &[(&str, &str)], stdin: Stdio) -> Result<Server, String> {
+/// [`try_start_env`] with `stdin` as the server's stdin.
+pub fn try_start_with(args: &[&str], env: &[(&str, &str)], stdin: Stdio) -> Result<Server, String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_fenec-server"));
     cmd.envs(env.iter().copied());
     if !args.contains(&"--http") {
@@ -174,8 +175,15 @@ impl Server {
             }
             std::thread::sleep(Duration::from_millis(20));
         };
-        // Every line is in once the reader has met the pipe's end.
-        if let Some(reader) = self.reader.take() {
+        // Every line is in once the reader has met the pipe's end -- unless
+        // a server another test spawned meanwhile inherited the pipe's write
+        // end (macOS marks a new pipe close-on-exec after making it, not
+        // with it), which holds the pipe open past this one's exit: waited
+        // for within the same bound, the lines then those read so far.
+        while self.reader.as_ref().is_some_and(|r| !r.is_finished()) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if let Some(reader) = self.reader.take_if(|r| r.is_finished()) {
             let _ = reader.join();
         }
         let log = self.log.lock().unwrap().clone();

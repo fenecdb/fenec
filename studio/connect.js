@@ -9,7 +9,8 @@
 // the one `--studio-connect` gave.
 //
 // An app embedding the studio hands its session over instead, frozen, as
-// `window.fenecHost.session` before these modules run, and it is never
+// `window.fenecHost.session` before these modules run -- on the server's
+// origin alone, which only the app can see to -- and it is never
 // stored: the app holds the connection, and a session written into
 // sessionStorage for the page to find was a private contract on a key that
 // kept the token in storage.
@@ -39,9 +40,11 @@ export const hosted = () => HOST !== null;
 export function saved() {
   if (HOST) {
     const s = HOST.session;
-    const ok = s && Object.isFrozen(s) && typeof s.server === 'string' && s.server.replace(/\/+$/, '') === here();
-    const valid = ok && typeof s.token === 'string' && (s.tenant == null || typeof s.tenant === 'string');
-    return valid ? { server: here(), token: s.token, tenant: s.tenant || null } : null;
+    if (!s || typeof s !== 'object' || !Object.isFrozen(s)) return null;
+    // Each field read once: a getter answers the check and the use alike.
+    const { server, token, tenant } = s;
+    const ok = typeof server === 'string' && server.replace(/\/+$/, '') === here() && typeof token === 'string';
+    return ok && (tenant == null || typeof tenant === 'string') ? { server: here(), token, tenant: tenant || null } : null;
   }
   try {
     const s = JSON.parse(sessionStorage.getItem(KEY) ?? 'null');

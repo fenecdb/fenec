@@ -97,7 +97,8 @@ usage: fenec-server [options]
                             end closes however the parent ends, kill -9
                             too. What arrives is read and dropped. Stdin of
                             /dev/null ends at once, and the server exits at
-                            once; a terminal is refused
+                            once; a terminal is refused, and so is a
+                            secret, policy or keys file that is stdin
       --max-connections <n> ceiling on concurrent connections (0 = unlimited)
                             default: 100. Every connection is a thread
       --idle-timeout <s>    close a keep-alive connection silent for this
@@ -279,6 +280,41 @@ fn env_secret(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|t| !t.is_empty())
 }
 
+/// Whether `path` is this process's stdin by any name: `/dev/stdin` or
+/// `/dev/fd/0` by name or through links, or the same device and inode as
+/// descriptor 0 -- a file stdin was redirected from, a pipe on Linux. Both:
+/// macOS answers a stat of `/dev/fd/0` over a pipe with the device node's,
+/// not the pipe's.
+fn is_stdin(path: &str) -> bool {
+    let named = |p: &std::path::Path| {
+        matches!(
+            p.to_str(),
+            Some("/dev/stdin" | "/dev/fd/0" | "/proc/self/fd/0")
+        )
+    };
+    if named(std::path::Path::new(path)) || std::fs::canonicalize(path).is_ok_and(|p| named(&p)) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsFd;
+        use std::os::unix::fs::MetadataExt;
+        let ours = std::io::stdin()
+            .as_fd()
+            .try_clone_to_owned()
+            .map(std::fs::File::from)
+            .and_then(|f| f.metadata());
+        match (ours, std::fs::metadata(path)) {
+            (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        path == "/dev/stdin"
+    }
+}
+
 /// Health check: `GET /_health` on the HTTP listener, which answers with no
 /// token and takes no lock -- during a long `compact` a probe that queried
 /// would wait too, and a healthy server would look dead.
@@ -376,6 +412,20 @@ fn main() {
         token: env_secret("FENEC_HTTP_TOKEN"),
         admin_token: env_secret("FENEC_ADMIN_TOKEN"),
         ..fenec_http::Config::default()
+    };
+
+    // A file read from stdin under `--exit-on-stdin-close` -- a secret, the
+    // policy, the keys -- would be read to its end, which is the server's:
+    // refused before it is read, wherever the flag stands among the
+    // arguments, since a read of a pipe the parent holds open never returns.
+    let watching_stdin = args.iter().any(|a| a == "--exit-on-stdin-close");
+    let not_stdin = |flag: &str, path: &str| {
+        if watching_stdin && is_stdin(path) {
+            fail(&format!(
+                "{flag} {path} is stdin, which --exit-on-stdin-close reads for its end: \
+                 give it a file of its own"
+            ));
+        }
     };
 
     let mut i = 0;
@@ -511,6 +561,7 @@ fn main() {
             }
             "--jwt-secret-file" => {
                 let path = next(&mut i, "--jwt-secret-file");
+                not_stdin("--jwt-secret-file", &path);
                 match std::fs::read_to_string(&path) {
                     Ok(s) if s.trim_end_matches(['\n', '\r']).is_empty() => {
                         fail(&format!("--jwt-secret-file {path} is empty"))
@@ -521,6 +572,7 @@ fn main() {
             }
             "--policy" => {
                 let path = next(&mut i, "--policy");
+                not_stdin("--policy", &path);
                 match std::fs::read_to_string(&path) {
                     Ok(s) => policy = Some(s),
                     Err(e) => fail(&format!("could not read {path}: {e}")),
@@ -695,6 +747,11 @@ fn main() {
         }
     }
 
+    // The keys are read once the arguments are, and again as the file
+    // changes.
+    if let Some(path) = &jwt_keys {
+        not_stdin("--jwt-keys", path);
+    }
     let access = |policy: &str| {
         match (&jwt_secret, &jwt_keys) {
             (Some(_), Some(_)) => {
@@ -942,116 +999,125 @@ fn main() {
     }
 
     let shared = Arc::new(RwLock::new(db));
-    // What the open left out of the graphs is linked beside the queries: the
-    // port opens in the time the documents take to read. The graphs are kept
-    // in the file as they change, so a crash leaves only what came after
-    // the last of them to link.
-    if let Some(path) = &file {
-        fenec_http::link::beside(path, &shared);
-        fenec_http::link::keep(path, &shared);
-    }
-    // The rows past their time (`@ttl`) are deleted once a minute, a
-    // replica's by its primary.
-    fenec_http::sweep::watch(file.as_deref().unwrap_or("the database"), &shared);
-
-    // The follower applies the primary's writes; this server's own feed
-    // passes them on to replicas of its own.
-    let follower = replica_of.as_ref().map(|url| {
-        let f = Follower::new(
-            url,
-            replication_token.clone().unwrap_or_default(),
-            Arc::clone(&shared),
-            feed.clone(),
-            sync == SyncPolicy::Always,
-        )
-        .unwrap_or_else(|e| fail(&e));
-        f.start("fenec-replica".into())
-            .unwrap_or_else(|e| fail(&format!("could not start the replica thread: {e}")));
-        fenec_http::log!("following: {url}");
-        f
-    });
-    let repl = match replication_token.filter(|_| replicating) {
-        Some(token) => Some(Replication::new(Some(token), feed.clone(), follower)),
-        // The feed for `/_changes` alone: no token, so no replica is fed.
-        None if cdc => Some(Replication::new(None, feed.clone(), None)),
-        None => None,
-    };
-
-    // Before the HTTP thread announces its listener: once the line is out a
-    // supervisor may send SIGTERM, and the flag it sets waits for the
-    // syncer below.
+    // From here threads run beside the database -- the graph keeper, the
+    // sweeper, a replica's follower, the mirror, the listener -- and every
+    // way down is the one shutdown: what fails to start below is logged and
+    // stops the server through it (`durability::stop_with`), never past its
+    // sync. Before the HTTP thread announces its listener, too: once the
+    // line is out a supervisor may send SIGTERM, and the flag it sets waits
+    // for the syncer below.
     durability::install_signal_handlers();
-    if stdin_close {
-        durability::exit_on_stdin_close()
-            .unwrap_or_else(|e| fail(&format!("could not start the stdin thread: {e}")));
-    }
+    let started = (|| -> std::result::Result<(), String> {
+        // What the open left out of the graphs is linked beside the queries:
+        // the port opens in the time the documents take to read. The graphs
+        // are kept in the file as they change, so a crash leaves only what
+        // came after the last of them to link.
+        if let Some(path) = &file {
+            fenec_http::link::beside(path, &shared);
+            fenec_http::link::keep(path, &shared);
+        }
+        // The rows past their time (`@ttl`) are deleted once a minute, a
+        // replica's by its primary.
+        fenec_http::sweep::watch(file.as_deref().unwrap_or("the database"), &shared);
 
-    if let Some(m) = mirror {
-        let table = m.table.clone();
-        fenec_server::mirror::start(m, Arc::clone(&shared))
-            .unwrap_or_else(|e| fail(&format!("could not start the follower: {e}")));
-        fenec_http::log!("following: {table}");
-    }
-
-    // `--metrics`: /_metrics alone on a listener of its own, readable with
-    // the tokens the HTTP endpoint takes.
-    if let Some(addr) = metrics {
-        let mcfg = fenec_http::Config {
-            addr,
-            token: http_cfg.token.clone(),
-            admin_token: http_cfg.admin_token.clone(),
-            insecure: http_cfg.insecure,
-            idle_timeout: http_cfg.idle_timeout,
-            ..fenec_http::Config::default()
+        // The follower applies the primary's writes; this server's own feed
+        // passes them on to replicas of its own.
+        let follower = match &replica_of {
+            None => None,
+            Some(url) => {
+                let f = Follower::new(
+                    url,
+                    replication_token.clone().unwrap_or_default(),
+                    Arc::clone(&shared),
+                    feed.clone(),
+                    sync == SyncPolicy::Always,
+                )?;
+                f.start("fenec-replica".into())
+                    .map_err(|e| format!("could not start the replica thread: {e}"))?;
+                fenec_http::log!("following: {url}");
+                Some(f)
+            }
         };
-        let server = fenec_http::Server::metrics_only(Arc::clone(&shared), repl.clone(), mcfg);
-        let listener = server
+        let repl = match replication_token.filter(|_| replicating) {
+            Some(token) => Some(Replication::new(Some(token), feed.clone(), follower)),
+            // The feed for `/_changes` alone: no token, so no replica is fed.
+            None if cdc => Some(Replication::new(None, feed.clone(), None)),
+            None => None,
+        };
+
+        if stdin_close {
+            durability::exit_on_stdin_close()
+                .map_err(|e| format!("could not start the stdin thread: {e}"))?;
+        }
+
+        if let Some(m) = mirror {
+            let table = m.table.clone();
+            fenec_server::mirror::start(m, Arc::clone(&shared))
+                .map_err(|e| format!("could not start the follower: {e}"))?;
+            fenec_http::log!("following: {table}");
+        }
+
+        // `--metrics`: /_metrics alone on a listener of its own, readable
+        // with the tokens the HTTP endpoint takes.
+        if let Some(addr) = metrics {
+            let mcfg = fenec_http::Config {
+                addr,
+                token: http_cfg.token.clone(),
+                admin_token: http_cfg.admin_token.clone(),
+                insecure: http_cfg.insecure,
+                idle_timeout: http_cfg.idle_timeout,
+                ..fenec_http::Config::default()
+            };
+            let server = fenec_http::Server::metrics_only(Arc::clone(&shared), repl.clone(), mcfg);
+            let listener = server
+                .bind()
+                .map_err(|e| format!("could not open the metrics endpoint: {e}"))?;
+            std::thread::Builder::new()
+                .name("fenec-metrics".into())
+                .spawn(move || {
+                    if let Err(e) = server.serve_on(listener) {
+                        fenec_http::log!("metrics server error: {e}");
+                    }
+                })
+                .map_err(|e| format!("could not start the metrics thread: {e}"))?;
+        }
+
+        let mut http_server = fenec_http::Server::new(Arc::clone(&shared), http_cfg);
+        if let Some(repl) = repl {
+            http_server = http_server.with_replication(repl);
+        }
+        let listener = http_server
             .bind()
-            .unwrap_or_else(|e| fail(&format!("could not open the metrics endpoint: {e}")));
+            .map_err(|e| format!("could not open the HTTP endpoint: {e}"))?;
+        fenec_http::log!(
+            "fenec-server {}: {}  [sync={}]",
+            fenec_core::VERSION,
+            file.as_deref().unwrap_or("in memory"),
+            sync.describe()
+        );
         std::thread::Builder::new()
-            .name("fenec-metrics".into())
+            .name("fenec-http".into())
             .spawn(move || {
-                if let Err(e) = server.serve_on(listener) {
-                    fenec_http::log!("metrics server error: {e}");
+                if let Err(e) = http_server.serve_on(listener) {
+                    fenec_http::log!("HTTP server error: {e}");
+                    durability::stop_with(1);
                 }
             })
-            .unwrap_or_else(|e| fail(&format!("could not start the metrics thread: {e}")));
-    }
+            .map_err(|e| format!("could not start the HTTP thread: {e}"))?;
 
-    let mut http_server = fenec_http::Server::new(Arc::clone(&shared), http_cfg);
-    if let Some(repl) = repl {
-        http_server = http_server.with_replication(repl);
-    }
-    let listener = match http_server.bind() {
-        Ok(l) => l,
-        Err(e) => {
-            fenec_http::log!("could not open the HTTP endpoint: {e}");
-            std::process::exit(1);
+        // `--warm`: the derived indexes built beside the first queries,
+        // which otherwise build each on its first read. Once the endpoint is
+        // up: `Server::new` takes the write lock to attach its watcher, and
+        // started before it, a build's read lock held the listener back by
+        // the 141 ms a `@text` index of 100 000 products takes.
+        if let Some(w) = &warm.unwrap_or_else(|| Some(fenec_http::warm::Warm::default())) {
+            fenec_http::warm::start(file.as_deref().unwrap_or("the database"), &shared, w);
         }
-    };
-    fenec_http::log!(
-        "fenec-server {}: {}  [sync={}]",
-        fenec_core::VERSION,
-        file.as_deref().unwrap_or("in memory"),
-        sync.describe()
-    );
-    std::thread::Builder::new()
-        .name("fenec-http".into())
-        .spawn(move || {
-            if let Err(e) = http_server.serve_on(listener) {
-                fenec_http::log!("HTTP server error: {e}");
-                std::process::exit(1);
-            }
-        })
-        .unwrap_or_else(|e| fail(&format!("could not start the HTTP thread: {e}")));
-
-    // `--warm`: the derived indexes built beside the first queries, which
-    // otherwise build each on its first read. Once the endpoint is up:
-    // `Server::new` takes the write lock to attach its watcher, and started
-    // before it, a build's read lock held the listener back by the 141 ms a
-    // `@text` index of 100 000 products takes.
-    if let Some(w) = &warm.unwrap_or_else(|| Some(fenec_http::warm::Warm::default())) {
-        fenec_http::warm::start(file.as_deref().unwrap_or("the database"), &shared, w);
+        Ok(())
+    })();
+    if let Err(e) = started {
+        fenec_http::log!("{e}");
+        durability::stop_with(1);
     }
 
     durability::run_syncer(shared, sync, checkpoint);
@@ -1115,6 +1181,13 @@ fn serve_dir(
             }
         );
     }
+    // From here tenants open and their followers write: every way down is
+    // the one shutdown, a failure to start below stopping the node through
+    // it (`durability::stop_with`), every open tenant synced. Before the
+    // thread that announces the listener, too: once the line is out, SIGTERM
+    // must sync, and so must the end of stdin, which sets the same flag this
+    // loop looks at.
+    durability::install_signal_handlers();
     // A replica's tenants have to be open to follow: nothing else touches
     // them there, and a follower that is not running is a replica falling
     // behind. Opening one starts its follower -- every tenant on a standby,
@@ -1126,40 +1199,41 @@ fn serve_dir(
         fenec_http::log!("tenant `{name}` did not open ({status}): {msg}");
     }
 
-    let http_server = fenec_http::Server::with_tenants(Arc::clone(&tenants), http_cfg);
-    let listener = match http_server.bind() {
-        Ok(l) => l,
-        Err(e) => fail(&format!("could not open the HTTP endpoint: {e}")),
-    };
-    // Before the thread that announces the listener: once the line is out,
-    // SIGTERM must sync, and so must the end of stdin, which sets the same
-    // flag this loop looks at.
-    durability::install_signal_handlers();
-    if stdin_close {
-        durability::exit_on_stdin_close()
-            .unwrap_or_else(|e| fail(&format!("could not start the stdin thread: {e}")));
+    let started = (|| -> std::result::Result<(), String> {
+        let http_server = fenec_http::Server::with_tenants(Arc::clone(&tenants), http_cfg);
+        let listener = http_server
+            .bind()
+            .map_err(|e| format!("could not open the HTTP endpoint: {e}"))?;
+        if stdin_close {
+            durability::exit_on_stdin_close()
+                .map_err(|e| format!("could not start the stdin thread: {e}"))?;
+        }
+        std::thread::Builder::new()
+            .name("fenec-http".into())
+            .spawn(move || {
+                if let Err(e) = http_server.serve_on(listener) {
+                    fenec_http::log!("HTTP server error: {e}");
+                    durability::stop_with(1);
+                }
+            })
+            .map_err(|e| format!("could not start the HTTP thread: {e}"))?;
+        Ok(())
+    })();
+    if let Err(e) = started {
+        fenec_http::log!("{e}");
+        durability::stop_with(1);
     }
-    std::thread::Builder::new()
-        .name("fenec-http".into())
-        .spawn(move || {
-            if let Err(e) = http_server.serve_on(listener) {
-                fenec_http::log!("HTTP server error: {e}");
-                std::process::exit(1);
-            }
-        })
-        .unwrap_or_else(|e| fail(&format!("could not start the HTTP thread: {e}")));
 
     let tick = sync.tick();
     loop {
-        std::thread::sleep(tick);
-        if durability::shutdown_requested() {
+        if !durability::wait_tick(tick, durability::shutdown_flag()) {
             fenec_http::waits::end_all(durability::HELD_GRACE);
             // The write locks come back held: nothing is accepted between
             // the last sync and exit.
             fenec_http::trace::flush(Duration::from_secs(2));
             let open = tenants.shutdown();
             fenec_http::log!("\nshutting down: {open} open tenant(s) synced");
-            std::process::exit(0);
+            std::process::exit(durability::exit_code());
         }
         if matches!(sync, SyncPolicy::Interval(_)) {
             tenants.sync_dirty();
