@@ -557,16 +557,8 @@ The socket is made non-blocking before the write: the accepting thread is
 every connection's, and a client that reads nothing must not hold it. The
 answer, a few hundred bytes into a new socket's empty send buffer, goes out
 whole in one write all the same, and where it would not it is let go of. The
-request is not read first -- what has not arrived cannot be waited for
-there, and the answer does not hang on it -- but what has arrived is read
-off after the answer, up to 64 KiB and non-blocking too: closed with its
-request unread, a socket is reset rather than ended, on macOS and Linux
-alike (probed: the client read the answer, then `ECONNRESET`), and a client
-reading to the end took the answer for an error. A request arriving after
-the close, or a body past what had arrived, still meets the reset, which
-both systems hand a client only after the bytes it received; a lingering
-close, reading on until the client ends, would want a thread or a list of
-sockets to come back to. Each is counted -- `fenec_connections_refused_total`
+request is not waited for -- the answer does not hang on it -- and the
+socket is not closed with the answer either (below). Each is counted -- `fenec_connections_refused_total`
 and the router's `fenec_router_connections_refused_total`, by `reason`,
 `ceiling` or `no_thread`, the ceiling's counted nowhere before, neither in
 `fenec_router_requests_total` -- and one with no thread is said in the log
@@ -578,6 +570,82 @@ unanswered, and a debug build's assertion. `FenecNoThreadForConnection`
 pages on any, since the process's other threads, a router's lease grants
 among them, meet the same limit; a scrape is a connection too, so `up`
 falls to 0 beside it.
+
+A refusal was closed with its answer, what had arrived read off first, up
+to 64 KiB, so the close was no reset for a request already in. A request
+still on its way met a socket that was gone, and one arriving between the
+read and the close was unread at it: each system answered both with a
+reset (Linux's `TCPAbortOnData` and `TCPAbortOnClose`). A client writing
+its request in one `write` read the answer before it all the same, both
+systems handing a socket's received bytes over before its error -- but not
+always on macOS, where a client writing 200 us after its connect read the
+reset before the answer 58 times in 116 247 refusals. A client writing its
+head and body apart -- Python's `http.client`, and with it `requests` and
+every library on `urllib3` -- had the reset come back between the two, the
+body's `write` failed `EPIPE`, and it reported the connection broken
+without reading the 503 waiting for it. A review counted 3 343 resets and
+130 503s in some 36 000 requests from 300 clients against a `--dir` node
+at `--max-connections 100`. Reproduced with 300 `http.client` threads for
+10 s, a `get` each, against such a node: on Linux (Docker, three cores)
+16 376 refusals were read as 1 356 503s, 14 999 broken pipes and 21
+resets, beside 12 400 `TCPAbortOnData` and 30 `TCPAbortOnClose` (another
+run: 26 016 as 2 968, 23 026 and 22); on macOS 40 194 as 3 732, 36 361
+and 101; through a router at its own ceiling of 100, `put`s, 19 467 as
+918, 18 529 and 20. A Rust client writing head and body 200 us apart,
+reconnecting 5 ms after each 503, had 498 bodies fail `EPIPE` in 125 911
+refusals on macOS and 692 (`EPIPE`, `ECONNRESET`) in 110 796 on Linux. A
+router in front of the node at its ceiling read every refusal the node
+sent it, before and now: its one `writev`, and the answer read after a
+failed write, already held it -- no 502 in runs of 1 107 to 69 677
+refused requests, on macOS and on Linux beside six busy loops, but where
+macOS ran out of ports (`EADDRNOTAVAIL` dialling the node), a 502 the
+router answers for a request it never sent. Run such loads inside a Linux
+container, its own network namespace and ports: on the host's loopback
+the refused connections' 16 000 sockets in `TIME_WAIT` held macOS's whole
+ephemeral range (49152-65535, `TIME_WAIT` 30 s), and every other
+connection the machine made failed with them.
+
+Now `refuse` shuts the socket's writing after the answer -- the client
+reads the answer and its end -- and hands the stream to the process's one
+lingering thread (`accept::linger`, `hold`), which reads off what arrives
+until the client ends or resets the connection, then closes it: nothing
+unread, the client gone, no reset is sent. A client that does neither is
+held 2 s (`LINGER`), and read off up to 1 MiB (`LINGER_DRAIN`), past which
+a body still coming meets the reset, after the answer, as a body past what
+one `writev` takes met it for the router. std has no `poll`, so the thread
+reads each held socket again after a pause doubling from 1 ms to 64 ms
+(`FIRST_LOOK`, `LONGEST_LOOK`) -- a client that reads its answer ends the
+connection within a look or two -- and waits on a condition variable while
+it holds none. It is made as an accept loop starts (`accept::ready`), so a
+process at its thread limit has it for the refusals it can make no thread
+for; where it could not be made, a refusal is closed as before. At most
+512 are handed over or held (`LINGERING`, `HOLDING`), a descriptor each,
+so clients that never end their connections cost 512 descriptors for 2 s,
+not the process's limit; past that a refusal is closed at once, as before.
+In the same runs: on Linux 13 406 refusals read as 13 406 503s and nothing
+else, `TCPAbortOnData` and `TCPAbortOnClose` 0 (another run: 22 424 of
+22 424); on macOS 32 063 of 32 063; through the router at its ceiling
+15 789 of 15 789; the Rust client's split writes failed none of 117 073
+(macOS) and of 53 821 (Linux, beside six busy loops). The held connections
+peaked at 199 to 206 under `http.client` clients, whose threads end a
+connection slowly; the Rust client's 300 threads beside six busy loops on
+three cores held up to 417, and in one run passed 512 for 136 refusals of
+59 627, the throttled cgroup running the lingering thread rarely -- those
+closed as before, no client of them reading a reset.
+
+The listen queue is the other place a refused connection was lost. std's
+`TcpListener::bind` asks 128, and the Rust client's reconnecting threads
+overflowed it on Linux 451 to 961 times an 8 s run (`ListenOverflows`):
+Linux drops the handshake's last segment and the client's request with it,
+and the client sends both again after a retransmission's wait. Not a
+reset -- Linux sends one there only under `tcp_abort_on_overflow` -- but a
+wait before the 503. Both accept loops listen again with a queue of 1 024
+(`accept::widen`), which each system holds to its own ceiling:
+`net.core.somaxconn`, 4 096 on Linux since 5.4, and `kern.ipc.somaxconn`,
+128 on macOS, where nothing changes unless it is raised. The same runs
+overflowed it none. A flood past the queue is the kernel's to answer
+(SYN cookies). What remains a reset: past 512 held, a refusal with no
+lingering thread, a body past 1 MiB or a client still writing after 2 s.
 
 A test makes the next spawns fail (`Server::fail_spawns`,
 `Router::fail_spawns`, `#[doc(hidden)]`) by asking for a stack of 2 EiB,
@@ -595,7 +663,23 @@ and `an_answer_in_before_the_body_went_out_whole_is_the_answer` (64 MiB,
 failing without the read after the write), `entry.test.js`'s router that
 refused the connection passed over, and `accept`'s unit tests -- the
 stream given back; an end, not a reset, after the answer -- each fail with
-its part taken out. The counts by reason, a delta of one each and none of
+its part taken out. So do `accept`'s
+`a_request_after_the_refusal_is_read_off_not_reset`, fenec-http's
+`a_request_written_after_the_ceilings_refusal_is_read_off_not_reset` and
+fenec-shard's `a_request_written_after_the_routers_refusal_is_read_off_not_reset`:
+three refused connections each, read to the answer's end -- where the
+refusal closed the socket, it had closed it by then -- then written a
+head and a 512 KiB body apart and ended, each over when it has no peer,
+its end acknowledged or reset, and then asked for the error a reset
+leaves (`take_error`). The body is larger than a send buffer, macOS's
+128 KiB and Linux's first 16 KiB, so written to a socket that is gone its
+`write` waits for room that never comes and the reset ends it: closed
+with the answer, the first connection failed every run on both systems,
+`EPIPE` or `ECONNRESET`. A body that fit failed on Linux each time and on
+macOS 136 to 350 times in 1 000 connections, the reset taken in as it
+came -- a thousand connections a test, which no test should open on a
+host. A test waits for no time: the connection's end comes either way.
+The counts by reason, a delta of one each and none of
 the other, are `refused_counts.rs`'s in fenec-http and fenec-shard, each a
 `[[test]]` of its own, the count being the process's.
 
@@ -621,3 +705,17 @@ whose path did not change, not the router's; a `GET`'s head went in one
 `refuse`, `no_thread`, its lines and the family, the relays' and the
 early answer's code. Nothing below `fenec-http` changed, and the browser
 module is the same to the byte.
+
+The lingering thread and the wider queue touch no served connection: a
+loop's start makes the thread and listens again, and a refusal shuts the
+socket's writing and hands it over where it read and closed. In ABBA
+turns against main under the ceiling, 5 s each, three quartets in Docker's
+Linux on three cores: 32 clients kept alive, `get`s, 230.3-246.4k a second
+against 196.1-243.4k, p50 27-29 us against 20-29; a connection a request,
+eight clients, 15 868-16 084 a second against 14 635-16 233 in the first
+two quartets (the third slowed both, 8 614 and 13 890 against 9 212 and
+15 735), p50 296-300 us against 293-303. On macOS, 32 clients kept alive at
+loads of 6.6 to 16: 124.1-165.2k against 131.6-158.7k, p50 115-201 us
+against 132-225. `fenec-server`'s `__text` grew 5 376 bytes and
+`fenec-shard`'s 5 312 (aarch64-apple-darwin): `linger`, `hold`, `ready`
+and `widen`.

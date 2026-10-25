@@ -760,6 +760,11 @@ impl Router {
                 );
             }
         }
+        // As a node's: the thread a refused connection is held on, made
+        // before the thread limit can keep it from being made, and a listen
+        // queue past std's 128.
+        fenec_http::accept::ready();
+        fenec_http::accept::widen(&listener);
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
             let live = self.live.fetch_add(1, Ordering::SeqCst) + 1;

@@ -1081,14 +1081,9 @@ fn the_connection_ceiling_refuses_with_the_cors_headers() {
     held.read_exact(&mut first).unwrap();
     assert_eq!(&first, b"HTTP/1.1 200");
     // The refusal is written as the connection is taken, before a request
-    // is read, and the connection closed: a request written after it can
-    // meet the closed socket. Read alone.
-    let mut refused = TcpStream::connect(("127.0.0.1", h.port)).unwrap();
-    refused
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    let mut out = String::new();
-    let _ = refused.read_to_string(&mut out);
+    // is read; the request, written as a client writes it, is read off
+    // after it (`a_request_written_after_the_ceilings_refusal_...`).
+    let out = raw(h.port, "GET /articles?count HTTP/1.1\r\nHost: t\r\n\r\n");
     let r = parse_res(&out);
     assert_eq!(r.status, 503, "{}", r.body);
     assert_eq!(
@@ -1096,6 +1091,80 @@ fn the_connection_ceiling_refuses_with_the_cors_headers() {
         Some("https://app.example")
     );
     drop(held);
+}
+
+/// A body larger than a socket's send buffer -- macOS's 128 KiB, Linux's
+/// first 16 KiB -- and smaller than the 1 MiB a refused connection is read
+/// off: written to a socket that is gone, its write waits for room that
+/// never comes, and the reset ends it every time.
+const LATE_BODY: usize = 512 << 10;
+
+/// Reads a refused connection's answer and end -- where the refusal closed
+/// the socket, it had closed it by then -- then writes a request, head and
+/// [`LATE_BODY`] apart as Python's `http.client` writes them, ends the
+/// connection and waits for it to be over: the answer, or the error a
+/// reset left.
+fn written_after_the_refusal(port: u16) -> std::result::Result<String, String> {
+    let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut out = String::new();
+    c.read_to_string(&mut out)
+        .map_err(|e| format!("the answer: {e}"))?;
+    let head = format!("POST /query HTTP/1.1\r\nHost: t\r\nContent-Length: {LATE_BODY}\r\n\r\n");
+    c.write_all(head.as_bytes())
+        .map_err(|e| format!("the head: {e}"))?;
+    c.write_all(&vec![b' '; LATE_BODY])
+        .map_err(|e| format!("the body: {e}"))?;
+    c.shutdown(std::net::Shutdown::Write)
+        .map_err(|e| format!("the end: {e}"))?;
+    // Over either way -- the end acknowledged, or reset -- a connection
+    // has no peer.
+    let by = std::time::Instant::now() + Duration::from_secs(30);
+    while c.peer_addr().is_ok() {
+        assert!(std::time::Instant::now() < by, "the connection never ended");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    match c.take_error() {
+        Ok(None) => Ok(out),
+        Ok(Some(e)) => Err(format!("after the end: {e}")),
+        Err(e) => Err(format!("its error: {e}")),
+    }
+}
+
+/// A client past the ceiling writing its request as the answer comes is
+/// read off and its connection ended with no reset, a request sent after
+/// its answer and end included. Closed with its answer, the socket reset
+/// the head and the body's write failed, `EPIPE`, the 503 unread: 300
+/// `http.client` clients against a ceiling of 100 read 2 968 503s and
+/// 23 026 broken pipes of 26 016 refusals (Linux; 3 732 and 36 361 of
+/// 40 194 on macOS). `accept`'s unit test holds the reading off; this, the
+/// server's refusal going through it.
+#[test]
+fn a_request_written_after_the_ceilings_refusal_is_read_off_not_reset() {
+    let h = start(Config {
+        max_connections: 1,
+        ..Config::default()
+    });
+    let mut held = TcpStream::connect(("127.0.0.1", h.port)).unwrap();
+    held.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    held.write_all(b"GET /articles?count HTTP/1.1\r\nHost: t\r\n\r\n")
+        .unwrap();
+    let mut first = [0u8; 12];
+    held.read_exact(&mut first).unwrap();
+    assert_eq!(&first, b"HTTP/1.1 200");
+    for i in 0..3 {
+        let out = written_after_the_refusal(h.port).unwrap_or_else(|e| panic!("{i}: {e}"));
+        let r = parse_res(&out);
+        assert_eq!(r.status, 503, "{out}");
+        assert_eq!(r.header("Retry-After"), Some("1"), "{out}");
+        assert_eq!(r.header("Fenec-Unserved"), Some("ceiling"), "{out}");
+    }
+    // The held connection is the server's still.
+    held.write_all(b"GET /articles?count HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut rest = String::new();
+    let _ = held.read_to_string(&mut rest);
+    assert_eq!(rest.matches("HTTP/1.1 200").count(), 1, "{rest}");
 }
 
 /// A connection the server can make no thread for -- the process at its
