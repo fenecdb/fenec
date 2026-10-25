@@ -17,7 +17,7 @@ let local = "integrations/swift/build/FenecFFI.xcframework"
 let here = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
 let built = FileManager.default.fileExists(atPath: here.appendingPathComponent(local).path)
 
-let release = "0.1.10"
+let release = "0.1.11"
 let checksum = "8615a29b6ac65aab5359cfa95561fa381c5a93047e920046584c66f372ca371b"
 
 let ffi: Target =
