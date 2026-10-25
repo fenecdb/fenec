@@ -1,6 +1,6 @@
 //! Append-only segment store -- *no buffer pool*.
 //!
-//! In classic databases disk pages are copied into a page cache in user
+//! In classic databases disk pages are copied into a buffer pool in user
 //! space; consistency, eviction policy and locking cost all come from
 //! there. fenecdb skips that entirely:
 //!

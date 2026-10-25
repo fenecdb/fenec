@@ -778,6 +778,8 @@ CLAIMS = [
     ("site/content/docs/redis.html", r"B: 95% read, 5% update, 16 clients, durable</td>(?:<td[^>]*>.*?</td>){1}<td class=\"n\">[\d.]+ k<br><small>p99 ([\d.]+) ms", "ycsbms:redis:durable:B:16:slowest_p99", 0),
     ("site/content/docs/redis.html", r"(none)\s+of\s+the\s+\d+\s+cells\s+measured\s+both\s+ways", "redis:lost", 0),
     ("site/content/docs/redis.html", r"none\s+of\s+the\s+(\d+)\s+cells\s+measured\s+both\s+ways", "redis:both", 0),
+    ("site/content/docs/redis.html", r"behind\s+fenec-server\s+buffered\s+in\s+(none)\s+of\s+the\s+\d+\s+cells", "redis:snapshot_lost", 0),
+    ("site/content/docs/redis.html", r"behind\s+fenec-server\s+buffered\s+in\s+none\s+of\s+the\s+(\d+)\s+cells", "redis:snapshot_both", 0),
     ("site/content/docs/redis.html", r"takes\s+([\d.]+) ms\s+at\s+the\s+median\s+from\s+fenec-server", "ycsbms:server-docker:buffered:C:1:READ_p50", 0),
     ("site/content/docs/redis.html", r"and\s+([\d.]+) ms\s+from\s+Redis", "ycsbms:redis:buffered:C:1:READ_p50", 0),
     ("site/content/docs/redis.html", r"spends\s+([\d.]+) ms\s+inside\s+the\s+server\s+of\s+a\s+[\d.]+ ms\s+round\s+trip", "rt:docker:read:inside", 0),
@@ -861,9 +863,9 @@ def ycsb_latency_facts():
     """A latency a page quotes beside a cell, in microseconds, held to the
     last digit it shows: `ycsbms:<system>:<mode>:<workload>:<threads>:<stat>`,
     the stat being `slowest_p99` (the p99 the tables put under a figure) or
-    an operation's `READ_p50` or `READ_p99`. The pages that say a cache in
-    front of fenec-server saves nothing quote these, so they cannot drift
-    from the results they rest on."""
+    an operation's `READ_p50` or `READ_p99`. The pages that say what a cache
+    in front of fenec-server can and cannot take off a read quote these, so
+    they cannot drift from the results they rest on."""
     out = {}
     for key, cell in ycsb_cells().items():
         if key[2] not in YCSB_WORKLOADS:
@@ -877,16 +879,23 @@ def ycsb_latency_facts():
     return out
 
 
-def redis_compared(cells):
-    """The cells measured for fenec-server in Docker and for Redis alike,
-    the same mode against the same, as (mode, workload, clients, ours,
-    theirs), durable first."""
+# fenec-server's mode against Redis's: the same against the same, and
+# fenec-server buffered against Redis with its snapshots alone (no append-only
+# file), which keeps no log and is the nearest to a cache.
+SAME_MODE = (("durable", "durable"), ("buffered", "buffered"))
+AGAINST_SNAPSHOTS = (("buffered", "snapshot"),)
+
+
+def redis_compared(cells, modes=SAME_MODE):
+    """The cells measured for fenec-server in Docker and for Redis alike, as
+    (mode, workload, clients, ours, theirs), durable first: the same mode
+    against the same, or whatever `modes` pairs (ours, Redis's)."""
     out = []
-    for mode in ("durable", "buffered"):
+    for mode, redis_mode in modes:
         for wl in YCSB_WORKLOADS:
-            for n in sorted({int(k[3]) for k in cells if k[0] == "redis" and k[1] == mode}):
+            for n in sorted({int(k[3]) for k in cells if k[0] == "redis" and k[1] == redis_mode}):
                 ours = cells.get(("server-docker", mode, wl, str(n)))
-                theirs = cells.get(("redis", mode, wl, str(n)))
+                theirs = cells.get(("redis", redis_mode, wl, str(n)))
                 if ours and theirs:
                     out.append((mode, wl, n, ours, theirs))
     return out
@@ -894,13 +903,19 @@ def redis_compared(cells):
 
 def redis_facts():
     """How many cells were measured both ways (`redis:both`) and in how many
-    Redis did more operations a second (`redis:lost`). A page may say "none
-    of the 33 cells", and the build fails when one stops being so."""
-    compared = redis_compared(ycsb_cells())
-    if not compared:
-        return {}
-    return {"redis:both": len(compared),
-            "redis:lost": sum(1 for *_, ours, theirs in compared if theirs["ops_s"] > ours["ops_s"])}
+    Redis did more operations a second (`redis:lost`); and the same against
+    Redis with its snapshots alone (`redis:snapshot_both`,
+    `redis:snapshot_lost`). A page may say "none of the 33 cells", and the
+    build fails when one stops being so."""
+    cells = ycsb_cells()
+    out = {}
+    for both, lost, modes in (("redis:both", "redis:lost", SAME_MODE),
+                              ("redis:snapshot_both", "redis:snapshot_lost", AGAINST_SNAPSHOTS)):
+        compared = redis_compared(cells, modes)
+        if compared:
+            out[both] = len(compared)
+            out[lost] = sum(1 for *_, ours, theirs in compared if theirs["ops_s"] > ours["ops_s"])
+    return out
 
 
 # A read by key in Docker taken apart (`make roundtrip-bench`) has no results
@@ -934,9 +949,9 @@ def bench_facts():
     ycsb = ycsb_facts()
     latency = {**ycsb_latency_facts(), **round_trip_facts()}
     counts = redis_facts()
-    # `redis:lost` is how many cells Redis led in, which a page says as `none`.
+    # The counts are of cells; a page says `none` for how many Redis led in.
     unit = {**{k: " k ops/s" for k in ycsb}, **{k: " ms" for k in latency},
-            "redis:both": " cells measured both ways", "redis:lost": " (the cells Redis led in)"}
+            **{k: " cells" for k in counts}}
     return {**ycsb, **latency, **counts}, unit
 
 
@@ -1318,39 +1333,41 @@ def claims_against(truth, unit, wanted):
             problems.append(f"{rel}: /{pattern}/ claims {why}, so it went unchecked")
             continue
         for m in found:
-            said, want = m.group(1), truth[fact]
+            # `written` is what the page says, as it says it, and a drift
+            # reports it so; `want` is the truth as the page would write it.
+            written, want = m.group(1), truth[fact]
             if fact == "version":
-                drifted = said != want
+                drifted = written != want
             elif fact.startswith("ycsb:"):
                 # Thousands a second, to the last digit written.
-                places = len(said.partition(".")[2])
+                places = len(written.partition(".")[2])
                 room = 0.5 * 10 ** -places + tol + 1e-9
-                said, drifted = float(said), abs(float(said) - want / 1000) > room
+                drifted = abs(float(written) - want / 1000) > room
                 want = f"{want / 1000:.{places}f}"
             elif fact.startswith(("ycsbms:", "rt:")):
                 # Milliseconds, to the last digit written.
-                places = len(said.partition(".")[2])
+                places = len(written.partition(".")[2])
                 room = 0.5 * 10 ** -places + tol + 1e-9
-                said, drifted = float(said), abs(float(said) - want / 1000) > room
+                drifted = abs(float(written) - want / 1000) > room
                 want = f"{want / 1000:.{places}f}"
             elif fact.startswith("redis:"):
-                # A count; a page says `none` for zero.
-                said, want = (0 if said == "none" else int(said)), int(want)
-                drifted = said != want
-                said = "none" if said == 0 else said
-                want = "none" if want == 0 else want
+                # A count of cells; a page says `none` for zero.
+                said = 0 if written == "none" else int(written)
+                drifted = said != int(want)
+                want = "none" if int(want) == 0 else str(int(want))
             elif fact.startswith("kb"):
                 room = 0.5 + tol + (NOISE_KB if fact in COMPRESSED else 0)
-                said, drifted = int(said), abs(int(said) - want) > room
+                drifted = abs(int(written) - want) > room
                 want = f"{want:.1f}"
             else:
-                said, drifted = int(said), abs(int(said) - want) > tol
+                drifted = abs(int(written) - want) > tol
             if drifted:
                 line = body.count("\n", 0, m.start()) + 1
-                problems.append(
-                    f"{rel}:{line}: says {said}{unit[fact]}, "
-                    f"it is {want}{unit[fact]}"
-                )
+                if fact.endswith("_lost") or fact.endswith(":lost"):
+                    problems.append(f"{rel}:{line}: says Redis is ahead in {written} of the cells, "
+                                    f"it is ahead in {want}")
+                else:
+                    problems.append(f"{rel}:{line}: says {written}{unit[fact]}, it is {want}{unit[fact]}")
     return problems
 
 

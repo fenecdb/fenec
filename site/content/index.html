@@ -1,6 +1,6 @@
 <!--
 title: fenecdb — lives anywhere, hears everything
-description: One database from the screen to the server: state your screens follow live, a replica that syncs with your server, a server that needs no cache in front, many clients writing to one file through one writer, a file per tenant in every region, and search built in. The engine compiles to 330 KB of gzipped WebAssembly and runs as a server any language reaches over HTTP.
+description: One database from the screen to the server: state your screens follow live, a replica that syncs with your server, a server that usually needs no cache in front, many clients writing to one file through one writer, a file per tenant in every region, and search built in. The engine compiles to 330 KB of gzipped WebAssembly and runs as a server any language reaches over HTTP.
 -->
 
 <section class="hero">
@@ -45,8 +45,8 @@ description: One database from the screen to the server: state your screens foll
       <h1 class="hero-say reveal">Lives anywhere.<br> Hears everything.</h1>
       <p class="hero-sub reveal">One database from the screen to the server:
         state your screens follow live, a replica that syncs with your server,
-        a server that needs no cache in front of it, a file per tenant in
-        every region, and search built in.</p>
+        a server that usually needs no cache in front of it, a file per
+        tenant in every region, and search built in.</p>
       <p class="hero-cta reveal">
         <a class="btn btn-fill" href="docs/quickstart.html">Get started</a>
         <a class="btn btn-line" href="playground.html">Try it in the browser</a>
@@ -238,9 +238,10 @@ description: One database from the screen to the server: state your screens foll
       node, 1 000 000 records of 1 KB, fenec-server and Redis 7.4 in Docker
       (<a href="docs/benchmarks.html#ycsb-redis">every cell</a>).</p>
     <p class="after rise">In Docker a read by key spends 0.023 ms inside the server of
-      a 0.288 ms round trip and the rest is the network, so a cache in front can
-      take off at most the time spent inside the server, and brings an invalidation
-      to keep right.
+      a 0.288 ms round trip and the rest is the network, so over the same network
+      a cache in front can take off at most the time spent inside the server, and
+      brings an invalidation to keep right. A cache nearer the app than the
+      database is not measured.
       This holds while the working set fits in memory: past it a read waits
       for the disk, as in any database (<a href="docs/server.html#compaction">before
       the file outgrows the page cache</a>). It is about the database&rsquo;s

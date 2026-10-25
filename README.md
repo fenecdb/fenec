@@ -5,8 +5,8 @@
 An embedded document database for an app's data, from the page to the
 server: state its screens follow live, a replica on the device that syncs
 with the server, many clients writing into one file through one writer
-and sharing their disk syncs, a server that needs no cache in front of it, a file
-per tenant in every region, and search built in --
+and sharing their disk syncs, a server that usually needs no cache in front of it,
+a file per tenant in every region, and search built in --
 BM25 over text with typos, highlights and facets, and vectors for meaning.
 Written in Rust with no dependencies, it runs inside a web page as 330 KB of
 gzipped WebAssembly, in an iOS, Android or Flutter app as a file on the
@@ -117,8 +117,8 @@ get articles select title
 **fenecdb** makes sense when the database should run beside the code that uses
 it — in the browser, in the process, or as one small server — and search
 belongs in it rather than in a second system: an app whose screens follow
-its data and keep it offline, a server many clients read and write that needs
-no cache in front, a service with a file per tenant in one region or several,
+its data and keep it offline, a server many clients read and write that usually
+needs no cache in front, a service with a file per tenant in one region or several,
 and search over its own rows, a store's, a docs site's or an agent's
 memory. The scale limit is **the indexes fitting in memory**: the documents
 stay in the mapped file, so a server's memory follows its indexes, not its
@@ -317,7 +317,7 @@ let db = try await Fenec.sync(url: "https://api.example.com", token: jwt,
 | **Text search** | `match` ranked by BM25 over `@text` · `fuzzy` for a word typed wrong and `prefix` for one half typed · `highlight()` and `snippet()` marking what matched · `facet` counts beside the page, disjunctive and by ranges · Chinese, Japanese, Korean and Thai split into runs of characters |
 | **Places** | `distance(loc, p) <= 500` and `within(loc, [w, s, e, n])` over a `geo` field, through `@geo`, nearest first with `near` (in metres) — Redis's `GEOSEARCH`, the metres its `GEODIST`'s ([Points and distances](https://fenecdb.com/docs/geo)) |
 | **Instead of Redis** | counters (`set c {n: n + 1}`), rate limits (fixed and sliding windows, token buckets), locks with fencing tokens, sessions and caches under `@ttl`, leaderboards, sets, HyperLogLog, job queues with leases and a claim held until a job comes, delayed jobs, streams, pub/sub, idempotency keys — each a statement or two a test runs; no LRU eviction, no Lua ([Instead of Redis](https://fenecdb.com/docs/redis)) |
-| **No cache in front** | the file is mapped, so the operating system keeps the pages in use in memory and fenecdb copies none into a buffer pool of its own: a separate cache in front of `fenec-server` is usually unnecessary while the working set fits in memory. On YCSB in Docker against Redis 7.4, the same durability mode against the same, Redis does more operations a second in none of the 33 cells measured both ways: fenec-server's C at 16 clients, buffered, is 18.4 k against Redis's 14.0 k, and its B, durable, 18.2 k against 9.25 k (one node over Docker's network, 1 KB records; about a database's reads, not an HTTP or CDN response cache — [the figures and their conditions](https://fenecdb.com/docs/redis#cache-in-front)) |
+| **No cache in front** | the file is mapped, so the operating system keeps the pages in use in memory and fenecdb copies none into a buffer pool of its own: a separate cache in front of `fenec-server` is usually unnecessary while the working set fits in memory. On YCSB in Docker against Redis 7.4, the same durability mode against the same, Redis does more operations a second in none of the 33 cells measured both ways (A to F at 1, 4 and 16 clients, durable and buffered; C, which writes nothing, buffered alone): fenec-server's C at 16 clients, buffered, is 18.4 k against Redis's 14.0 k, and its B, durable, 18.2 k against 9.25 k (one node over Docker's network, 1 KB records; a cache nearer the app than the database is not measured; about a database's reads, not an HTTP or CDN response cache — [the figures and their conditions](https://fenecdb.com/docs/redis#cache-in-front)) |
 | **Functions** | `lower upper len coalesce now timestamp cosine l2 dot norm normalize distance within` + plugins |
 | **Vector search** | `near` over `vector<N[, f16]>` (HNSW, with `int8` and `bit` codes; exact by dot product over a `sparse<N>` such as SPLADE's), by `cosine`, `l2` or `dot` · `rerank` (exact vector reordering of `match` candidates, no graph needed) · `fuse` (`match` and `near` ranking together, by reciprocal rank) |
 | **Interfaces** | FenecQL · a query builder in seven languages · REST/JSON + SSE · WASM C ABI · a native C ABI for apps · change data capture (`/_changes`, every write on disk as a JSON line, resumable) · import from SQLite and PostgreSQL |

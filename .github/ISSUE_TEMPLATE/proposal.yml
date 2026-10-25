@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         README *Out of scope* records what was deliberately left out and why --
-        transactions, a page cache, multi-process access, and more. A proposal
+        transactions, a buffer pool, multi-process access, and more. A proposal
         to add one of those needs to take on the reasoning there, not just
         restate the feature.
 

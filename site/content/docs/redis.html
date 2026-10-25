@@ -61,8 +61,12 @@ Docker, each durability mode against the same mode of the other:</p>
 <p>Operations a second, and under each the p99 of the workload's slowest
 operation, as the benchmark page gives them. Redis does more operations a
 second than fenec-server in none of the 33 cells measured both ways:
-workloads A to F at 1, 4 and 16 clients, durable and buffered
-(<a href="/docs/benchmarks#ycsb-redis">every cell</a>, and the method).</p>
+workloads A to F at 1, 4 and 16 clients, durable and buffered (C, which
+writes nothing, buffered alone). Nor does Redis with its snapshots alone, no
+append-only file, which keeps no log: it is behind fenec-server buffered in
+none of the 15 cells measured that way (A, B, D, E and F at 1, 4 and 16
+clients). <a href="/docs/benchmarks#ycsb-redis">Every cell</a>, and the
+method.</p>
 
 <p>Over the same network a cache in front can take off at most the time a
 read spends inside the server, and a hop to it is no shorter than a hop to
