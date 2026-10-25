@@ -1033,7 +1033,11 @@ promoted by `POST /_replication/promote` and the units switched at once;
   crate by `tests/all.rs` (`autotests = false`: a new file needs its `mod`
   line there, or it is never built). One that reads the process's own
   counts, `/_metrics` or the statements', is a `[[test]]` of its own:
-  beside the others it would count theirs. Measurement programs are
+  beside the others it would count theirs. So is one whose servers hold
+  many threads: a test's servers serve on until its process ends, and past
+  macOS's 2 048 threads a process a server drops the connection it can
+  make no thread for, a reset to whichever test asked (fenec-shard's `all`
+  stood at 2 047 with `read_replicas` in it). Measurement programs are
   each crate's `examples/` (most of them `fenec-core`'s) and `fenec-bench`'s
   binaries, and are wired to `make` targets, not to CI.
 - The wait after a refusal is the process's, so the servers of a test binary
