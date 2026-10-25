@@ -12,14 +12,15 @@ a server or an app keeps.</p>
 
 <p><code>fenec</code> comes beside <code>fenec-server</code> in every way of
 installing it (<a href="install.html">Install</a>), and the steps below need
-nothing else. Give it a file of its own: not one a server has open, since two
-processes writing one file would corrupt it.</p>
+nothing else. Give it a file of its own, <code>scratch.fenec</code> here: not
+one a server has open, such as the Quickstart's <code>notes.fenec</code>, since
+two processes writing one file would corrupt it.</p>
 
 <ol class="steps-doc">
   <li>
     <p>Open a file. It is made if there is none.</p>
-<pre data-lang="bash">fenec notes.fenec</pre>
-<pre data-lang="text" data-label="prints">fenecdb {{version}} — notes.fenec
+<pre data-lang="bash">fenec scratch.fenec</pre>
+<pre data-lang="text" data-label="prints">fenecdb {{version}} — scratch.fenec
 `.help` for help, `.quit` to exit</pre>
   </li>
   <li>
@@ -29,7 +30,7 @@ processes writing one file would corrupt it.</p>
 <pre data-lang="text">fenec&gt; create collection notes (title text @text, year int @sorted)
 collection `notes` created
 fenec&gt; put notes [{title: "Dunes", year: 2021}, {title: "Night at the oasis", year: 2024}];
-2 records (30.00µs)</pre>
+2 records (133.38µs)</pre>
   </li>
   <li>
     <p>Read them back by a filter and an order, then search the words, a typo
@@ -39,27 +40,34 @@ id  title               year
 --  ------------------  ----
 2   Night at the oasis  2024
 1   Dunes               2021
-(2 rows, 31.62µs)
+(2 rows, 149.12µs)
 fenec&gt; get notes select title match title "oasys" fuzzy
 title               _score
 ------------------  ------
 Night at the oasis  0.6224
-(1 rows, 37.46µs)
+(1 rows, 27.33µs)
 fenec&gt; .quit</pre>
   </li>
 </ol>
 
-<p>The file is the database: <code>fenec notes.fenec</code> opens it again with
-its rows, and <code>fenec-server --file notes.fenec</code> serves it once the
+<p>The file is the database: <code>fenec scratch.fenec</code> opens it again with
+its rows, and <code>fenec-server --file scratch.fenec</code> serves it once the
 shell has quit. <a href="fenecql.html">FenecQL</a> is a tour of the language
 in this shell, from a first write to a lookup and a total.</p>
 
 <h2 id="running">Running statements</h2>
 
-<pre data-lang="bash">fenec notes.fenec                          # interactive
-fenec notes.fenec -c 'get notes limit 5'   # one statement, then exit
-echo 'get notes' | fenec notes.fenec       # from a pipe
-fenec notes.fenec &lt; seed.fenecql           # a script</pre>
+<pre data-lang="bash">fenec scratch.fenec                          # interactive
+fenec scratch.fenec -c 'get notes limit 5'   # one statement, then exit
+echo 'get notes' | fenec scratch.fenec       # from a pipe
+fenec scratch.fenec &lt; seed.fenecql           # a script
+fenec --version                              # fenec &lt;version&gt;, and nothing opened</pre>
+
+<p><code>--version</code>, or <code>-V</code>, prints the shell's version on
+stdout and exits 0 without opening a file; <code>fenec version</code>, with no
+dashes, opens a file named <code>version</code>, as any other word does.
+Releases up to 0.1.12 have no <code>--version</code>: the first line an
+interactive session prints names theirs.</p>
 
 <p>Inside the shell, a line that begins with a <code>.</code> is the shell's own:</p>
 

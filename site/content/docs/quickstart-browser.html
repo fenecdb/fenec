@@ -1,5 +1,5 @@
 <!--
-title: Quickstart in the browser — fenecdb
+title: Quickstart: in the browser — fenecdb
 description: Run fenecdb in a page with no server: a Vite project, one npm package and a script that opens a database, writes two rows, queries and searches them, then keeps the database in IndexedDB between visits.
 -->
 
@@ -16,10 +16,12 @@ would rather type than install.</p>
 <ol class="steps-doc">
   <li>
     <p>Make a project and install the package.</p>
-<pre data-lang="bash">npm create vite@latest my-app -- --template vanilla
+<pre data-lang="bash">npm create vite@latest my-app -- --template vanilla --no-immediate
 cd my-app
-npm install
 npm install @fenecdb/web</pre>
+    <p>With <code>--template</code> and <code>--no-immediate</code> Vite asks
+    nothing and starts nothing: it makes the folder and stops, and the install
+    brings Vite along with the package.</p>
   </li>
   <li>
     <p>Replace <code>src/main.js</code> with this. It opens a database, makes a
@@ -118,7 +120,13 @@ Reload it once more, and the rows come from IndexedDB.</p>
 start again, clear the site's data in your browser's developer tools.</p>
 
 <details class="deep"><summary>No bundler, no npm, and Node</summary>
-<p>With no Vite, any static file server shows the same page: serve
+<p>Another bundler does what Vite does: import <code>@fenecdb/web</code> and
+hand <code>Fenec.open</code> the module's URL, however that bundler spells a
+file's address. A page whose queries run on a server imports
+<code>@fenecdb/web/client</code> and loads no module at all (<a
+href="javascript.html#packages">Which package</a>).</p>
+
+<p>With no bundler, any static file server shows the same page: serve
 <code>node_modules</code> as it is and hand <code>Fenec.open</code> the module's
 path. Save this as <code>index.html</code> beside <code>node_modules</code>, run
 <code>python3 -m http.server 8000</code> (or <code>npx serve</code>) and open

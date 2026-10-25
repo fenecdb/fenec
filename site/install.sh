@@ -278,7 +278,7 @@ main() {
 
     say ""
     say "Installed fenecdb $version ($target) in $bindir:"
-    say "  fenec          the shell:  fenec notes.fenec"
+    say "  fenec          the shell:  fenec scratch.fenec"
     say "  fenec-server   the server: fenec-server --file notes.fenec"
 
     # Does it start? Its version is the first line of --help.

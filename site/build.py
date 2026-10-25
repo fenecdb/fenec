@@ -469,9 +469,9 @@ def first_example(name, body):
 def language_tabs():
     """The first example of each of Your language's tabs in `HTTP_TABS`, as
     the tabs of another page's `data-langs` box: the HTTP endpoint page's
-    and the Quickstart's examples are the languages page's, taken from it
-    when the page is read, so the three cannot say different things (`make
-    languages-test` holds that page's statements to the programs it runs)."""
+    examples are the languages page's, taken from it when the page is read,
+    so the two cannot say different things (`make languages-test` holds that
+    page's statements to the programs it runs)."""
     src = open(os.path.join(ROOT, "content", "docs", "languages.html"), encoding="utf-8").read()
     tabs = {name: body for name, body in LANG_TAB.findall(src)}
     unplaced = [n for n in tabs if n not in HTTP_TABS + EMBEDDED_TABS]

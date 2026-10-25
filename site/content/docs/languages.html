@@ -197,7 +197,7 @@ err := query(&amp;rows, "get docs select title, year where year &gt;= $1 order y
 </div>
 
 <div class="lang" data-name="Rust">
-<pre data-lang="bash" data-label="install">cargo add ureq --features json
+<pre data-lang="bash" data-label="install">cargo add ureq@2 --features json
 cargo add serde_json</pre>
 <pre data-lang="rust" data-label="main.rs">use serde_json::{json, Value};
 

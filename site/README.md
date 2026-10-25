@@ -39,11 +39,15 @@ is the release's number, from the workspace's `Cargo.toml` -- the one place
 banner moves with a release instead of being found and edited;
 `{{docs_map}}` is every page of `NAV` by group, for the docs index;
 `{{language_tabs}}` is the first example of each HTTP language's tab on
-`languages.html` as the tabs of the HTTP endpoint page and of the Quickstart's
-fourth step, so the three cannot say different things (`make languages-test`
-holds that page's statements to the programs it runs, and runs the HTTP page's
-curl tab and the Quickstart's curl steps as written:
-`integrations/languages/docs_check.py`);
+`languages.html` as the tabs of the HTTP endpoint page, so the two cannot say
+different things (`make languages-test` holds that page's statements to the
+programs it runs, and runs the HTTP page's curl tab as written:
+`integrations/languages/docs_check.py`). The Quickstart's fourth step is not
+taken from there: each of its programs is a whole file a reader pastes
+(`integrations/languages/quickstart/`), shown as the file is, and
+`languages-test` runs every one against a server holding the notes of the
+Quickstart's steps 2 and 3 and holds what it prints to the block under the
+tabs, the same three lines in every language;
 `{{moved_script}}` is the script of a page that was split ("Splitting a docs
 page", below); and `{{builder "case" ...}}`, on the line above a
 `<pre data-lang="fenecql">`, makes the block the first tab of a box whose
@@ -74,8 +78,9 @@ install or run that release, so their steps use only what the release has
 (`fuzzy` and `limit $1` were `main`'s when 0.1.10 was released and failed
 against it), and the outputs they show -- the install script's, a score, the
 server's banner, Vite's -- were taken from that release by running the pages'
-commands. Only the Quickstart's curl steps are checked in CI (`docs_check.py`
-runs them against the checkout's server and compares each answer), so a
+commands. Only the Quickstart's curl steps and its programs are checked in CI
+(`languages-test`: `docs_check.py` runs the curl steps against the checkout's
+server and compares each answer, and `run-tests.sh` runs the programs), so a
 statement or an answer that moved fails there; after a release, run the other
 pages' commands again and compare.
 

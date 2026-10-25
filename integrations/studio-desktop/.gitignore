@@ -1,0 +1,17 @@
+# The toolchain, fetched on first use (scripts/electrobun.mjs): Hutch, its Bun
+# and the Electrobun runtime, 130 to 210 MB. Never ~/.hutch.
+.hutch-home/
+.hutch/
+.cottontail-tmp/
+node_modules/
+# What a build leaves: the .app, the .dmg and the update archive, and the
+# same for the test variant (the one with the hooks the checks drive).
+build/
+artifacts/
+build-test/
+artifacts-test/
+# The server the app bundles (scripts/get-server.sh) and the icon made from
+# icon/icon.svg (scripts/make-icon.sh).
+bin/
+icon.iconset/
+*.tsbuildinfo

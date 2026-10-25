@@ -27,7 +27,7 @@ the next block runs it. Add the line to <code>~/.zshrc</code> or
 <code>~/.bashrc</code> to keep it.</p>
 <details class="deep"><summary>What the install script prints</summary>
 <pre data-lang="text" data-label="its last lines, on an Apple silicon Mac">Installed fenecdb {{version}} (aarch64-apple-darwin) in /Users/you/.fenecdb/bin:
-  fenec          the shell:  fenec notes.fenec
+  fenec          the shell:  fenec scratch.fenec
   fenec-server   the server: fenec-server --file notes.fenec
   (fenec-server {{version}})
 
@@ -48,7 +48,7 @@ fenec-http {{version}} listening on: http://127.0.0.1:8080  [no auth]</pre>
 </div>
 
 <div class="lang" data-name="Docker">
-<pre data-lang="bash">docker run --rm --name fenecdb -v fenecdata:/data -p 127.0.0.1:8080:8080 \
+<pre data-lang="bash">docker run --rm --name quickstart -v quickstart:/data -p 127.0.0.1:8080:8080 \
   ghcr.io/fenecdb/fenec-server:{{version}} \
   --http 0.0.0.0:8080 --file /data/notes.fenec --studio --insecure</pre>
 <pre data-lang="text" data-label="prints">opened: /data/notes.fenec
@@ -59,16 +59,19 @@ token or <code>--insecure</code>. Here the port is published to this machine
 alone (<code>127.0.0.1:8080</code>), so the flag opens nothing wider; put a token
 on the server before it is published any further (<a
 href="server.html#security">Security</a>). The file is in the
-<code>fenecdata</code> volume.</p>
+<code>quickstart</code> volume.</p>
 </div>
 
 </div>
 
     <p>The server listens on <code>127.0.0.1:8080</code>, which only this
     machine reaches, and asks for no token (<code>[no auth]</code>).
-    <code>--studio</code> serves the admin page you will open in step 5. Other
-    ways to install: Homebrew, a <code>.deb</code> or <code>.rpm</code>, a
-    tarball, from source, in <a href="install.html">Install</a>.</p>
+    <code>--studio</code> serves the admin page you will open in step 5. If
+    port 8080 is taken, start it with <code>--http 127.0.0.1:8081</code> (Docker:
+    <code>-p 127.0.0.1:8081:8080</code>) and use that port below. On Windows, use
+    Docker, or WSL with the macOS and Linux steps. Other ways to install:
+    Homebrew, a <code>.deb</code> or <code>.rpm</code>, a tarball, from source,
+    in <a href="install.html">Install</a>.</p>
   </li>
   <li>
     <p>Make a collection and write two rows. The language is FenecQL: a
@@ -85,47 +88,329 @@ curl -s http://127.0.0.1:8080/query \
 <pre data-lang="text" data-label="answers">{"message":"collection `notes` created"}
 {"affected":1}
 {"affected":1}</pre>
+    <p>curl prints each answer with no line break after it, so in a terminal
+    they run together; they are shown one to a line here.</p>
   </li>
   <li>
-    <p>Read the rows back by a filter and an order, then search their words,
-    with a typo in the search.</p>
+    <p>Read the rows back by a filter and an order, by a kind, then search
+    their words, with a typo in the search.</p>
 <pre data-lang="bash">curl -s http://127.0.0.1:8080/query \
   -d '{"query": "get notes where year >= $1 order year desc", "params": [2020]}'
 curl -s http://127.0.0.1:8080/query \
+  -d '{"query": "get notes where kind = $1", "params": ["book"]}'
+curl -s http://127.0.0.1:8080/query \
   -d '{"query": "get notes select title match title $1 fuzzy", "params": ["oasys"]}'</pre>
 <pre data-lang="text" data-label="answers">[{"id":2,"title":"Night at the oasis","year":2024,"kind":"film"},{"id":1,"title":"Dunes","year":2021,"kind":"book"}]
+[{"id":1,"title":"Dunes","year":2021,"kind":"book"}]
 [{"title":"Night at the oasis","_score":0.62239116}]</pre>
-    <p><code>match</code> searches the words of a <code>@text</code> field,
-    <code>fuzzy</code> forgives a misspelling, and <code>_score</code> says how
-    well the row matched.</p>
+    <p><code>kind</code> is a <code>@hash</code> index, which answers equality
+    and gives the studio something to count by. <code>match</code> searches the
+    words of a <code>@text</code> field, <code>fuzzy</code> forgives a
+    misspelling, and <code>_score</code> says how well the row matched.</p>
   </li>
   <li>
-    <p>Do the same from your language, with the HTTP client it already has.
-    Each program makes a collection of its own, <code>docs</code>, writes two
-    rows, reads them back by a filter and an order, searches a word spelled
-    wrong and ends on a refused read.</p>
+    <p>Do the same from your language, with its client or the HTTP client it
+    already has. Each program writes a third row, reads the rows from 2020 on,
+    searches a word spelled wrong and ends on a refused read, with its status
+    and the server's message. Run it once: it writes the row every time.</p>
 
 <div class="langs" data-langs>
 
-{{language_tabs}}
+<div class="lang" data-name="Python">
+<pre data-lang="bash" data-label="install">pip install fenecdb   # the standard library alone</pre>
+<pre data-lang="python" data-label="notes.py">from fenecdb import Client, FenecError
+
+db = Client("http://127.0.0.1:8080")
+
+db.query("put notes {title: $1, year: $2, kind: $3}", ["Sand and stars", 2023, "book"])
+
+rows = db.query("get notes where year &gt;= $1 order year desc", [2020])
+print("from 2020:", ", ".join(r["title"] for r in rows))
+
+hits = db.query("get notes select title match title $1 fuzzy", ["oasys"])
+print("search:", ", ".join(h["title"] for h in hits))
+
+try:
+    db.query("get nowhere")
+except FenecError as e:
+    print("refused:", e.status, e)</pre>
+<pre data-lang="bash" data-label="run">python3 notes.py</pre>
+</div>
+
+<div class="lang" data-name="JavaScript">
+<pre data-lang="js" data-label="notes.mjs">async function query(q, params = []) {
+  const res = await fetch('http://127.0.0.1:8080/query', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ query: q, params }),
+  });
+  const body = await res.json();
+  if (!res.ok) throw Object.assign(new Error(body.error), { status: res.status });
+  return body;
+}
+
+await query('put notes {title: $1, year: $2, kind: $3}', ['Sand and stars', 2023, 'book']);
+
+const rows = await query('get notes where year &gt;= $1 order year desc', [2020]);
+console.log('from 2020:', rows.map((r) =&gt; r.title).join(', '));
+
+const hits = await query('get notes select title match title $1 fuzzy', ['oasys']);
+console.log('search:', hits.map((h) =&gt; h.title).join(', '));
+
+try {
+  await query('get nowhere');
+} catch (e) {
+  console.log(`refused: ${e.status} ${e.message}`);
+}</pre>
+<pre data-lang="bash" data-label="run">node notes.mjs   # Node 18 or newer: fetch is built in</pre>
+</div>
+
+<div class="lang" data-name="Go">
+<pre data-lang="bash" data-label="install">go mod init notes
+go get github.com/fenecdb/fenecdb/integrations/go   # the standard library alone</pre>
+<pre data-lang="go" data-label="main.go">package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"strings"
+
+	fenecdb "github.com/fenecdb/fenecdb/integrations/go"
+)
+
+type Note struct {
+	Title string `json:"title"`
+	Year  int    `json:"year"`
+}
+
+func titles(notes []Note) string {
+	var out []string
+	for _, n := range notes {
+		out = append(out, n.Title)
+	}
+	return strings.Join(out, ", ")
+}
+
+func main() {
+	ctx := context.Background()
+	db := fenecdb.New("http://127.0.0.1:8080")
+
+	if _, err := db.Exec(ctx, "put notes {title: $1, year: $2, kind: $3}", "Sand and stars", 2023, "book"); err != nil {
+		log.Fatal(err)
+	}
+
+	rows, err := fenecdb.QueryAs[Note](ctx, db, "get notes where year &gt;= $1 order year desc", 2020)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("from 2020:", titles(rows))
+
+	hits, err := fenecdb.QueryAs[Note](ctx, db, "get notes select title match title $1 fuzzy", "oasys")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("search:", titles(hits))
+
+	var refused *fenecdb.Error
+	if _, err := db.Query(ctx, "get nowhere"); errors.As(err, &amp;refused) {
+		fmt.Println("refused:", refused.Status, refused.Message)
+	}
+}</pre>
+<pre data-lang="bash" data-label="run">go run .</pre>
+</div>
+
+<div class="lang" data-name="Rust">
+<pre data-lang="bash" data-label="install">cargo new notes &amp;&amp; cd notes
+cargo add ureq@2 --features json
+cargo add serde_json</pre>
+<pre data-lang="rust" data-label="src/main.rs">use serde_json::{json, Value};
+
+fn query(q: &amp;str, params: Value) -&gt; Result&lt;Value, ureq::Error&gt; {
+    Ok(ureq::post("http://127.0.0.1:8080/query")
+        .send_json(json!({"query": q, "params": params}))?
+        .into_json()?)
+}
+
+fn titles(rows: &amp;Value) -&gt; String {
+    let titles: Vec&lt;&amp;str&gt; = rows.as_array().unwrap().iter().filter_map(|r| r["title"].as_str()).collect();
+    titles.join(", ")
+}
+
+fn main() -&gt; Result&lt;(), ureq::Error&gt; {
+    query("put notes {title: $1, year: $2, kind: $3}", json!(["Sand and stars", 2023, "book"]))?;
+
+    let rows = query("get notes where year &gt;= $1 order year desc", json!([2020]))?;
+    println!("from 2020: {}", titles(&amp;rows));
+
+    let hits = query("get notes select title match title $1 fuzzy", json!(["oasys"]))?;
+    println!("search: {}", titles(&amp;hits));
+
+    // A refusal is `Error::Status` with the server's status, its body {"error": ...}.
+    match query("get nowhere", json!([])) {
+        Err(ureq::Error::Status(status, res)) =&gt; {
+            let body: Value = res.into_json()?;
+            println!("refused: {status} {}", body["error"].as_str().unwrap_or_default());
+        }
+        other =&gt; {
+            other?;
+        }
+    }
+    Ok(())
+}</pre>
+<pre data-lang="bash" data-label="run">cargo run</pre>
+</div>
+
+<div class="lang" data-name=".NET">
+<pre data-lang="bash" data-label="install">dotnet new console -o notes &amp;&amp; cd notes
+dotnet add package FenecDb   # HttpClient and System.Text.Json alone</pre>
+<pre data-lang="csharp" data-label="Program.cs">using FenecDb;
+
+using var db = new FenecClient("http://127.0.0.1:8080");
+
+await db.ExecAsync("put notes {title: $1, year: $2, kind: $3}", ["Sand and stars", 2023, "book"]);
+
+var rows = await db.QueryAsync&lt;Note&gt;("get notes where year &gt;= $1 order year desc", [2020]);
+Console.WriteLine("from 2020: " + string.Join(", ", rows.Select(r =&gt; r.Title)));
+
+var hits = await db.QueryAsync&lt;Note&gt;("get notes select title match title $1 fuzzy", ["oasys"]);
+Console.WriteLine("search: " + string.Join(", ", hits.Select(h =&gt; h.Title)));
+
+try
+{
+    await db.QueryAsync("get nowhere");
+}
+catch (FenecException e)
+{
+    Console.WriteLine($"refused: {e.Status} {e.Message}");
+}
+
+record Note(string Title, int Year);</pre>
+<pre data-lang="bash" data-label="run">dotnet run</pre>
+</div>
+
+<div class="lang" data-name="Java">
+<pre data-lang="java" data-label="Notes.java">import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.util.ArrayList;
+import java.util.regex.Pattern;
+
+public class Notes {
+    static final HttpClient HTTP = HttpClient.newHttpClient();
+
+    // One FenecQL statement, as the JSON {"query": ..., "params": [...]}.
+    static HttpResponse&lt;String&gt; query(String json) throws Exception {
+        var req = HttpRequest.newBuilder(URI.create("http://127.0.0.1:8080/query"))
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(json))
+            .build();
+        return HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+    }
+
+    // The standard library has no JSON: every "title" of an answer, or its "error".
+    static String find(String key, String body) {
+        var found = new ArrayList&lt;String&gt;();
+        var m = Pattern.compile("\"" + key + "\":\"([^\"]*)\"").matcher(body);
+        while (m.find()) found.add(m.group(1));
+        return String.join(", ", found);
+    }
+
+    public static void main(String[] args) throws Exception {
+        query("""
+            {"query": "put notes {title: $1, year: $2, kind: $3}", "params": ["Sand and stars", 2023, "book"]}""");
+
+        var rows = query("""
+            {"query": "get notes where year &gt;= $1 order year desc", "params": [2020]}""");
+        System.out.println("from 2020: " + find("title", rows.body()));
+
+        var hits = query("""
+            {"query": "get notes select title match title $1 fuzzy", "params": ["oasys"]}""");
+        System.out.println("search: " + find("title", hits.body()));
+
+        var refused = query("""
+            {"query": "get nowhere"}""");
+        System.out.println("refused: " + refused.statusCode() + " " + find("error", refused.body()));
+    }
+}</pre>
+<pre data-lang="bash" data-label="run">java Notes.java   # Java 15 or newer, for the text blocks</pre>
+</div>
+
+<div class="lang" data-name="PHP">
+<pre data-lang="php" data-label="notes.php">&lt;?php
+
+// One FenecQL statement; the answer is its status and the decoded JSON body.
+function query(string $q, array $params = []): array {
+    $ch = curl_init('http://127.0.0.1:8080/query');
+    curl_setopt_array($ch, [
+        CURLOPT_POST =&gt; true,
+        CURLOPT_RETURNTRANSFER =&gt; true,
+        CURLOPT_HTTPHEADER =&gt; ['Content-Type: application/json'],
+        CURLOPT_POSTFIELDS =&gt; json_encode(['query' =&gt; $q, 'params' =&gt; $params]),
+    ]);
+    $body = json_decode(curl_exec($ch), true);
+    return [curl_getinfo($ch, CURLINFO_RESPONSE_CODE), $body];
+}
+
+query('put notes {title: $1, year: $2, kind: $3}', ['Sand and stars', 2023, 'book']);
+
+[, $rows] = query('get notes where year &gt;= $1 order year desc', [2020]);
+echo 'from 2020: ', implode(', ', array_column($rows, 'title')), "\n";
+
+[, $hits] = query('get notes select title match title $1 fuzzy', ['oasys']);
+echo 'search: ', implode(', ', array_column($hits, 'title')), "\n";
+
+[$status, $error] = query('get nowhere');
+echo 'refused: ', $status, ' ', $error['error'], "\n";</pre>
+<pre data-lang="bash" data-label="run">php notes.php   # with the curl extension</pre>
+</div>
+
+<div class="lang" data-name="Ruby">
+<pre data-lang="ruby" data-label="notes.rb">require "json"
+require "net/http"
+
+# One FenecQL statement; the answer is its status and the decoded JSON body.
+def query(q, params = [])
+  res = Net::HTTP.post(URI("http://127.0.0.1:8080/query"),
+                       JSON.generate(query: q, params: params),
+                       "Content-Type" =&gt; "application/json")
+  [res.code.to_i, JSON.parse(res.body)]
+end
+
+query("put notes {title: $1, year: $2, kind: $3}", ["Sand and stars", 2023, "book"])
+
+_, rows = query("get notes where year &gt;= $1 order year desc", [2020])
+puts "from 2020: #{rows.map { |r| r["title"] }.join(", ")}"
+
+_, hits = query("get notes select title match title $1 fuzzy", ["oasys"])
+puts "search: #{hits.map { |h| h["title"] }.join(", ")}"
+
+status, error = query("get nowhere")
+puts "refused: #{status} #{error["error"]}"</pre>
+<pre data-lang="bash" data-label="run">ruby notes.rb</pre>
+</div>
 
 </div>
 
-    <p>The programs send the token <code>secret</code>, which this server
-    ignores, having none. Java, PHP and Ruby need no package, and Swift,
-    Kotlin and Dart keep the database in the app instead: <a
-    href="languages.html">Your language</a> has each one in full, with its query
-    builder, batches and errors.</p>
+    <p>Every program prints the same three lines.</p>
+<pre data-lang="text" data-label="prints">from 2020: Night at the oasis, Sand and stars, Dunes
+search: Night at the oasis
+refused: 404 collection `nowhere`</pre>
+    <p>Java, PHP and Ruby need no package, and Swift, Kotlin and Dart keep the
+    database in the app instead: <a href="languages.html">Your language</a> has
+    each one in full, with its query builder, batches and errors.</p>
   </li>
   <li>
     <p>Open <code>http://127.0.0.1:8080/_studio/</code> in a browser, leave the
-    token empty and press Connect. Your rows are in the grid, with the counts by
-    <code>kind</code> above them. Enter writes a cell and <em>New row</em> adds
-    one.</p>
+    token empty and press Connect, and pick <code>notes</code> in the sidebar.
+    Your rows are in the grid, with the counts by <code>kind</code> above them.
+    Enter writes a cell and <em>New row</em> adds one.</p>
 
 <figure class="shot">
-<img src="../images/quickstart-studio-dark.webp" width="1280" height="420" alt="fenec studio on the quickstart's server: the notes collection in the sidebar, the counts of book and film above the grid, and the two rows, Dunes from 2021 and Night at the oasis from 2024">
-<figcaption>The two rows in <a href="studio.html">fenec studio</a>.</figcaption>
+<img src="../images/quickstart-studio-dark.webp" width="1280" height="420" alt="fenec studio on the quickstart's server: the notes collection in the sidebar, the counts of book and film above the grid, and its three rows, Dunes from 2021, Night at the oasis from 2024 and Sand and stars from 2023">
+<figcaption>The notes after step 4, in <a href="studio.html">fenec studio</a>.</figcaption>
 </figure>
   </li>
 </ol>

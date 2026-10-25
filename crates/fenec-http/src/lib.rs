@@ -387,6 +387,13 @@ impl Server {
             );
         }
 
+        // The thread a refused connection is held on, made now: at the
+        // thread limit it could not be made, and every refusal would close
+        // its connection as it answered it (`accept::refuse`). And a listen
+        // queue past std's 128, which a burst of reconnecting clients
+        // overflowed.
+        accept::ready();
+        accept::widen(&listener);
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
             let live = self.live.fetch_add(1, Ordering::SeqCst) + 1;

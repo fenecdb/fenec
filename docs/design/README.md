@@ -30,7 +30,11 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [lookup-and-aggregates.md](lookup-and-aggregates.md) -- `lookup`, `required`, keys of several fields, folded levels, select-list expressions, HyperLogLog and time zones
 - [native-and-sync.md](native-and-sync.md) -- `fenec-ffi`, the sans-IO sync core and the scenario file both sync runners are held to
 - [router.md](router.md) -- the router's CORS, its pooled connections, the cuts a failover makes, the leading router's and its followers', and queries across tenants
-- [integrations.md](integrations.md) -- `integrations/`, the Grafana data source, the `deploy/` kit and the install channels (Homebrew, `install.sh`, `.deb` and `.rpm`)
+- [integrations.md](integrations.md) -- `integrations/`, the Grafana data source, the desktop app, the `deploy/` kit and the install channels (Homebrew, `install.sh`, `.deb` and `.rpm`)
+
+A proposal holds no invariant until it is built, and is listed apart:
+
+- [named-statements.md](named-statements.md) -- *proposal, not built*: FenecQL defined once in a database and called by name with typed arguments and an authority of its own, its storage, its authority model against `SECURITY DEFINER`'s, its surfaces and the slices that would build it
 
 ## The original order
 
@@ -177,3 +181,4 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 141. [A connection no thread can be made for is answered 503, as one past the ceiling is](http.md#connections-without-a-thread) (added after the move, under *The HTTP server*)
 142. [Every way a server stops is the one shutdown](durability.md#the-one-shutdown) (added after the move, under *Durability*)
 143. [A release is installed from its own files, each checked before it is used](integrations.md#install-channels) (added after the move, under *Integrations and deploy*)
+144. [The desktop app is a window on a studio a `fenec-server` serves, one server per file](integrations.md#studio-desktop) (added after the move, under *Integrations and deploy*)

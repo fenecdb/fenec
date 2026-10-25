@@ -85,6 +85,70 @@ class Render(unittest.TestCase):
             formula.render("1.2.4", formula.parse_sums(sums("1.2.3")))
 
 
+class TestDo(unittest.TestCase):
+    """The formula's `test do`: a release's binaries asked what they have.
+    `--version` came with 0.1.13; a formula for a release before it, which
+    the tap may hold or the release job may write again, reads the first
+    line of `fenec-server --help`, or `brew test` would fail on a binary
+    that refuses the flag."""
+
+    def block_of(self, version):
+        text = formula.render(version, formula.parse_sums(sums(version)))
+        block = text[text.index("  test do\n") :]
+        return block[: block.index("\n  end\n") + len("\n  end\n")]
+
+    def test_a_release_with_the_flag_asks_each_binary_for_its_version(self):
+        for version in ("0.1.13", "0.1.20", "0.2.0", "1.0.0", "10.0.0"):
+            block = self.block_of(version)
+            self.assertIn(
+                'assert_equal "fenec #{version}", shell_output("#{bin}/fenec --version").chomp\n', block
+            )
+            self.assertIn(
+                'assert_equal "fenec-server #{version}", '
+                'shell_output("#{bin}/fenec-server --version").chomp\n',
+                block,
+            )
+            self.assertNotIn("--help", block, version)
+
+    def test_a_release_before_the_flag_reads_the_first_line_of_help(self):
+        for version in ("0.1.12", "0.1.11", "0.1.9", "0.0.99"):
+            block = self.block_of(version)
+            self.assertIn(
+                'assert_match "fenec-server #{version}", '
+                'shell_output("#{bin}/fenec-server --help 2>&1")\n',
+                block,
+            )
+            self.assertNotIn("--version", block, version)
+
+    def test_both_run_the_shell_on_a_script(self):
+        for version in ("0.1.12", "0.1.13"):
+            block = self.block_of(version)
+            self.assertIn('script = "create collection t (n int)\\nput t {id: 1, n: 7}\\nget t\\n"\n', block)
+            self.assertIn('assert_match(/^1\\s+7$/, pipe_output("#{bin}/fenec", script))\n', block)
+
+    def test_the_versions_compare_as_numbers(self):
+        # "0.1.9" sorts after "0.1.13" as text.
+        self.assertFalse(formula.has_version_flag("0.1.9"))
+        self.assertTrue(formula.has_version_flag("0.1.13"))
+        self.assertTrue(formula.has_version_flag("0.10.0"))
+
+    def test_a_formula_from_before_the_flag_is_written_as_before(self):
+        # The text 0.1.12's formula had, byte for byte, before the flag: a
+        # formula for a release without it, in the tap or written again for
+        # its tag, must not change.
+        block = self.block_of("0.1.12")
+        self.assertEqual(
+            block,
+            "  test do\n"
+            "    # Neither binary has a version flag: fenec-server names its version on the\n"
+            "    # first line of --help, and the shell is run on a script, in memory.\n"
+            '    assert_match "fenec-server #{version}", shell_output("#{bin}/fenec-server --help 2>&1")\n'
+            '    script = "create collection t (n int)\\nput t {id: 1, n: 7}\\nget t\\n"\n'
+            '    assert_match(/^1\\s+7$/, pipe_output("#{bin}/fenec", script))\n'
+            "  end\n",
+        )
+
+
 class Check(unittest.TestCase):
     def run_check(self, text, *more):
         with tempfile.NamedTemporaryFile("w", suffix=".rb", delete=False) as f:

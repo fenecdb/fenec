@@ -16,8 +16,8 @@ nothing reaches a registry before the notes have had a read.
    request like any other. Once the release is published, run the commands of
    the Quickstart, Quickstart: in the browser, Install and The shell once
    more: the outputs they show come from the release they install (the
-   Quickstart's curl steps are held to their answers by
-   `integrations/languages/docs_check.py`; the rest are compared by hand).
+   Quickstart's curl steps and its eight programs are held to their answers by
+   `make languages-test`; the rest are compared by hand).
 2. Build the Swift package's binary: `gh workflow run swift-binary.yml -f
    version=X.Y.Z`. SwiftPM fetches the package by its tag, and the
    `Package.swift` at that tag must already name the XCFramework's zip by
@@ -99,6 +99,43 @@ the .NET SDK is installed.
 | `fenecdb` in the Homebrew tap `fenecdb/homebrew-tap` | `packaging/homebrew`, `tools/homebrew-formula.py` | the formula: `fenec` and `fenec-server` from the release's tarballs, by platform, each with its SHA-256 |
 | `fenecdb_X.Y.Z-1_<arch>.deb`, `fenecdb-X.Y.Z-1.<arch>.rpm` on the release | `packaging/nfpm.yaml`, `tools/linux-packages.sh` | `/usr/bin/fenec` and `/usr/bin/fenec-server` from the musl tarballs, for amd64 and arm64; no dependencies |
 | `https://fenecdb.com/install.sh` | `site/install.sh` | the installer: the release's tarball for the machine, checked against `SHA256SUMS`, into `~/.fenecdb/bin`; deployed with the site, not with a release |
+
+## Once: the desktop app's signing Environment
+
+The Mac app (`integrations/studio-desktop`) is signed and notarized by
+`desktop.yml`, by hand and from `main` only, in a GitHub Environment that holds
+the certificate. **Make the Environment, with its rules, before any secret goes
+into it**: a secret in an Environment that has no rules yet is readable by a
+job from any branch that names it.
+
+A required reviewer (you: the dispatch waits for a person) and deployment
+branches limited to `main` alone (the code that is signed is main's):
+
+    gh api -X PUT repos/fenecdb/fenecdb/environments/desktop-signing --input - <<EOF
+    {"reviewers":[{"type":"User","id":$(gh api user -q .id)}],
+     "deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}
+    EOF
+    gh api -X POST repos/fenecdb/fenecdb/environments/desktop-signing/deployment-branch-policies -f name=main -f type=branch
+
+Look at what it holds (one reviewer, `main`, and nothing else) before going on:
+
+    gh api repos/fenecdb/fenecdb/environments/desktop-signing -q '.protection_rules'
+    gh api repos/fenecdb/fenecdb/environments/desktop-signing/deployment-branch-policies -q '[.branch_policies[].name]'
+
+Only then the secrets, in the Environment and not in the repository's own,
+pasting each when asked (the `.p12` and the `.p8` as base64):
+
+    for s in ELECTROBUN_DEVELOPER_ID MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD \
+             ELECTROBUN_APPLEAPIKEY ELECTROBUN_APPLEAPIISSUER ELECTROBUN_APPLEAPIKEY_P8; do
+      gh secret set "$s" --env desktop-signing -R fenecdb/fenecdb
+    done
+
+A release whose server has `--studio` and `--exit-on-stdin-close` (0.1.12 and
+after) is then signed and its DMG attached with `gh workflow run desktop.yml -f
+release=v0.1.12`. The job's first step reads the Environment's rules back and
+stops unless they are the above, where GitHub lets its token read them; it
+may not be able to (the Environments API asks for administration rights, which
+a workflow's token is not given), so the order above is what stands behind it.
 
 ## Once: the registries' side
 
