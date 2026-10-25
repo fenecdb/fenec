@@ -33,11 +33,14 @@ footer: the two stylesheets name the same classes and tokens (`.top`,
 `.btn`, `--sun`), and a frame keeps each to its own. `_headers` lets the
 site alone frame `/studio/*`, where every other page is `DENY`.
 
-Two placeholders are written into a page as it is read (`filled`): `{{version}}`
+Three placeholders are written into a page as it is read (`filled`): `{{version}}`
 is the release's number, from the workspace's `Cargo.toml` -- the one place
 `make version` writes -- so an install line, an image's tag or a sample's
-banner moves with a release instead of being found and edited; and
-`{{docs_map}}` is every page of `NAV` by group, for the docs index. Both are
+banner moves with a release instead of being found and edited;
+`{{docs_map}}` is every page of `NAV` by group, for the docs index; and
+`{{language_tabs}}` is the first example of each HTTP language's tab on
+`languages.html` -- the programs `make languages-test` runs -- as the tabs of
+the HTTP endpoint page, so the two cannot say different things. All are
 filled before the claims are checked and before the search and `llms.txt` read
 the page, and a version in prose that is a fact about the past (a comparison
 checked against a competitor's page on a day, a benchmark's build) stays as
@@ -274,8 +277,10 @@ it needs, all once:
    <p class="kicker">One or two sentences under the title.</p>
    ```
 
-2. Add it to `NAV` in `build.py`, under the group it belongs to. That list
-   drives the sidebar order and the previous/next links at the foot of a page.
+2. Add it to `NAV` in `build.py`, under the group it belongs to (the groups
+   follow what a reader is doing, as the comment above `NAV` says). That list
+   drives the sidebar order and the previous/next links at the foot of a page,
+   and the docs index's map of every page.
 
 Every `<h2>` and `<h3>` gets an id and a table-of-contents entry automatically;
 write your own `id="..."` when another page already links to it.

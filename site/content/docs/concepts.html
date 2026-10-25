@@ -53,8 +53,16 @@ dead ones, and reads wait for the disk.</p>
 the file and the process holds only the indexes built from them. A file
 larger than the machine's memory can be opened this way.</p>
 
-<p>One file of 1 GB, 2.3 million rows with a hash and an ordered index
-(<code>make open-bench</code>):</p>
+<ul>
+  <li><b>Replace a file by rename, never by copying over it.</b> A copy over
+    an open file, or a disk read that fails, ends the process.</li>
+  <li><b>Opening still takes time in proportion to the file.</b></li>
+  <li><b><code>fenec-server --no-mmap</code></b> reads the file into memory
+    instead, for network file systems.</li>
+</ul>
+
+<p>What that buys, for one file of 1 GB, 2.3 million rows with a hash and an
+ordered index (<code>make open-bench</code>):</p>
 
 <div class="tbl">
 <table>
@@ -66,14 +74,6 @@ larger than the machine's memory can be opened this way.</p>
 </tbody>
 </table>
 </div>
-
-<ul>
-  <li><b>Replace a file by rename, never by copying over it.</b> A copy over
-    an open file, or a disk read that fails, ends the process.</li>
-  <li><b>Opening still takes time in proportion to the file.</b></li>
-  <li><b><code>fenec-server --no-mmap</code></b> reads the file into memory
-    instead, for network file systems.</li>
-</ul>
 
 <details class="deep"><summary>Details</summary>
 <p>Because the format on disk is the format in memory, the file can be the
@@ -630,4 +630,51 @@ on every keystroke over a large set is unacceptable — here the local side is
 indexed and the query is already under a millisecond. And <b>a shape is
 mandatory</b>: the whole database is in memory, so the client cannot pull all
 of it. Details in <a href="sync.html">Sync</a>.</p>
+</details>
+
+<h2>Where it runs</h2>
+
+<p>The same engine ships four ways. Pick the one that matches where your data
+should live.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Target</th><th>What you get</th><th>Size</th></tr></thead>
+<tbody>
+<tr><td>Browser</td><td>WebAssembly module plus a dependency-free ES client</td><td class="n">330 KB gzip<br><small>the wasm module</small></td></tr>
+<tr><td>Command line</td><td>The <code>fenec</code> shell, <code>fenec import</code>, <code>fenec types</code>, <code>fenec backup</code> and <code>restore</code></td><td class="n">1880–3013 KB</td></tr>
+<tr><td>Server</td><td><code>fenec-server</code>: HTTP, replication and tenants in one process</td><td class="n">2.99 MB image</td></tr>
+<tr><td>Embedded</td><td><code>fenec-core</code> as a Rust library</td><td class="n">zero dependencies</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2>How the crates fit together</h2>
+
+<p>The code is a stack of small Rust crates; the engine at the bottom has no
+dependencies at all.</p>
+
+<details class="deep"><summary>Details</summary>
+<p>Dependencies point one way. Nothing points back up.</p>
+
+<pre data-lang="text">fenec-core   storage, indexes, plan executor, plugins, JSON, calendar, changes
+     |       std only, zero dependencies
+fenec-ql     FenecQL lexer and parser              fenec-wasm   browser ABI
+     |                                                          (no wasm-bindgen)
+     |
+fenec-http   REST/JSON surface, SSE subscriptions, replication, tenants
+     |
+fenec-wire   the PostgreSQL client the importer reads with
+     |
+fenec-import SQLite file reader, PostgreSQL COPY source, --follow
+     |
+fenec-server the server: HTTP, replication, tenants, the --follow mirror
+     |
+fenec-cli    the `fenec` shell
+</pre>
+
+<p><code>fenec-bench</code> is a measurement harness and the only crate allowed
+external dependencies — that is where <code>rusqlite</code> and
+<code>postgres</code> live, so the comparisons in
+<a href="benchmarks.html">Benchmarks</a> can run against the real engines.</p>
 </details>

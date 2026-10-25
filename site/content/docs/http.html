@@ -9,12 +9,61 @@ any standard library — no driver needed.</p>
 
 <h2>Start it</h2>
 
-<p>Add <code>--http</code> to <code>fenec-server</code>. Every collection gets REST
-routes from its schema.</p>
+<p>Add <code>--http</code> to <code>fenec-server</code>. Every collection gets
+REST routes from its schema, and <code>POST /query</code> takes any FenecQL
+statement.</p>
 
-<pre data-lang="bash">fenec-server --file data.fenec --http 127.0.0.1:8080
+<pre data-lang="bash">fenec-server --file data.fenec --http 127.0.0.1:8080</pre>
 
-curl 'http://127.0.0.1:8080/articles?select=title,year&year=gte.2024&tags=has.rust&order=year.desc&limit=10'
+<p>Then send it a statement. Each example makes a collection of a text and a
+number, each indexed, writes two rows, reads them back by a filter and an
+order, searches the words with a typo in them and handles a refusal. Each
+sends one FenecQL statement a request to <code>POST /query</code>, its values
+as <code>$1</code>, <code>$2</code>, ... in <code>params</code>.</p>
+
+<div class="langs" data-langs>
+
+<div class="lang" data-name="curl">
+<pre data-lang="bash">curl -s http://127.0.0.1:8080/query \
+  -d '{"query": "create collection if not exists docs (title text @text, year int @sorted)"}'
+# {"message":"collection `docs` created"}
+
+curl -s http://127.0.0.1:8080/query \
+  -d '{"query": "put docs {title: $1, year: $2}", "params": ["Dunes", 2021]}'
+curl -s http://127.0.0.1:8080/query \
+  -d '{"query": "put docs {title: $1, year: $2}", "params": ["Night at the oasis", 2024]}'
+# {"affected":1}
+
+curl -s http://127.0.0.1:8080/query \
+  -d '{"query": "get docs select title, year where year >= $1 order year desc limit $2", "params": [2020, 5]}'
+# [{"title":"Night at the oasis","year":2024},{"title":"Dunes","year":2021}]
+
+curl -s http://127.0.0.1:8080/query \
+  -d '{"query": "get docs select title match title $1 fuzzy", "params": ["oasys"]}'
+# [{"title":"Night at the oasis","_score":0.62239116}]
+
+curl -s -w ' %{http_code}\n' http://127.0.0.1:8080/query -d '{"query": "get nowhere"}'
+# {"error":"collection `nowhere`"} 404</pre>
+</div>
+
+{{language_tabs}}
+
+</div>
+
+<p>The programs send the token <code>secret</code> as <code>Authorization:
+Bearer</code>, which a server started with <code>--http-token secret</code>
+asks for; this one has none set, so it ignores it, and so the
+<code>curl</code> examples here leave it out. They are the programs of <a
+href="languages.html">Your language</a>, run against a real server on every
+change, each tab the start of that page's: the query builders, batches and
+typed errors follow there, and so do Swift, Kotlin and Dart, which keep the
+database in the app.</p>
+
+<p>The same rows are on REST routes, one per collection, with the filter in the
+query string. Here for an <code>articles</code> collection of titles, years
+and tags:</p>
+
+<pre data-lang="bash">curl 'http://127.0.0.1:8080/articles?select=title,year&year=gte.2024&tags=has.rust&order=year.desc&limit=10'
 # [{"title":"the rust book","year":2024}]
 
 curl 'http://127.0.0.1:8080/articles?year=gte.2024&count'
