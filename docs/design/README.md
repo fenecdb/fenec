@@ -25,7 +25,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [indexes.md](indexes.md) -- `@unique`, hash buckets and tables, `@ttl`, what reaches an index, bound filters, `@sorted`, composite indexes, lazy builds, `--warm` and `@geo`
 - [browser-module.md](browser-module.md) -- threads and features, what is core, and the bytes the module holds
 - [vector-search.md](vector-search.md) -- the distance kernels, vectors as numbers, quantized codes, filtered `near` and sparse vectors
-- [js-client.md](js-client.md) -- the module and the client entry, live queries, Durable Objects and their alarms
+- [js-client.md](js-client.md) -- the module and the client entry, how the page persists a database, live queries, Durable Objects and their alarms
 - [text.md](text.md) -- collations, `nocase`, `match`, the text index, `fuzzy` and `prefix`, `rerank`, `fuse`, `highlight()` and facets
 - [lookup-and-aggregates.md](lookup-and-aggregates.md) -- `lookup`, `required`, keys of several fields, folded levels, select-list expressions, HyperLogLog and time zones
 - [native-and-sync.md](native-and-sync.md) -- `fenec-ffi`, the sans-IO sync core and the scenario file both sync runners are held to

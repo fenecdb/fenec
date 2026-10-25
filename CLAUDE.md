@@ -2,76 +2,47 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-fenecdb — a minimal embedded database in Rust. Compiles to WASM for
-the browser, has its own query language (FenecQL), and its server (`fenec-server`)
-speaks HTTP; every language reaches it that way, Python, JavaScript, Go,
-.NET, Swift, Kotlin and Dart through official clients. The docs under `site/content/docs/` are the long-form reference (design
-rationale, benchmarks, full FenecQL and HTTP surface); `README.md` is the
-front door and links into them, and this file is the working summary.
+fenecdb -- a minimal embedded database in Rust. Compiles to WASM for the
+browser, has its own query language (FenecQL), and its server
+(`fenec-server`) speaks HTTP; every language reaches it that way, Python,
+JavaScript, Go, .NET, Swift, Kotlin and Dart through official clients. The
+docs under `site/content/docs/` are the long-form reference; `README.md` is
+the front door and links into them, and this file is the working summary.
 Each invariant here is its rule; its long form -- measurements, rejected
-alternatives, history -- is in `docs/design/`, whose `README.md` gives
-their order, and `tools/agents_md.py --check` fails once this file passes
-64 000 bytes.
-`AGENTS.md` is this file for other agents, the same text under its own title
-and first line: `make agents-md` writes it from `CLAUDE.md`
-(`tools/agents_md.py`), and CI fails when the two differ, so edit `CLAUDE.md`.
+alternatives, history -- is in `docs/design/`, whose `README.md` gives their
+order, and `tools/agents_md.py --check` fails once this file passes 64 000
+bytes. `AGENTS.md` is written from this file (`make agents-md`,
+`tools/agents_md.py`) under its own title and first line, and CI fails when
+the two differ: edit `CLAUDE.md`.
 
 ## Commands
 
 ```bash
-make test          # cargo test (no fenec-bench, no examples), fenec-core without its indexes and without any feature, then the JS tests and sync-scenarios-check
-make wasm          # builds fenec-wasm for wasm32, copies to web/fenec.wasm
+make test          # Rust (fenec-core also without its indexes and without any feature), then the JS tests and sync-scenarios-check
+make wasm          # fenec-wasm for wasm32 to web/fenec.wasm
 make wasm FEATURES="text sorted"   # with those features alone (indexes, language: a group; none: none)
-make wasm-lite     # the test build without the indexes, to web/fenec-lite.wasm (web/fenec.test.js; shipped by nothing)
-make wasm-min      # the test build with no feature at all, to web/fenec-min.wasm (the same)
-make wasm-sizes    # what each feature adds to the module with none, and what leaving it out of the full one saves
-make size-report   # where the module's bytes go, by crate, module and std (BASE=main: against main; BIN=fenec-server: a native binary's; FEATURES=none: that build's)
-make ffi           # the native library for apps (crates/fenec-ffi) for this machine, TARGET=... another, JNI=1 with the Kotlin functions
+make wasm-lite     # test build without the indexes (web/fenec-lite.wasm), shipped by nothing; make wasm-min: with no feature at all
+make wasm-sizes    # what each feature adds to the module with none, and what leaving it out saves
+make size-report   # where the module's bytes go (BASE=main, BIN=fenec-server, FEATURES=none)
+make ffi           # the native library for apps (crates/fenec-ffi); TARGET=... another, JNI=1 for Kotlin
 make sync-scenarios-check   # both runners of integrations/sync-scenarios.json passed every scenario (after make test)
-make swift-test    # the Swift package (Package.swift) on macOS: the XCFramework's macOS slice, swift test (sync tests start a fenec-server, read-routing tests fenec-shard routers too), then again on one cooperative thread
-make kotlin-test   # the Kotlin library's JVM tests, the library built for Linux (Docker unless Linux with Gradle)
-make dart-test     # the Dart package against the library for this machine, and the Flutter plugin where Flutter is installed
-make packages      # fenecdb (PyPI), the @fenecdb npm packages and FenecDb (NuGet) as a release publishes them, installed and used
+make packages      # the PyPI, npm and NuGet packages as a release publishes them, installed and used
 make version V=X.Y.Z   # one version wherever a release reads it (RELEASING.md)
-make agents-md     # AGENTS.md written again from this file (CI fails when they differ)
-make serve         # wasm + python3 http.server -> http://localhost:8787
-make python-test   # LangChain + LlamaIndex stores vs their frameworks' tests (Docker)
-make languages-test   # the docs' example in Python, JS, Go, C#, Java, PHP, Ruby and Rust over HTTP (Docker for some)
-make examples-test    # examples/: the Notes app in every language, each its smoke on this checkout's build (E="python go" for some)
-make go-test       # the Go SDK (integrations/go) against a primary, a replica and a tenant node its tests start
-make dotnet-test   # the .NET SDK (integrations/dotnet) the same way, xunit; the dotnet/sdk:8.0 image on Linux without .NET
+make agents-md     # AGENTS.md written again from this file
 make builder-golden   # integrations/builder-golden.json written again from the JS builder (web/golden.mjs)
-make schema-golden    # integrations/schema-golden.json: declarations, FenecQL texts and plans, through the module (web/schema-golden.mjs)
-make types-check  # web/fenec.d.ts held to web/fenec.js and to a caller's code under tsc --strict, then make docs-types (web/types)
-make docs-types   # every data-lang="ts" example on the site under tsc --strict (web/types/docs.mjs; part of make types-check)
-make react-test    # useLiveQuery vs a real fenec-server replica (needs `make wasm`)
-make langchain-test   # the LangChain.js vector store over a database in the page and over fenec-server (needs `make wasm`)
-make ai-sdk-test   # integrations/ai-sdk/rag.js against the Vercel AI SDK's own mock models (needs `make wasm`)
-make cloudflare-test  # a database in a Durable Object's storage, SQL rows and values: persist, restore, storage failing part way, the example Worker under wrangler dev; then the global entry (entry/) in front of two regions' routers and of stand-ins
-make mcp-test      # the MCP server vs the official TypeScript MCP client: HTTP and stdio, both eras, the docs' configs
-make studio-test   # fenec studio (--studio) in headless Chrome: browse, edit, a scoped token, 100k rows
-make studio-highlight   # studio/highlight.js and the Grafana data source's copy written again from site/highlight.js and build.py's rules
-make grafana-check # monitoring/'s compose (Docker): both data dashboards, Infinity's and the Grafana plugin's (integrations/grafana), and its alert rule held to fenec-server
-make deploy-check  # deploy/: promtool over the alert rules and their tests, the tunnel's rules asked of cloudflared, the images' build script (tools/image-cargo.sh) held to a tree older than its last build and to a unit compiled from other bytes, then every systemd unit in two privileged containers booting systemd -- verified, started, used, the archive copied by real rclone, a standby router promoted by the units
-make drill         # deploy/'s failover drill (Docker): two regions, a node cut off and killed and back, a router killed and its standby promoted, the global routers cut off, a restore; lost must be 0 (DRILL_LEASE, DRILL_KEEP=1)
-make import-test   # the PostgreSQL arm of import and --follow (needs Docker)
-make pgvector-up   # PostgreSQL 17 + pgvector in Docker on 127.0.0.1:55432, wal_level=logical, for the comparisons and --follow (pgvector-down removes it)
-make small         # smallest `fenec` binary: --profile cli --no-default-features
-make server TOKEN=secret HTTP=127.0.0.1:8080   # run the server against ./data.fenec
+make schema-golden    # integrations/schema-golden.json written again through the module (web/schema-golden.mjs)
+make types-check  # web/fenec.d.ts held to web/fenec.js and a caller's code under tsc --strict, then docs-types
+make studio-highlight   # studio/highlight.js and the Grafana data source's copy written again from site/highlight.js
+make pgvector-up   # PostgreSQL 17 + pgvector in Docker on 127.0.0.1:55432, for the comparisons and --follow (pgvector-down)
+make server TOKEN=secret HTTP=127.0.0.1:8080   # the server against ./data.fenec
 make node ADMIN=secret   # a tenant node: fenec-server --dir tenants
 make shard               # the router in front of the nodes (./shard.fenec)
-# Measurements, none of them in CI: `make <name>`, each described with its
-# arguments (ARGS=... and the like) in the Makefile's `##` comments above its
-# rule, `make pgvector-up` first where PostgreSQL is the other side:
-#   wasm-speed wasm-exact-speed file-bench ffi-bench sync-bench bench memory
-#   sweep compare cloudflare-bench entry-bench beir follow-bench mirror-bench
-#   shard-bench quota-bench fence-bench policy-bench replica-bench
-#   node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench
-#   recon-bench roundtrip-bench load-bench maintenance-bench compact-bench
-#   open-bench opens-bench reopen-bench quant-bench scale-bench ycsb
-#   statements-bench subquery-bench composite-bench lookup-bench search-bench
-#   fuzzy-bench text-memory nocase-bench collate-bench ttl-bench growth-bench
-#   analytics-bench counters-bench geo-bench queue-bench nearest-bench
+# Every other target is described by the Makefile's `##` comments above its
+# rule: serve, small, the suites (*-test, grafana-check, deploy-check, drill;
+# Docker for several, `make wasm` first for react, langchain, ai-sdk and
+# cloudflare) and the measurements, none of them in CI (every *-bench, bench
+# memory sweep compare beir ycsb wasm-speed wasm-exact-speed text-memory;
+# `make pgvector-up` first where PostgreSQL is the other side).
 ```
 
 Single tests:
@@ -80,20 +51,19 @@ Single tests:
 cargo test -p fenec-core --test all persist::   # one file of a crate's integration tests (one binary)
 cargo test -p fenec-ql near                      # by name substring (integration: fn name only)
 cargo test -p fenec-core codec::tests            # inline unit tests in a module
-cargo test -p fenec-core --no-default-features --features std-fs,language --lib --test features   # without the indexes
-cargo test -p fenec-core --no-default-features --features std-fs --lib --test features   # without any feature
+cargo test -p fenec-core --no-default-features --features std-fs,language --lib --test features   # without the indexes (`--features std-fs` alone: without any feature)
 cargo test -p fenec-import --test all pg:: -- --ignored   # needs a live PostgreSQL
 node --test web/fenec.test.js                    # JS: builder
 node --test --test-name-pattern 'shape' web/fenec.sync.test.js
 ```
 
-`make test` runs Rust first on purpose: `cargo test` builds the `fenec-server` binary
-and `web/fenec.sync.test.js` runs against it (it self-skips when the binary or
-`web/fenec.wasm` is missing).
+`make test` runs Rust first on purpose: `cargo test` builds the
+`fenec-server` binary that `web/fenec.sync.test.js` runs against (it
+self-skips without the binary or `web/fenec.wasm`).
 
-**The wasm32 target comes from rustup.** Homebrew's `cargo` has no wasm32 std
-library; the Makefile prefers `~/.cargo/bin/cargo` via `$(CARGO)`. Building by
-hand needs `rustup target add wasm32-unknown-unknown`.
+**The wasm32 target comes from rustup.** Homebrew's `cargo` has no wasm32
+std library, so the Makefile prefers `~/.cargo/bin/cargo` via `$(CARGO)`; by
+hand, `rustup target add wasm32-unknown-unknown`.
 
 ## Architecture
 
@@ -118,47 +88,31 @@ fenec-server (the server: HTTP, the      fenec-cli (`fenec` shell,
 ```
 
 `fenec-bench` is a measurement harness (`publish = false`) and is the only crate
-allowed external crates — that is where `rusqlite`/`postgres` live.
+allowed external crates -- that is where `rusqlite`/`postgres` live.
 
-`fenec-core` modules: `store` (segments, offset index), `declared` (a schema
-declared in code: its description, the plan against a database), `engine` (`Database`,
-`Collection`, replay/snapshot/compact/checkpoint), `vector` (HNSW + distance
-kernels), `text` (tokenizer, inverted index, BM25), `highlight` (the spans a
-`match`'s terms were read from), `query` (`Statement`, plan
-execution), `schema`, `value`, `codec`, `collate` (ICU's root order and its Turkish
-tailoring, generated tables in chunks),
-`json`, `num` (decimal text to `f64` and back), `case` (a string's Unicode
-case, as the standard library's, without its code), `time` (calendar arithmetic), `tz`
-(the time zones `bucket` reads a clock by, IANA's rules since 2000), `sparse`
-(sparse vectors and their inverted index), `changes`
-(the change ring), `plugin` (registry), `sorted` (the ordered index),
-`composite` (an index over several fields), `fuzzy` (the sorted words
-`match ... fuzzy` and `prefix` walk), `geo` (points and `@geo`), `hll`
-(HyperLogLog), `maps` (the hash maps the derived indexes are built into),
-`history` (which history a database's writes belong to), `error`, `fs`
-(buffered file I/O, behind the `std-fs` feature, as are `cache`, the page
-cache's room, and `synclog`, the sync log), `off` (what stands in for an
-index a build is made without).
+`fenec-core` modules (`crates/fenec-core/src/`): `store` (segments, offset
+index), `engine` (`Database`, `Collection`), `query`, `schema`, `declared`,
+`value`, `codec`, `json`, `num`, `case`, `time`, `tz`, `collate`, `changes`,
+`history`, `plugin` and `fs` (behind `std-fs`, as are `cache` and
+`synclog`); the indexes `vector`, `text`, `highlight`, `fuzzy`, `sparse`,
+`sorted`, `composite`, `geo`, `hll` and `maps`; `off`, what stands in for an
+index a build is made without; `error`.
 
-The browser client is `web/fenec.js` — WASM glue (~605 lines), persistence and
-the sync layer -- with the query builder (`web/builder.js`) and the HTTP client
-(`web/http.js`) in dependency-free ES modules of their own, which it imports
-and re-exports, and `web/client.js` the two alone (`@fenecdb/web/client`).
-`web/fenec.d.ts` and `web/client.d.ts` hold the types; `fenec types <file>` generates schema-specific declarations.
+The browser client is `web/fenec.js` -- WASM glue (~605 lines), persistence
+and the sync layer -- with the query builder (`web/builder.js`) and the HTTP
+client (`web/http.js`) in dependency-free ES modules of their own, which it
+imports and re-exports, and `web/client.js` the two alone
+(`@fenecdb/web/client`). `web/fenec.d.ts` and `web/client.d.ts` hold the
+types; `fenec types <file>` generates schema-specific declarations.
 `persist`/`restore` keep a database in IndexedDB as a file would hold it: an
-image, then the writes since as chunks, from the journal `fenec_journal` starts
-and `fenec_drain` empties (off until asked for -- a page that never drains would
-hold every write). `openFile` (a dedicated worker) keeps the same bytes as a file
-of the origin private file system -- the file `fenec-server` keeps, so each opens
-the other's -- and `run` appends each statement's writes and flushes before it
-answers (`make file-bench` measures both ways). A new image
-(`compact`, or appended writes past half the image and 64 KB) goes into
-`<name>~` and is flushed before the file is written over, so a crash leaves
-one of the two whole; `openFile` takes the copy when its image is whole.
-`persist(db, key, { cryptoKey })` seals the image and each chunk with
-AES-GCM (WebCrypto), a tag over the key, the image's random generation and
-the chunk's number, so one moved, dropped from the middle or kept from an
-image before is refused. The OPFS file stays plain: it is `fenec-server`'s.
+image, then the writes since as chunks, from the journal `fenec_journal`
+starts and `fenec_drain` empties (off until asked for -- a page that never
+drains would hold every write). `openFile` keeps the same bytes as a file of
+the origin private file system, the file `fenec-server` keeps, so each opens
+the other's; a new image goes into `<name>~` and is flushed before the file
+is written over, so a crash leaves one of the two whole. `persist(db, key, {
+cryptoKey })` seals the image and each chunk with AES-GCM; the OPFS file
+stays plain, being `fenec-server`'s.
 
 ## Invariants worth knowing before you change things
 
@@ -223,11 +177,12 @@ endpoint, a follower, the graph keeper, `--follow`'s mirror -- is a
 `fenec-server` thread, never a binary of its own, and a block is open only
 under its opener's write lock.
 
-**[A block's documents are built beside the readers](docs/design/engine.md#prepared-blocks)**
-(`Database::prepare`, `early_put`), taken only where the collection holds
-the schema `Arc` they were built against; all else is decided under the
-write lock, as `tests/prepared.rs` holds. A hook that may change a
-document keeps `Hook::rewrites` true, its payload encoded after it.
+**[A block's documents are built beside the
+readers](docs/design/engine.md#prepared-blocks)** (`Database::prepare`,
+`early_put`), taken only where the collection holds the schema `Arc` they
+were built against; all else is decided under the write lock. A hook that
+may change a document keeps `Hook::rewrites` true, its payload encoded after
+it.
 
 **[A long read is pinned, and read with no lock held](docs/design/engine.md#pinned-reads)**
 (`Database::pin`), sharing nothing a write changes in place; it declines a
@@ -299,37 +254,35 @@ allocated (`proto::zeroed`).
 
 ### Tenants and leases
 
-**[Scaling out is by tenant, one file each.](docs/design/tenants.md#scaling-out-by-tenant)**
-The tenant comes from the path, never the query, and the router forwards
-bytes, parsing none; the registry opens a file under its lock and closes
-it on its last `Arc` alone, never while its follower runs, so no two
-`Database`s share a file. A tenant's role is its file's, not the node's
-`--replica-of`. A move is `freeze` (a gate taken exclusively, so no write
-lands after the export), copy, install, the flip in one statement, and
-the source deleted once the standbys were sent it (`standbys_sent`). The
-router fails a node over on its own only under a lease, which the node
-runs on the boot clock (`lease::Moment`) from when it answered the grant
-the router acknowledged, never from a grant's reading (`grant_from`); a
-router counts a node by the directory's `leasing` record until the node
-ran one of its leases (`Leases::inherited`), from when it began leading
-or from the node's addition since (`Leases::entry`), and grants it one at a time,
-never with a list older than the last it sent (`Leases::turn`), its rounds
-each due a third of a lease after the last was due, not after it woke
-(`lease::round_due`). Every
-write path meets the engine's fence (`Database::set_fence`, in `commit`
-and `may_write`), every route answering a write asks
+**[Scaling out is by tenant, one file
+each.](docs/design/tenants.md#scaling-out-by-tenant)** The tenant comes from
+the path, never the query, and the router forwards bytes, parsing none; the
+registry opens a file under its lock and closes it on its last `Arc` alone,
+never while its follower runs, so no two `Database`s share a file. A
+tenant's role is its file's, not the node's `--replica-of`, and a move is
+`freeze` (a gate taken exclusively, so no write lands after the export),
+copy, install, the flip in one statement, the source deleted once the
+standbys were sent it (`standbys_sent`). A node is failed over on its own
+only under a lease, which it runs on the boot clock (`lease::Moment`) from
+the grant the router acknowledged, never from a grant's reading
+(`grant_from`); the router counts a node by the directory's `leasing` record
+until the node ran one of its leases (`Leases::inherited`, `Leases::entry`)
+and grants it one at a time, never with a list older than the last it sent
+(`Leases::turn`, `lease::round_due`). Every write path meets the engine's
+fence (`Database::set_fence`), every route answering a write asks
 `answered_under_lease` (500 `outcome: unknown` once lapsed), and a node
 promotes only a copy of the tenant's lineage and history
 (`tenants::Expected`, 409) unless `force`d.
 
-**[A replica whose attach failed is tried again, and a file the router left on a node is reported.](docs/design/tenants.md#replicas-tried-again)**
-A failed attach or a held tenant has `try_again` run a repair again,
-rechecked under the claim, a copy's node first within the zone rule, none
-on a node silent at the look. A file the router made, or failed to remove,
-that no placement records is a `leftovers` row, reported (a repair's
-`left`, `fenec_router_files_left`) and never deleted by the router: neither
-it nor the node can tell it from a later file at the same place.
-`fenec_router_tenants_unreplicated` counts the uncopied.
+**[A replica whose attach failed is tried again, and a file the router left
+on a node is reported.](docs/design/tenants.md#replicas-tried-again)** A
+failed attach or a held tenant has `try_again` run a repair again, rechecked
+under the claim, a copy's node first within the zone rule, none on a node
+silent at the look. A file the router made, or failed to remove, that no
+placement records is a `leftovers` row, reported (a repair's `left`,
+`fenec_router_files_left`) and never deleted, since the router cannot tell
+it from a later file at the same place; `fenec_router_tenants_unreplicated`
+counts the uncopied.
 
 ### Regions and the global entry
 
@@ -396,7 +349,6 @@ does.](docs/design/access.md#field-lists)** `fields::hold` and
 ANDed in; it is `null` in a row (`Scope::shown`), absent from every schema
 answer (`Scope::shown_schema`) and refused by name as a missing one, and a
 stream sends no row a write left showing the same (`sse::Seen`).
-`tests/fields.rs` holds each attack.
 
 **[A rule may read another collection, answered before each
 statement.](docs/design/access.md#rules-reading-another-collection)**
@@ -525,10 +477,9 @@ Versions 9 (images) and 10 (tails) are written; every layout reads into
 one set of arrays (`Read`), built in one place (`build_restored`).
 
 **[A batch links in parallel, into the graph it would link in
-turn.](docs/design/hnsw.md#parallel-linking)** A pruning reads only the
-list it prunes and the vectors, and each list's additions go in node
-order (`link_batch`):
-`a_batch_links_as_its_nodes_would_one_after_another` holds it to the byte.
+turn.](docs/design/hnsw.md#parallel-linking)** A pruning reads only the list
+it prunes and the vectors, and each list's additions go in node order
+(`link_batch`).
 
 **[The upper layers are walked with a
 beam.](docs/design/hnsw.md#upper-layer-beam)** A search and an insert walk
@@ -563,8 +514,8 @@ halves.](docs/design/hnsw.md#halves)** Every writer writes them
 (`HALVES`), so a record is the same however its index was made.
 
 **[The browser module hashes as a native build
-does.](docs/design/hnsw.md#halves-in-the-browser)** It takes and writes
-the halves, which `web/fenec.test.js` holds to a native record's.
+does.](docs/design/hnsw.md#halves-in-the-browser)** It takes and writes the
+halves.
 
 **[An open copies a graph's vectors into the
 arena.](docs/design/hnsw.md#opening-a-graph)** It restores and validates
@@ -632,20 +583,19 @@ where SQL reads a column (`Parser::quoted`) and a regex-like `~`
 (`regex_like`) are refused, `<>` stays `!=`.
 
 **[A JOIN on a key is a `lookup` answered flat, or one table's `get` with
-the other's rows a filter](docs/design/fenecql.md#sql-joins-subqueries-and-schema)**
+the other's rows a
+filter](docs/design/fenecql.md#sql-joins-subqueries-and-schema)**
 (`join::relate`). The flat rows are `Select::flat`, set by SQL alone and
 rendered by `ResultSet::answered` after a token's masks; a join that would
-answer otherwise -- an order or an aggregate over a joined table's rows --
-is refused. Every table it names is held to a token's read rules
-(`Scope::select`) and every name to its table's fields (`Flat::names`),
-read by the reading or not, a `*`'s names to what a token's rules show
-(`Flat::shown`);
-a list past 100 000 values of a join found by `id` is read as the
-`lookup`'s probe (`Flat::probe`, `Select::probed`).
-`create table` maps types by `fenec_ql::sqltypes`, which `fenec import`
-maps by too; pgvector's `<->` is `near` held to the index's metric
-(`Near::metric`). SQL's `order by 1` names the list's first item, the one
-deliberate change of a tree that parsed before.
+answer otherwise (an order or an aggregate over a joined table's rows) is
+refused. Every table it names is held to a token's read rules
+(`Scope::select`) and every name to its table's fields (`Flat::names`, a
+`*`'s to what the rules show, `Flat::shown`), read or not; a join found by
+`id` whose list passes 100 000 values is read as the `lookup`'s probe
+(`Flat::probe`, `Select::probed`). `create table` maps types by
+`fenec_ql::sqltypes`, as `fenec import` does; pgvector's `<->` is `near`
+held to the index's metric (`Near::metric`); SQL's `order by 1` names the
+list's first item.
 
 **[`limit`, `offset` and `top` take a parameter, read where the plan reads
 them](docs/design/fenecql.md#count-parameters)** (`Count::at`); a value is
@@ -733,14 +683,11 @@ stays `eval`: an error at the first row, never over none.
 
 **[`@sorted` must give the scan's answer, row for
 row.](docs/design/indexes.md#sorted)** Keys order as `Value::cmp_value`,
-`null` and `NaN` apart, ties in id order; `tests/sorted.rs` holds it to a
-twin without the index.
+`null` and `NaN` apart, ties in id order.
 
 **[An index over several fields is its parts' bytes laid end to
-end](docs/design/indexes.md#composite-indexes)** (`composite.rs`), a
-part's bytes ordering as `cmp_value` orders its values or held apart;
-`tests/composite.rs` holds every filter, order and page to a twin without
-it.
+end](docs/design/indexes.md#composite-indexes)** (`composite.rs`), a part's
+bytes ordering as `cmp_value` orders its values or held apart.
 
 **[An open builds no hash, text, ordered or sparse
 index.](docs/design/indexes.md#lazy-indexes)** The first read fills its
@@ -829,9 +776,9 @@ learned alike on every target and travel in the graph record
 (`BIT_CENTRED`).
 
 **[Filtered `near` needs its
-fallback.](docs/design/vector-search.md#filtered-near)** A filtered ANN
-walk short of the limit must search the whole set, or a correlated
-filter answers empty (`tests/filtered.rs`).
+fallback.](docs/design/vector-search.md#filtered-near)** A filtered ANN walk
+short of the limit must search the whole set, or a correlated filter answers
+empty.
 
 **[`sparse<N>` is pgvector's `sparsevec`, and `@inverted` answers
 exactly.](docs/design/vector-search.md#sparse-vectors)** Every way in goes
@@ -877,8 +824,7 @@ again.
 **[`nocase` text compares by its case fold wherever it
 compares.](docs/design/text.md#nocase)** Every such place goes through
 `Field::text_order`; the fold is `str.casefold()`'s, Turkish's under
-`collate tr` (`tests/nocase.rs`), and a field made `nocase` or no longer
-is a `rebuild`.
+`collate tr`, and a field made `nocase` or no longer is a `rebuild`.
 
 **[`match` prunes with MaxScore.](docs/design/text.md#maxscore)** Scores
 add in `f64`; `pruning_never_changes_the_answer` holds it to an
@@ -995,23 +941,22 @@ A held request watches its client for the head (`answered_or_gone`,
 `relay_send` at a relay): an end goes on to the node, never taken for
 gone; a reset lets the node's connection go.
 
-**[A failover ends what the router has out to the node for the tenants
-it moved.](docs/design/router.md#failover-cuts)** `promote_on` has
-`Pool::cut` shut what is out to the node under the tenant's keyed mark
-(`mark_of`), one word with the connection's state, never an answer begun
-(`ANSWERING`) nor a descriptor reused (`CLOSED` before the close); a cut
-request follows `replayable`'s rule, and a forward reads `Pool::moved`
-before the directory and before its first byte. Only a failover cuts, and
-each grants the nodes it moved tenants to as it ends (`granted_after`). A
-router following the directory -- a standby, a region's router by its
-global copy -- cuts too, woken as a write lands there (`Arrived`), where
-the placement names the node it failed over off (`failed_from`; every
-other placement clears it, so a move cuts nothing), under the directories'
-write locks -- taken only where they moved -- every bucket moved before any
-node's connections are shut (`cut_all`); it grants nothing, asking a copy
-that refuses a replay unrun again, counted once, while its client stays,
-for two thirds of the recorded lease or `--upstream-timeout`, whichever is
-sooner (`copy_pause`), a move of its bucket meanwhile keeping its cut.
+**[A failover ends what the router has out to the node for the tenants it
+moved.](docs/design/router.md#failover-cuts)** `promote_on` has `Pool::cut`
+shut what is out to the node under the tenant's keyed mark (`mark_of`), one
+word with the connection's state, never an answer begun (`ANSWERING`) nor a
+descriptor reused (`CLOSED` before the close); a cut request follows
+`replayable`'s rule, and a forward reads `Pool::moved` before the directory
+and before its first byte. Only a failover cuts, and grants the nodes it
+moved tenants to as it ends (`granted_after`). A router following the
+directory (a standby, a region's router by its global copy) cuts too, woken
+as a write lands (`Arrived`) where the placement names the node it failed
+over off (`failed_from`, cleared by every other: a move cuts nothing), every
+bucket moved before any connection is shut (`cut_all`); it grants nothing,
+asking a copy that refuses a replay unrun again, counted once, while its
+client stays, for two thirds of the recorded lease or `--upstream-timeout`,
+whichever is sooner (`copy_pause`), a move of its bucket meanwhile keeping
+its cut.
 
 **[A query across tenants is the router's admin's, merged as the request
 says.](docs/design/router.md#queries-across-tenants)** Nodes run it
@@ -1043,102 +988,77 @@ promoted by `POST /_replication/promote` and the units switched at once;
 
 ## Conventions
 
-- `Error` (`fenec-core/src/error.rs`) is the single error type: allocation-free
-  variants, no `Box`. `fenec-http` maps it onto HTTP statuses (`api::status_of`).
-- Unit tests live inline in `#[cfg(test)] mod tests`; cross-crate and protocol
-  tests live in `crates/*/tests/`, a file each, gathered into one binary a
-  crate by `tests/all.rs` (`autotests = false`: a new file needs its `mod`
-  line there, or it is never built). One that reads the process's own
-  counts, `/_metrics` or the statements', is a `[[test]]` of its own:
-  beside the others it would count theirs. So is one whose servers hold
-  many threads: a test's servers serve on until its process ends, and past
-  macOS's 2 048 threads a process a server refuses the connection it can
-  make no thread for, a 503 to whichever test asked (fenec-shard's `all`
-  stood at 2 047 with `read_replicas` in it). Measurement programs are
-  each crate's `examples/` (most of them `fenec-core`'s) and `fenec-bench`'s
-  binaries, and are wired to `make` targets, not to CI.
-- The wait after a refusal is the process's, so the servers of a test binary
-  that holds many tests ask with none (`audit::set_delay(0)` in their
-  helpers): every test asks from 127.0.0.1, and their refusals together
-  held one test's 401 past its read timeout. `fenec-http`'s
-  `tests/audit.rs` and `fenec-shard`'s `tests/refusals.rs` hold the wait,
-  each a `[[test]]` of its own: which count a refusal went to is read off
-  the count (`audit::would_wait`), and a request's time is bounded from
-  below only. macOS gives the timers of a process whose QoS it clamps
-  about 200 ms of leeway, and a runner's first refusal, a wait of 50 ms,
-  took 256.6 against a bound of 200.
-- A test that fails and passes on a rerun is a bug, the test's or the code's:
-  it is reproduced -- in a loop, under load (`docker run --cpus=3` beside
-  busy loops is GitHub's three-core runner) -- and fixed, never retried
-  away or given a longer sleep. A test waits for an event, not for a time:
-  it holds what it races (`Replica.setOnline(false)` before a write it
-  reads back, a call held under way across a burst, a disk's fsync held at
-  a gate) and bounds only the wait for something that must happen. A CI
-  log names every failing test with its assertion: cargo's and `swift
-  test`'s own output, Gradle's `testLogging` (set for `-q`'s quiet level
-  too), `dart test`'s GitHub reporter, `node --test --test-reporter=spec`.
-  A failing mobile job also uploads `test-reports-android` (the JUnit
-  reports) or `test-results-apple` (the simulator's `.xcresult`) for a
-  week.
-- A step that launches Chrome reads Chrome's own files first. A fresh
-  runner's cold disk takes 5 to 20 s of the 25 to 30 a launcher waits for
-  Chrome's endpoint, and the shop's Lighthouse step once failed so after
-  all its tests passed (`waiting for dynamic debugging port`): the studio's
-  harness (`warm`) and `examples/{shop,analytics}/scripts/warm-chrome.mjs`
-  do it, and a longer wait would only move the bound.
+- `Error` (`fenec-core/src/error.rs`) is the single error type:
+  allocation-free variants, no `Box`. `fenec-http` maps it onto HTTP
+  statuses (`api::status_of`).
+- Unit tests live inline in `#[cfg(test)] mod tests`; cross-crate and
+  protocol tests in `crates/*/tests/`, a file each, gathered into one binary
+  a crate by `tests/all.rs` (`autotests = false`: a new file needs its `mod`
+  line there, or it is never built). A test reading the process's own
+  counts, `/_metrics` or the statements', is a `[[test]]` of its own; so is
+  one whose servers hold many threads (past macOS's 2 048 a process, a
+  server answers 503 to whichever test asked), and so are `fenec-http`'s
+  `tests/audit.rs` and `fenec-shard`'s `tests/refusals.rs`: the wait after a
+  refusal is the process's, so the other tests' servers ask with none
+  (`audit::set_delay(0)` in their helpers). Measurement programs are each
+  crate's `examples/` and `fenec-bench`'s binaries, wired to `make` targets,
+  not to CI.
+- A test that fails and passes on a rerun is a bug, the test's or the
+  code's: reproduce it -- in a loop, under load (`docker run --cpus=3`
+  beside busy loops is GitHub's three-core runner) -- and fix it, never
+  retry it away or lengthen a sleep. A test waits for an event, not for a
+  time: it holds what it races (`Replica.setOnline(false)` before a write it
+  reads back, a call held under way across a burst, a disk's fsync held at a
+  gate) and bounds only the wait for something that must happen. A CI log
+  names every failing test with its assertion (cargo's and `swift test`'s
+  own output, Gradle's `testLogging`, `dart test`'s GitHub reporter, `node
+  --test --test-reporter=spec`); a failing mobile job uploads
+  `test-reports-android` or `test-results-apple` (the simulator's
+  `.xcresult`).
+- A step that launches Chrome reads Chrome's own files first, or a cold
+  runner's disk spends 5 to 20 s of the launcher's wait (`waiting for
+  dynamic debugging port`): the studio's harness (`warm`) and
+  `examples/{shop,analytics}/scripts/warm-chrome.mjs` do; a longer wait only
+  moves the bound.
 - A test reads the clock from below. A sleep never ends early, so `took >=
-  wait` holds on any machine, while a bound from above measures the machine:
-  macOS gives the timers of a job whose QoS it clamps hundreds of
-  milliseconds of leeway (`taskpolicy -c background` is the way to try
-  it), and a container of three cores beside busy loops stood still for
-  2.7 s. Where the time is the property -- a held request answered before
-  its wait, a node that stops once its lease is out -- the bound is what it
-  stands against, with seconds to spare: half the wait, the lease the node
-  reports it has left, never a guess at how soon the system runs a thread.
-  Anywhere else the test asserts the event, the count or the order: the
-  wait a refusal would take (`audit::would_wait`), a claim still held when a
-  freeze returns, another tenant answered while a slow open is held at a
-  gate, a grant queued behind another (`Router::grants_waiting`), the
-  rounds' grants a node took while another hangs (`Router::round_grants`),
-  where writes answered throughout measured the machine. A timeout
-  a test gives its servers or clients bounds every request they make, not
-  just the one it is about: a router's upstream timeout of 600 ms failed a
-  tenant's create at background QoS, one of 10 s a replica's follow (a
-  rename on its node took 13 s beside eleven other suites), and an SDK
-  client's 100 ms left
-  around a held claim's 400 failed nearly every run there.
+  wait` holds on any machine, while a bound from above measures it: macOS
+  gives a QoS-clamped job's timers hundreds of milliseconds of leeway
+  (`taskpolicy -c background` tries it). Where the time is the property -- a
+  held request answered before its wait, a node that stops once its lease is
+  out -- the bound is what it stands against, with seconds to spare: half
+  the wait, the lease the node reports it has left. Elsewhere the test
+  asserts the event, the count or the order: the wait a refusal would take
+  (`audit::would_wait`), a grant queued behind another
+  (`Router::grants_waiting`), the grants a node took while another hangs
+  (`Router::round_grants`). A timeout a test gives its servers or clients
+  bounds every request they make, not just the one it is about (a router's
+  upstream timeout of 600 ms failed a tenant's create at background QoS).
 - A server a test or a harness starts listens on port 0 (`--http
-  127.0.0.1:0`, `--listen 127.0.0.1:0`, Node's `listen(0)`) and is found
-  by the address it says it took: fenec-server's and fenec-shard's
-  `listening on: http://<address>` line on stderr, which both binaries'
-  usage names and `fenec-shard`'s `tests/listen.rs` holds. A fixed port was
-  "Address already in use" beside another suite on the machine (the
-  examples' clusters), and a port found free and handed over was free only
-  until someone else took it, a health check then answered by another's
-  server. A router is told its nodes by the addresses they said. Only a
-  site whose address is needed before it binds -- a Next.js build renders
-  it, the database's CORS names it -- takes a port the system picks held
-  by a stand-in listener until the moment it starts (`examples/shop`,
+  127.0.0.1:0`, `--listen 127.0.0.1:0`, Node's `listen(0)`) and is found by
+  the `listening on: http://<address>` line on stderr of fenec-server and
+  fenec-shard (their usage names it, `fenec-shard`'s `tests/listen.rs` holds
+  it): a fixed port, or one found free and handed over, met another suite's
+  server. A router is told its nodes by the addresses they said. Only a site
+  whose address is needed before it binds -- a Next.js build renders it, the
+  database's CORS names it -- takes a port the system picks, held by a
+  stand-in listener until the moment it starts (`examples/shop`,
   `examples/dispatch`'s `ci.sh`).
 - A change that adds or alters something a user meets says so where a user
   looks, in the same pull request: its reference page under
-  `site/content/docs/`; README's feature table and the links beside it;
-  the home page (`site/content/index.html`) and the docs index when the
-  feature is one a visitor would pick fenecdb for; and the SDK lists --
-  `languages.html`, `mobile.html`, `sharding.html`'s SDK paragraph,
-  `integrations.html`'s -- when an SDK changes. Every reference page kept up
-  with regions, the global entry, the node's archive and read replicas
-  (#318 to #333) while README and the home page named none of them. A
-  section added or changed is found by its words alone until the site's
-  search vector cache has its vector: Workers AI runs in the `site` deploy
-  alone, which uploads the cache as it left it (the `search-embeddings`
-  artifact), so after sections change, the next deploy's artifact is
-  committed as `site/search-embeddings.json` (`gh run download <run> -n
+  `site/content/docs/`; README's feature table and the links beside it; the
+  home page (`site/content/index.html`) and the docs index when a visitor
+  would pick fenecdb for the feature; and the SDK lists (`languages.html`,
+  `mobile.html`, `sharding.html`'s SDK paragraph, `integrations.html`'s)
+  when an SDK changes. A section added or changed is found by its words
+  alone until the site's search vector cache has its vector: after sections
+  change, commit the next `site` deploy's `search-embeddings` artifact as
+  `site/search-embeddings.json` (`gh run download <run> -n
   search-embeddings`) where it differs.
-- An invariant's rule goes in CLAUDE.md in a few sentences: what must
-  hold, what must never be done, what enforces it and what a change owes.
-  Its measurements, rejected alternatives and history go in its
-  `docs/design/` file, in the same pull request; a new invariant gets both.
-- Comments explain *why* a thing is the way it is — a measured cost, a trap that
-  was hit, an alternative that was rejected. Match that when adding code.
+- An invariant's rule goes in CLAUDE.md in a few sentences: what must hold,
+  what must never be done, what enforces it and what a change owes. Its
+  measurements, rejected alternatives and history go in its `docs/design/`
+  file, in the same pull request; a new invariant gets both.
+- Comments explain *why* a thing is the way it is -- a measured cost, a trap
+  that was hit, an alternative that was rejected. Match that when adding
+  code.
 - All prose in the repo (comments, docs, README) is English.

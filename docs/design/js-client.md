@@ -153,6 +153,28 @@ holds it (`VectorIndex::as_held` in `place`): placed as written, cosine
 made other unit vectors than an open did, and `near ... exact` scored
 differently after a reopen.
 
+## Persistence in the page
+
+Not an invariant: the part of CLAUDE.md's *Architecture* on how the browser client keeps a database, moved here word for word, measurements included; CLAUDE.md keeps the journal's and the two-copy image's rules and says that the image and chunks can be sealed.
+
+`persist`/`restore` keep a database in IndexedDB as a file would hold it: an
+image, then the writes since as chunks, from the journal `fenec_journal` starts
+and `fenec_drain` empties (off until asked for -- a page that never drains would
+hold every write). One row persists in 0.18 ms over 32 MB in Chrome, against 92
+ms for the image. `openFile` (a dedicated worker) keeps the same bytes as a file
+of the origin private file system -- the file `fenec-server` keeps, so each opens
+the other's -- and `run` appends each statement's writes and flushes before it
+answers: 0.56 ms a row, statement included, and it opens in 20 ms against
+IndexedDB's 47 (`make file-bench`; Safari 0.98 and 0.36 ms). A new image
+(`compact`, or appended writes past half the image and 64 KB) goes into
+`<name>~` and is flushed before the file is written over, so a crash leaves
+one of the two whole; `openFile` takes the copy when its image is whole.
+`persist(db, key, { cryptoKey })` seals the image and each chunk with
+AES-GCM (WebCrypto), a tag over the key, the image's random generation and
+the chunk's number, so one moved, dropped from the middle or kept from an
+image before is refused; a row persists in 0.16 ms either way, the 32 MB
+image in 129 ms against 76. The OPFS file stays plain: it is `fenec-server`'s.
+
 ## Durable Objects
 
 **A Durable Object keeps a database as a file would** (`integrations/cloudflare`,
