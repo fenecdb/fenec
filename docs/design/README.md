@@ -9,7 +9,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [crates.md](crates.md) -- zero dependencies, limits that error rather than truncate, and the build profiles
 - [storage.md](storage.md) -- the mapped file, the handover of writes to it, a block's spills, compaction and the file format
 - [engine.md](engine.md) -- the single writer, a block's documents built beside the readers, long reads pinned, and a block as one record
-- [durability.md](durability.md) -- a storage error stopping writes, buffered writes written behind the lock, and the sync log
+- [durability.md](durability.md) -- a storage error stopping writes, buffered writes written behind the lock, the sync log, and the one shutdown
 - [replication.md](replication.md) -- replication, a node's tenants archived over one stream, `/_changes`, `Fenec-After`, sealed archives and `--follow`
 - [tenants.md](tenants.md) -- scaling out by tenant, the router's directory, moves, failovers and leases, and replicas tried again
 - [regions.md](regions.md) -- regions and zones, a region's own directory, and the global entry
@@ -175,3 +175,4 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 139. [A JOIN on a key is a `lookup` answered flat, or one table's `get` with the other's rows a filter](fenecql.md#sql-joins-subqueries-and-schema) (added after the move, under *FenecQL and schemas*)
 140. [A replica whose attach failed is tried again, and a file the router left on a node is reported](tenants.md#replicas-tried-again) (added after the move, under *Tenants and leases*)
 141. [A connection no thread can be made for is answered 503, as one past the ceiling is](http.md#connections-without-a-thread) (added after the move, under *The HTTP server*)
+142. [Every way a server stops is the one shutdown](durability.md#the-one-shutdown) (added after the move, under *Durability*)

@@ -69,6 +69,7 @@ front of it are on <a href="/docs/sharding">Tenants and sharding</a>.</p>
 <tr><td><code>--jwt-secret</code>, <code>--jwt-secret-file</code>, <code>--jwt-keys</code>, <code>--jwt-require-exp</code>, <code>--jwt-max-age</code>, <code>--jwt-tenant-claim</code>, <code>--jwt-unbound-tenants</code>, <code>--policy</code></td><td>Tokens held to rules: which collections, which rows (<a href="#security">Security</a>).</td></tr>
 <tr><td><code>--sync off|always|&lt;ms&gt;</code></td><td>When writes reach the disk. Default <code>250</code> (<a href="#durability">Durability</a>).</td></tr>
 <tr><td><code>--no-checkpoint</code></td><td>Writes no checkpoint on shutdown.</td></tr>
+<tr><td><code>--exit-on-stdin-close</code></td><td>Shuts down as <code>SIGTERM</code> does once stdin ends. For an app that starts the server with a pipe on its stdin: however the app ends, <code>kill -9</code> too, the pipe closes and the server syncs, lets go of the file and exits 0. Stdin of <code>/dev/null</code> ends at once, and so does the server; a terminal is refused (<a href="#durability">Durability</a>).</td></tr>
 <tr><td><code>--no-mmap</code></td><td>Reads the file into memory instead of mapping it.</td></tr>
 <tr><td><code>--warm all|off|&lt;list&gt;</code></td><td>Builds the hash, text, ordered and sparse indexes after the open, beside the first requests, rather than on the first read of each. Default <code>all</code> for a file, <code>off</code> for a node's tenants (<a href="#warm">Warm-up</a>).</td></tr>
 <tr><td><code>--auto-compact &lt;ratio&gt;|off</code></td><td>Compacts a file on its own once this share of it is dead, beside the queries. Default <code>0.5</code> (<a href="#compaction">Compaction</a>).</td></tr>
@@ -88,6 +89,31 @@ front of it are on <a href="/docs/sharding">Tenants and sharding</a>.</p>
 </div>
 
 <p><code>fenec-server --help</code> prints every flag with its default.</p>
+
+<p>Its exit code says how it ended:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Code</th><th>When</th></tr></thead>
+<tbody>
+<tr><td><code>0</code></td><td>It stopped as asked: a signal, or the end of stdin under <code>--exit-on-stdin-close</code>, after the final sync. A signal that comes before the server has opened its file ends it by the system's default action instead, with no code of its own. <code>--ping</code>: a server answers.</td></tr>
+<tr><td><code>1</code></td><td>A server over a file or in memory could not start: its file could not be opened (another process holds it, or it cannot be read), <code>--follow</code>'s guard could not be put on it, a replica's file was started without <code>--replica-of</code> or <code>--promote</code>, its history could not be settled (a promotion's fork, or its sync, failed), or its HTTP port could not be had. Or <code>--follow</code>'s mirror stopped, before the server served or after, or once serving its listener failed — after the final sync and with no checkpoint. <code>--ping</code>: none answers.</td></tr>
+<tr><td><code>2</code></td><td>A flag or its value was refused, before anything was opened: an open address with no token among them. Also a node's directory that could not be used, a node's HTTP port or <code>--metrics</code>' that could not be had, and a thread the start could not make (after the final sync, with no checkpoint).</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>A start that fails rewrites nothing. The ports are taken straight after the
+open, before anything writes the file or runs beside it, so a failed start
+has written only <code>&lt;file&gt;.lock</code> and what an open writes — the
+file, or a node's directory, made empty where there was none, a torn tail cut,
+and on Linux the writes a crashed server had made durable written back from
+its sync log — and a supervisor restarting
+it again and again changes nothing more. A server that stops on a failure
+writes no checkpoint either: the next open links what the graphs kept in the
+file left. Between the ports being taken and the server answering — the open
+of a node's tenants, a moment for a single file — a connection waits in the
+system's queue rather than being refused.</p>
 
 <h2 id="security">Security</h2>
 
@@ -193,6 +219,41 @@ exit, so no write can be accepted between the sync and the exit and no write is
 left that looked successful to the client but never reached the disk. Under
 <code>kill -9</code> you get exactly what the chosen policy promised, and no
 more.</p>
+
+<p>With <code>--exit-on-stdin-close</code> the end of stdin starts the same
+shutdown. A process that is killed sends its children no signal, but the
+system closes every descriptor it held, so a server started with a pipe on its
+stdin sees the pipe end however its parent ended, and stops rather than run on
+holding <code>&lt;file&gt;.lock</code> with nobody to answer. What the parent
+writes into the pipe is read and dropped. A terminal is refused: a server
+reading one from the background would be stopped whole by the system, its file
+held; there Ctrl-C does the same. So is a secret, policy or keys file that is
+stdin, which would be read to its end.</p>
+
+<pre data-lang="js">import { spawn } from 'node:child_process';
+
+// stdin is a pipe this process holds for as long as the server runs.
+const server = spawn('fenec-server', ['--file', path, '--http', '127.0.0.1:0', '--exit-on-stdin-close'], {
+  stdio: ['pipe', 'ignore', 'pipe'],
+  env: { ...process.env, FENEC_HTTP_TOKEN: token },
+});
+
+// Read stderr for as long as the server runs: a pipe nobody reads fills,
+// and the server's next log line waits for room. `onListening` is yours,
+// called once with the address the server took.
+let head = '';
+let url = null;
+server.stderr.setEncoding('utf8').on('data', (text) => {
+  if (url) return;
+  head += text;
+  const at = /listening on: (http:\/\/\S+)\s/.exec(head);
+  if (at) onListening((url = at[1]));
+});
+</pre>
+
+<p>The pipe's write end must stay in this process alone. A child it starts
+later that inherits it — a descriptor not marked close-on-exec — holds the
+server's stdin open after this process has gone, and the server runs on.</p>
 
 <p>When the disk refuses a write or a sync, the request fails with 500 —
 under <code>always</code>, before the client is told it succeeded — and every

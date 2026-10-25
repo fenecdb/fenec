@@ -99,9 +99,11 @@ impl Plugin for GuardPlugin {
 }
 
 /// Starts the follower on a thread of its own over `db`, stopping when the
-/// server does. An error it cannot wait out ends the process: a server
-/// that went on answering from a mirror that no longer moves would say
-/// nothing of it.
+/// server does. An error it cannot wait out stops the server, exit code 1:
+/// a server that went on answering from a mirror that no longer moves
+/// would say nothing of it. It stops it through the one shutdown, never by
+/// exiting here, which cut short a shutdown already under way -- its sync
+/// among what was cut -- and skipped the sync of the writes it had applied.
 pub fn start(m: Mirror, db: Arc<RwLock<Database>>) -> std::io::Result<()> {
     let (done, stopped) = mpsc::channel::<()>();
     std::thread::Builder::new()
@@ -110,14 +112,18 @@ pub fn start(m: Mirror, db: Arc<RwLock<Database>>) -> std::io::Result<()> {
             FOLLOWER.with(|f| f.set(true));
             let stop = crate::durability::shutdown_flag();
             let mut report = reporter(&m);
-            match follow::run(&m.url, &m.table, &db, &m.opts, &m.follow, stop, &mut report) {
-                Ok(()) => {
-                    let _ = done.send(());
-                }
-                Err(e) => {
-                    fenec_http::log!("follow: the mirror of {} stopped: {e}", m.table);
-                    std::process::exit(1);
-                }
+            let ended = follow::run(&m.url, &m.table, &db, &m.opts, &m.follow, stop, &mut report);
+            if let Err(e) = &ended {
+                fenec_http::log!("follow: the mirror of {} stopped: {e}", m.table);
+                // The code before the wait is let go: a shutdown already
+                // waiting on this thread exits as soon as it is.
+                crate::durability::exit_with(1);
+            }
+            // Stopped either way: the shutdown's wait for this thread, below,
+            // ends here rather than at `STOP_WAIT`.
+            let _ = done.send(());
+            if ended.is_err() {
+                crate::durability::request_shutdown();
             }
         })?;
     crate::durability::before_shutdown(move || {

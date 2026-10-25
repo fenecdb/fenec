@@ -36,6 +36,8 @@ pub struct Server {
     pub child: Child,
     pub port: u16,
     pub log: Arc<Mutex<String>>,
+    /// The thread reading stderr into `log`, which ends as the pipe does.
+    reader: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Drop for Server {
@@ -66,6 +68,18 @@ pub fn start_env(args: &[&str], env: &[(&str, &str)]) -> Server {
 
 /// [`try_start`] with variables of its own in the server's environment.
 pub fn try_start_env(args: &[&str], env: &[(&str, &str)]) -> Result<Server, String> {
+    try_start_with(args, env, Stdio::inherit())
+}
+
+/// [`start`] with a pipe on the server's stdin, its write end in
+/// `child.stdin`: dropped, the server reads the end of its input.
+pub fn start_piped(args: &[&str]) -> Server {
+    try_start_with(args, &[], Stdio::piped())
+        .unwrap_or_else(|log| panic!("fenec-server ended before it listened:\n{log}"))
+}
+
+/// [`try_start_env`] with `stdin` as the server's stdin.
+pub fn try_start_with(args: &[&str], env: &[(&str, &str)], stdin: Stdio) -> Result<Server, String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_fenec-server"));
     cmd.envs(env.iter().copied());
     if !args.contains(&"--http") {
@@ -73,6 +87,7 @@ pub fn try_start_env(args: &[&str], env: &[(&str, &str)]) -> Result<Server, Stri
     }
     let mut child = cmd
         .args(args)
+        .stdin(stdin)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -97,7 +112,7 @@ pub fn try_start_env(args: &[&str], env: &[(&str, &str)]) -> Result<Server, Stri
         log.lock().unwrap().push_str(&line);
     }
     let sink = Arc::clone(&log);
-    std::thread::spawn(move || {
+    let reader = std::thread::spawn(move || {
         let mut line = String::new();
         while err.read_line(&mut line).unwrap_or(0) > 0 {
             sink.lock().unwrap().push_str(&line);
@@ -108,6 +123,7 @@ pub fn try_start_env(args: &[&str], env: &[(&str, &str)]) -> Result<Server, Stri
         child,
         port: port.unwrap(),
         log,
+        reader: Some(reader),
     })
 }
 
@@ -140,6 +156,38 @@ impl Server {
 
     pub fn terminate(self) -> (i32, String) {
         self.signal(SIGTERM)
+    }
+
+    /// Waits up to `within` for the process to end on its own: its exit
+    /// code and everything it logged, or `None` if it was still running.
+    pub fn exited(&mut self, within: Duration) -> Option<(i32, String)> {
+        let deadline = Instant::now() + within;
+        let status = loop {
+            if let Some(status) = self
+                .child
+                .try_wait()
+                .expect("could not wait for the process")
+            {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        // Every line is in once the reader has met the pipe's end -- unless
+        // a server another test spawned meanwhile inherited the pipe's write
+        // end (macOS marks a new pipe close-on-exec after making it, not
+        // with it), which holds the pipe open past this one's exit: waited
+        // for within the same bound, the lines then those read so far.
+        while self.reader.as_ref().is_some_and(|r| !r.is_finished()) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if let Some(reader) = self.reader.take_if(|r| r.is_finished()) {
+            let _ = reader.join();
+        }
+        let log = self.log.lock().unwrap().clone();
+        Some((status.code().unwrap_or(-1), log))
     }
 }
 
@@ -308,6 +356,53 @@ pub fn count(body: &str) -> i64 {
         .first()
         .and_then(|n| n.parse().ok())
         .unwrap_or_else(|| panic!("no count in {body}"))
+}
+
+/// The exit code and stderr of a child that must end of its own accord,
+/// within `within`; killed past it. Its stderr is read within the same
+/// bound: a server another test spawned meanwhile can hold the pipe open.
+pub fn ended(mut child: Child, within: Duration) -> (i32, String) {
+    let mut err = child.stderr.take().unwrap();
+    let log = Arc::new(Mutex::new(String::new()));
+    let sink = Arc::clone(&log);
+    let reader = std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while let Ok(n @ 1..) = err.read(&mut buf) {
+            sink.lock()
+                .unwrap()
+                .push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+    });
+    let deadline = Instant::now() + within;
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the server did not end:\n{}", log.lock().unwrap());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    while !reader.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let log = log.lock().unwrap().clone();
+    (status.code().unwrap_or(-1), log)
+}
+
+/// `fenec-server` with `args` as given, no `--http` added, stdin
+/// `/dev/null` and stderr piped: for a start that must end of its own
+/// accord ([`ended`]).
+pub fn command(args: &[&str]) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_fenec-server"))
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("could not start fenec-server")
 }
 
 /// Documents in `collection` of the file at `path`, opened on its own as

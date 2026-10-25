@@ -1,8 +1,9 @@
 //! `fenec-server --follow` against a live PostgreSQL (`make import-test`,
 //! which starts one in Docker): a table's copy and its changes served over
-//! HTTP as they commit, a client's write to the mirror refused, and a
-//! server stopped -- by a signal, or killed outright -- started again over
-//! its file without losing a row.
+//! HTTP as they commit, a client's write to the mirror refused, a server
+//! stopped -- by a signal, or killed outright -- started again over its
+//! file without losing a row, and a follower that cannot go on stopping
+//! the server through its shutdown.
 //!
 //!     cargo test -p fenec-server --test all follow:: -- --ignored
 
@@ -144,6 +145,81 @@ fn a_followed_table_is_served_and_takes_no_other_write() {
     assert_eq!(rows(&s, t), 51);
 
     drop(s);
+    forget(&mut c, t);
+}
+
+/// A server that cannot have its port exits before its mirror starts: no
+/// slot, no publication, no copy -- each made at every restart its
+/// supervisor tried, when the listener was taken after the mirror started.
+#[test]
+#[ignore = "needs a PostgreSQL to follow: make import-test"]
+fn a_server_that_cannot_listen_starts_no_mirror() {
+    let t = "fenec_server_follow_unlistened";
+    let mut c = pg();
+    table(&mut c, t, 10);
+    let file = tmp("unlistened");
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = held.local_addr().unwrap().to_string();
+    let source = source_text();
+    let child = crate::support::command(&[
+        "--file",
+        file.to_str().unwrap(),
+        "--http",
+        &addr,
+        "--follow",
+        &source,
+        "--follow-table",
+        t,
+    ]);
+    let (code, log) = crate::support::ended(child, Duration::from_secs(30));
+    assert_eq!(code, 1, "{log}");
+    assert!(log.contains("could not open the HTTP endpoint"), "{log}");
+    for (what, q) in [
+        (
+            "slot",
+            format!("select 1 from pg_replication_slots where slot_name = 'fenec_{t}'"),
+        ),
+        (
+            "publication",
+            format!("select 1 from pg_publication where pubname = 'fenec_{t}'"),
+        ),
+    ] {
+        assert!(
+            c.query(&q).unwrap().rows.is_empty(),
+            "a {what} was made\n{log}"
+        );
+    }
+    forget(&mut c, t);
+}
+
+/// A follower that cannot go on stops the server through the one shutdown,
+/// exit code 1, rather than exiting from its own thread: what it applied
+/// is synced, not cut off with a shutdown it raced.
+#[test]
+#[ignore = "needs a PostgreSQL to follow: make import-test"]
+fn a_follower_that_cannot_go_on_stops_the_server_through_the_shutdown() {
+    let t = "fenec_server_follow_broken";
+    let mut c = pg();
+    table(&mut c, t, 10);
+    let file = tmp("broken");
+    let mut s = start(&file, t);
+    holds(&s, t, 10);
+    c.query(&format!("insert into {t} values (11, 'last')"))
+        .unwrap();
+    shows(&s, t, "last");
+    // A column the collection holds, dropped from the table.
+    c.query(&format!("alter table {t} drop column title"))
+        .unwrap();
+    c.query(&format!("insert into {t} values (12)")).unwrap();
+    let (code, log) = s
+        .exited(Duration::from_secs(60))
+        .expect("the server went on serving a mirror that no longer moves");
+    assert_eq!(code, 1, "{log}");
+    assert!(log.contains("the mirror of"), "{log}");
+    assert!(log.contains("shutting down"), "{log}");
+    let db = fenec_core::fs::open_read_only(&file).unwrap();
+    let held = db.stats().iter().find(|x| x.name == t).map(|x| x.documents);
+    assert_eq!(held, Some(11), "{log}");
     forget(&mut c, t);
 }
 
