@@ -1,0 +1,23 @@
+import { cmd, lines, sleep, startApp, waitFor, ps , D, R, SERVER } from './drive.mjs';
+
+const KEY = `file:${R}/data/small.fenec`;
+const app = startApp({ FENEC_DESKTOP_OPEN: `${D}/data/small.fenec` });
+const st = await waitFor((l) => l.what === 'server-started', 60000, 'server-started');
+await waitFor((l) => l.detail?.type === 'state' && l.detail.loaded && l.key === KEY, 30000, 'loaded');
+console.log('kill -9 the server', st.pid);
+process.kill(st.pid, 'SIGKILL');
+const died = await waitFor((l) => l.what === 'server-died', 10000, 'server-died');
+console.log('server-died:', JSON.stringify({ code: died.code }));
+await sleep(800);
+cmd({ cmd: 'sessions' });
+const s = await waitFor((l) => l.what === 'sessions', 5000, 'sessions');
+console.log('sessions after:', JSON.stringify(s.keys));
+console.log('closed event:', lines().some((l) => l.what === 'window-close-event'));
+cmd({ cmd: 'open', path: `${D}/data/small.fenec` });
+await waitFor((l) => l.what === 'open-result', 10000, 'reopen');
+const again = await waitFor((l) => l.what === 'server-started' && l.pid !== st.pid, 10000, 'restarted');
+console.log('reopened after the crash with a new server pid', again.pid, '(lock was released by the dead process)');
+cmd({ cmd: 'quit' });
+await Promise.race([new Promise((r) => app.child.on('exit', r)), sleep(30000)]);
+await sleep(800);
+console.log('processes after quit:\n' + ps() + '(end)');

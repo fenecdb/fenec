@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>fenec studio</title>
+<link rel="stylesheet" href="index.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1>fenec studio</h1>
+    <p class="sub">Open a database file, or connect to a server.</p>
+  </header>
+
+  <section>
+    <div class="row-head">
+      <h2>Files</h2>
+      <button id="open" class="primary">Open file…</button>
+    </div>
+    <ul id="recents" class="list"></ul>
+    <p class="hint">The file is opened by a fenec-server this app starts for it and stops when you close the window.</p>
+  </section>
+
+  <section>
+    <div class="row-head">
+      <h2>Servers</h2>
+    </div>
+    <ul id="connections" class="list"></ul>
+    <form id="add" autocomplete="off">
+      <div class="grid">
+        <label>Name <input name="name" placeholder="production" spellcheck="false"></label>
+        <label>URL <input name="url" placeholder="https://db.example.com" required spellcheck="false"></label>
+        <label>Token <input name="token" type="password" placeholder="kept in the system keychain" spellcheck="false"></label>
+        <label>Tenant <input name="tenant" placeholder="only for a --dir node" spellcheck="false"></label>
+      </div>
+      <button type="submit">Save connection</button>
+    </form>
+    <p class="hint">The server must be started with <code>--studio</code>. Its own studio opens in the window, so there is no CORS to set up.</p>
+  </section>
+
+  <p id="status" role="status"></p>
+  <p class="foot" id="keychain"></p>
+</main>
+<script type="module" src="index.js"></script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+{
+	"name": "fenec-studio-desktop",
+	"version": "0.0.1",
+	"private": true,
+	"description": "Spike: fenec studio as a desktop app (Electrobun). Opens .fenec files through a bundled fenec-server and connects to remote servers.",
+	"devDependencies": {
+		"@types/bun": "latest"
+	}
+}

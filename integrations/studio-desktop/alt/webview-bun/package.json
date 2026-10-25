@@ -1,0 +1,12 @@
+{
+	"name": "fenec-studio-desktop-webview-bun",
+	"private": true,
+	"type": "module",
+	"description": "Comparison spike: the same idea on webview-bun + bun build --compile. One process, one window, one file.",
+	"scripts": {
+		"build": "bun build --compile --minify main.ts --outfile studio-wvb"
+	},
+	"dependencies": {
+		"webview-bun": "2.4.0"
+	}
+}
