@@ -527,6 +527,22 @@ fn a_failover_leaves_another_tenant_s_request_on_the_node_be() {
         let (status, b) = query(c.port, &path, "create collection notes (title text)");
         assert_eq!(status, 200, "{b}");
     }
+    // `tenant-q`'s copy holds its collection: it has taken its primary's
+    // image, and is the tenant the failover promotes. A copy that has not is
+    // of a lineage of its own, a new file's, and its node refuses to promote
+    // it (409, `tenants::Expected`): failed over first, `tenant-q` stayed on
+    // n1 -- on CI's ubuntu runner, in 9 runs of 400 on three cores beside
+    // three busy loops, and in every run with its image held a second at
+    // n1's wire.
+    let q = placed(c.port, "tenant-q")
+        .1
+        .expect("tenant-q has a replica");
+    until(
+        c.port_of(&q),
+        "/t/tenant-q/query",
+        "get notes count",
+        "\"count\":0",
+    );
     let copy = placed(c.port, "tenant-1")
         .1
         .expect("tenant-1 has a replica");
