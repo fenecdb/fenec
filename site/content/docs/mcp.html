@@ -35,8 +35,8 @@ fenec mcp --url http://127.0.0.1:8080/_mcp        # in front of a server, the to
 </pre>
 
 <p><code>--file</code> holds the database itself and takes
-<code>notes.fenec.lock</code> while the session lasts — a server or an app
-over the same file is refused, as it is refused while they hold it: two
+<code>notes.fenec.lock</code> while the session lasts — a server, an app or
+the shell over the same file is refused, as it is refused while they hold it: two
 processes writing one file corrupt it. Each write is on the disk before it is
 answered. <code>--read-only</code> takes no lock and writes nothing, and reads
 the file as it stood when the session began, beside a server writing it; to

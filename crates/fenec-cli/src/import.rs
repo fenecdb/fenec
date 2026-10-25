@@ -157,6 +157,23 @@ pub fn main(args: &[String]) -> i32 {
         }
         None
     };
+    // The target's lock before the source is read, for as long as the
+    // import (or the follower) runs: a server with the file open would
+    // have its writes and the import's appended over each other. A dry
+    // run writes nothing and takes none.
+    let _held = match dry_run {
+        true => None,
+        false => match crate::held::take(
+            &target,
+            "stop it first, or import into another file (--file <path>)",
+        ) {
+            Ok(l) => Some(l),
+            Err(why) => {
+                eprintln!("error: {why}");
+                return 1;
+            }
+        },
+    };
     if let (Some(f), false) = (&follow, dry_run) {
         return match run_follow(&source, &table, &target, &opts, f) {
             Ok(()) => 0,

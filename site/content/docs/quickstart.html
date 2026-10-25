@@ -375,7 +375,8 @@ cd fenec-v{{version}}-$TARGET</pre>
   </li>
   <li>
     <p>Open a file of its own. Not the server's <code>data.fenec</code>: two
-    processes over one file would corrupt it.</p>
+    processes writing one file would corrupt it, so the shell refuses a file
+    a server has open.</p>
 <pre data-lang="bash">./fenec notes.fenec</pre>
 <pre data-lang="text" data-label="prints">fenecdb {{version}} — notes.fenec
 `.help` for help, `.quit` to exit</pre>
@@ -414,6 +415,7 @@ fenec&gt; .quit</pre>
 ./fenec notes.fenec -c 'get notes limit 5'
 echo 'get notes' | ./fenec notes.fenec
 ./fenec notes.fenec &lt; seed.fenecql           # a script
+./fenec --read-only data.fenec               # a server's file, read beside it
 ./fenec --version                            # fenec &lt;version&gt;, and nothing opened</pre>
 
 <p><code>--version</code>, or <code>-V</code>, prints the shell's version on
@@ -421,6 +423,19 @@ stdout and exits 0 without opening the file; <code>./fenec version</code>,
 with no dashes, opens a file named <code>version</code>, as any other word
 does. Releases up to 0.1.12 have no <code>--version</code>: the first line
 an interactive session prints names theirs.</p>
+
+<p>The shell holds <code>&lt;file&gt;.lock</code>
+while it has a file open, as <code>fenec-server --file</code>, <code>fenec mcp
+--file</code> and an app through the native library do, so a file one of them
+or another shell has open is refused, and its holder named — <code>data.fenec
+is open in another process (fenec-server, pid 4242)</code>, exit 1. Query it
+over HTTP instead, or stop the server first. <code>-c</code>, a pipe and a
+script are refused alike, and so are <code>fenec import</code> into the file,
+a <code>backup</code> or <code>restore</code> into it and <code>.save</code>
+over it. <code>--read-only</code> takes no lock and writes nothing: it reads
+the file as it stood at the open, beside a server writing it, and refuses
+every write and <code>.checkpoint</code>. Releases up to 0.1.12 took no lock,
+and a write there beside a running server could leave the file unreadable.</p>
 
 <p>Inside the shell: <code>.help</code> <code>.tables</code> <code>.stats</code>
 <code>.functions</code> <code>.save &lt;path&gt;</code> <code>.checkpoint</code>

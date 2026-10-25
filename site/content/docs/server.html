@@ -65,7 +65,7 @@ href="/docs/sharding">Tenants and sharding</a>.</p>
 <table>
 <thead><tr><th>Flag</th><th>What it does</th></tr></thead>
 <tbody>
-<tr><td><code>-f, --file &lt;path&gt;</code></td><td>The database file. In memory without it. The server holds <code>&lt;path&gt;.lock</code> while it runs, so a second process over the file — another server, <code>fenec mcp --file</code>, an app through the native library — is refused rather than let corrupt it.</td></tr>
+<tr><td><code>-f, --file &lt;path&gt;</code></td><td>The database file. In memory without it. The server holds <code>&lt;path&gt;.lock</code> while it runs, so a second process over the file — another server, <code>fenec mcp --file</code>, an app through the native library, the <code>fenec</code> shell — is refused rather than let corrupt it, and told which process holds it. To look inside the file while the server runs, <code>fenec --read-only &lt;path&gt;</code> reads it as it stands, writing nothing.</td></tr>
 <tr><td><code>--dir &lt;path&gt;</code></td><td>One file per tenant in this directory (<a href="/docs/sharding-reference#the-node-fenec-server-dir">Sharding reference</a>).</td></tr>
 <tr><td><code>--http &lt;address&gt;</code></td><td>Where to listen. Default <code>127.0.0.1:8080</code>.</td></tr>
 <tr><td><code>--http-token &lt;value&gt;</code></td><td>Requires <code>Authorization: Bearer &lt;value&gt;</code>. Also read from <code>FENEC_HTTP_TOKEN</code>, since <code>argv</code> shows up in <code>ps</code>.</td></tr>

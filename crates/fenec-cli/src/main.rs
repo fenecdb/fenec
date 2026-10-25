@@ -6,13 +6,17 @@
 //! fenec data.fenec -c "get docs limit 5"
 //! echo "get docs" | fenec data.fenec
 //! fenec data.fenec < script.fenecql
+//! fenec --read-only data.fenec   the file as it stands, and nothing written
 //! fenec --version              `fenec <version>`, and nothing opened
 //! ```
 //!
 //! A statement may run over several lines; [`Reader`] says when one runs.
+//! A file is opened under its `<file>.lock` ([`held`]): refused while a
+//! server, an agent's session, an app or another shell has it open.
 
 #[cfg(feature = "backup")]
 mod backup;
+mod held;
 #[cfg(feature = "import")]
 mod import;
 mod langs;
@@ -25,9 +29,29 @@ mod types;
 use fenec_core::prelude::*;
 use fenec_ql::{Reading, Refusal, Rest};
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+/// `--read-only`: the file the session opened, which it writes nothing to
+/// -- its statements, `.checkpoint` and a `.save` over it alike -- set once
+/// before the first runs.
+static READ_ONLY: OnceLock<PathBuf> = OnceLock::new();
+
+fn opened_read_only() -> bool {
+    READ_ONLY.get().is_some()
+}
+
+const READ_ONLY_REFUSAL: &str = "opened --read-only, the shell writes nothing: write over \
+     HTTP to the server that has the file open, or open it without --read-only once nothing has";
 
 const USAGE: &str = r#"usage: fenec [file.fenec] [-c "<query>"]
+       fenec --read-only <file.fenec>   the file as it stood at the open, beside
+                                        a server writing it: no lock, no write
        fenec -V, --version              prints `fenec <version>` and exits
+
+The shell holds <file.fenec>.lock while it has the file open: a file a
+server, an agent's session (fenec mcp --file), an app or another shell has
+open is refused, since two writers over one file corrupt it.
 "#;
 
 const HELP: &str = r#"
@@ -166,6 +190,7 @@ fn main() {
 
     let mut path: Option<String> = None;
     let mut command: Option<String> = None;
+    let mut read_only = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -173,6 +198,7 @@ fn main() {
                 i += 1;
                 command = args.get(i).cloned();
             }
+            "--read-only" => read_only = true,
             "-h" | "--help" => {
                 println!(
                     "{USAGE}{HELP}{IMPORT_HELP}{BACKUP_HELP}{MCP_HELP}{TYPES_HELP}{SHELL_HELP}"
@@ -196,22 +222,56 @@ fn main() {
         i += 1;
     }
 
-    let mut db = match &path {
-        Some(p) => match fenec_core::fs::open(p) {
-            Ok(db) => db,
-            Err(e) => {
-                eprintln!("could not open {p}: {e}");
-                std::process::exit(1);
+    if read_only && path.is_none() {
+        eprintln!("--read-only reads a file: name it (fenec --read-only data.fenec)");
+        std::process::exit(2);
+    }
+    // Taken before the open, and let go after the database is (declared
+    // before it, dropped after it). Opened beside a server, the shell's
+    // write was appended where the server then appended its own, and the
+    // file was left corrupt. Read-only, nothing is written and nothing cut,
+    // so no lock is taken: the file as it stood at the open, a record a
+    // server is in the middle of appending passed over as a torn tail.
+    let _held = match (&path, read_only) {
+        (Some(p), false) => {
+            let advice = format!(
+                "query it over HTTP, or stop it first; `fenec --read-only {p}` reads it as it stands"
+            );
+            match held::take(p, &advice) {
+                Ok(l) => Some(l),
+                Err(why) => {
+                    eprintln!("{why}");
+                    std::process::exit(1);
+                }
             }
-        },
+        }
+        _ => None,
+    };
+    let mut db = match &path {
+        Some(p) => {
+            let opened = match read_only {
+                true => fenec_core::fs::open_read_only(p),
+                false => fenec_core::fs::open(p),
+            };
+            match opened {
+                Ok(db) => db,
+                Err(e) => {
+                    eprintln!("could not open {p}: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         None => Database::new(),
     };
+    if let (true, Some(p)) = (read_only, &path) {
+        let _ = READ_ONLY.set(std::fs::canonicalize(p).unwrap_or_else(|_| p.into()));
+    }
 
     if let Some(cmd) = command {
         let mut code = if run(&mut db, &cmd) { 0 } else { 1 };
         // A one-shot write that never reached the disk must not exit 0: the
         // caller's script would go on believing it.
-        if let Err(e) = db.sync() {
+        if let (false, Err(e)) = (read_only, db.sync()) {
             eprintln!("could not push the writes to disk: {e}");
             code = 1;
         }
@@ -222,9 +282,13 @@ fn main() {
     let interactive = stdin.is_terminal();
     if interactive {
         println!(
-            "fenecdb {} — {}",
+            "fenecdb {} — {}{}",
             fenec_core::VERSION,
-            path.as_deref().unwrap_or("in-memory")
+            path.as_deref().unwrap_or("in-memory"),
+            match read_only {
+                true => " (read only: the file as it stood at the open)",
+                false => "",
+            }
         );
         println!("`.help` for help, `.quit` to exit\n");
     }
@@ -260,7 +324,7 @@ fn main() {
     // Write a checkpoint on exit when there is a vector index: the next open
     // does not rebuild the graph (27 s -> 0.1 s at 100k vectors).
     let has_vectors = db.stats().iter().any(|s| !s.vector_indexes.is_empty());
-    if path.is_some() && has_vectors {
+    if path.is_some() && has_vectors && !read_only {
         match db.checkpoint() {
             Ok(()) => {
                 if interactive {
@@ -270,7 +334,7 @@ fn main() {
             Err(e) => eprintln!("could not write the checkpoint: {e}"),
         }
     }
-    if let Err(e) = db.sync() {
+    if let (false, Err(e)) = (read_only, db.sync()) {
         eprintln!("could not push the writes to disk: {e}");
         std::process::exit(1);
     }
@@ -786,23 +850,51 @@ fn meta(db: &mut Database, cmd: &str) -> bool {
                 println!("  {n:<14} {doc}");
             }
         }
+        ".checkpoint" if opened_read_only() => eprintln!("error: {READ_ONLY_REFUSAL}"),
         ".checkpoint" => match db.checkpoint() {
             Ok(()) => println!("checkpoint written"),
             Err(e) => eprintln!("could not write it: {e}"),
         },
         ".save" => match parts.next() {
-            Some(p) => {
-                let p = p.trim();
-                match std::fs::write(p, db.snapshot()) {
-                    Ok(()) => println!("{p} written"),
-                    Err(e) => eprintln!("could not write it: {e}"),
-                }
-            }
+            Some(p) => match save(db, p.trim()) {
+                Ok(()) => println!("{} written", p.trim()),
+                Err(e) => eprintln!("could not write it: {e}"),
+            },
             None => eprintln!("usage: .save <path>"),
         },
         other => eprintln!("unknown command `{other}` (try .help)"),
     }
     true
+}
+
+/// `.save <path>`: a snapshot of the database written into `path` as a
+/// database file is replaced -- under its lock, refused while a server or
+/// an app has it open (this session's own file too, and the one a
+/// read-only session opened), written beside it and renamed over, its sync
+/// log gone first. Written in place, a reader that maps it (`--read-only`,
+/// `fenec types`) read past the end of a file cut short under it, and a log
+/// a crash left would be played over the new one.
+fn save(db: &Database, path: &str) -> std::result::Result<(), String> {
+    if READ_ONLY
+        .get()
+        .is_some_and(|own| std::fs::canonicalize(path).ok().as_ref() == Some(own))
+    {
+        return Err(format!("{READ_ONLY_REFUSAL}; save to another path"));
+    }
+    let _held = held::take(path, "save to another path")?;
+    let side = format!("{path}.saving");
+    let written = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&side)?;
+        f.write_all(&db.snapshot())?;
+        f.sync_all()?;
+        fenec_core::fs::forget_sync_log(Path::new(path))?;
+        std::fs::rename(&side, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&side);
+    }
+    written.map_err(|e| e.to_string())?;
+    fenec_core::fs::sync_dir(Path::new(path)).map_err(|e| e.to_string())
 }
 
 fn human(n: usize) -> String {
@@ -824,6 +916,13 @@ fn run(db: &mut Database, src: &str) -> bool {
             return false;
         }
     };
+    // Refused here, before any of the text runs: handed to the engine, the
+    // file's sink refused the write as a storage error, after which every
+    // write said "writes are refused after a storage error".
+    if opened_read_only() && stmts.iter().any(|s| !s.is_read_only()) {
+        eprintln!("error: {READ_ONLY_REFUSAL}");
+        return false;
+    }
     for s in &stmts {
         let t0 = std::time::Instant::now();
         match db.execute(s) {

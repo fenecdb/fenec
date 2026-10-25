@@ -142,10 +142,13 @@ fn local(path: &str, read_only: bool, opts: mcp::Options) -> i32 {
     }
     let lock = match read_only {
         true => None,
-        false => match fenec_abi::lock::hold(path) {
+        false => match crate::held::take(
+            path,
+            "reach it through its server (--url), or stop it first; --read-only reads it as it stands",
+        ) {
             Ok(l) => Some(l),
-            Err(e) => {
-                eprintln!("fenec mcp: could not open {path}: {e}");
+            Err(why) => {
+                eprintln!("fenec mcp: {why}");
                 return 1;
             }
         },
