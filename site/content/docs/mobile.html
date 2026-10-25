@@ -514,7 +514,7 @@ nothing, a worker's claim waiting there for a job
 the coroutine gives it up.</p>
 
 <p>An app far from its tenant's home reads near itself where the tenant has
-a <a href="/docs/sharding#read-replicas">read replica</a> in the app's
+a <a href="/docs/sharding-read-replicas#read-replicas">read replica</a> in the app's
 region: connected through that region's router with reads nearest, the
 builder's reads, and an <code>asRead()</code> copy's requests, are answered
 by the replica there, each after the furthest position an answer from home

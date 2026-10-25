@@ -12,7 +12,7 @@ as the primary's writes land, and ending what the standby had out to a node
 a failover took a tenant off ([router.md](router.md#failover-cuts)) --
 reading `failed_from` beside each placement took a change that moves a
 tenant to 4.1 us and one a failover made to 4.3, from 3.9;
-`site/content/docs/sharding.html`). The tenant comes from the path
+`site/content/docs/sharding-design.html`). The tenant comes from the path
 (`/t/<tenant>/`, looked up again per request, so a move, an idle close or
 a delete between two of them is seen), never from the query, so tenants
 cannot share a file -- they

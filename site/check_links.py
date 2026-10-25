@@ -11,10 +11,11 @@ renamed, or a heading whose id changed, otherwise leaves links that answer
 other hundreds of times, and no one clicks them all after a rename. External
 links are not fetched: a build must not depend on the network.
 
-The fragments `docs/fenecql` once held (`moved.json`) are held to the same:
-each has to name a page and an id that were built, and none may still be an
-id of `docs/fenecql`, whose script would send a reader away from a section
-that is there; and `docs/fenecql` has to carry that script, or the map is dead.
+The fragments of a page that was split (`moved.json`, which build.py writes
+into the page's script) are held to the same: each has to name a page and an
+id that were built, none may still be an id of the page it left, whose script
+would send a reader away from a section that is there, and the page has to
+carry the script at all.
 
 Standard library only, as `build.py` is. Exits 1 and lists every broken link.
 """
@@ -36,21 +37,11 @@ class Page(html.parser.HTMLParser):
         super().__init__(convert_charrefs=True)
         self.ids = set()
         self.hrefs = []
-        self.scripts = []
-        self.in_script = False
-
-    def handle_endtag(self, tag):
-        if tag == "script":
-            self.in_script = False
-
-    def handle_data(self, data):
-        if self.in_script:
-            self.scripts[-1] += data
+        self.moves = False  # carries the script that follows a moved fragment
 
     def handle_starttag(self, tag, attrs):
-        if tag == "script":
-            self.in_script = True
-            self.scripts.append("")
+        if tag == "script" and any(k == "data-moved" for k, _ in attrs):
+            self.moves = True
         for k, v in attrs:
             if k in ("id", "name") and v:
                 self.ids.add(v)
@@ -116,23 +107,25 @@ def main():
                 ids = pages[target].ids if target in pages else set()
                 if fragment not in ids:
                     broken.append(f"{rel}:{line}: {href} -> no id `{fragment}`")
-    old = pages.get(os.path.join(dist, "docs", "fenecql.html"))
     with open(MOVED, encoding="utf-8") as f:
         moved = json.load(f)
-    for fragment, target in sorted(moved.items()):
-        checked += 1
-        name, _, where = target.partition("#")
-        path = os.path.normpath(os.path.join(dist, "docs", name + ".html"))
-        if path not in pages:
-            broken.append(f"moved.json: {fragment} -> {target}: no such page")
-        elif where and where not in pages[path].ids:
-            broken.append(f"moved.json: {fragment} -> {target}: no id `{where}`")
-        if old is not None and fragment in old.ids:
-            broken.append(f"moved.json: {fragment} is an id docs/fenecql still has")
-    # The map is read by the one script on docs/fenecql: without it every
-    # target above is a page nobody is sent to.
-    if old is None or not any("location.replace" in script for script in old.scripts):
-        broken.append("moved.json: docs/fenecql carries no script that follows it, so the map is dead")
+    for old_page, fragments in sorted(moved.items()):
+        left = pages.get(os.path.normpath(os.path.join(dist, old_page + ".html")))
+        if left is None:
+            broken.append(f"moved.json: {old_page}: no such page")
+            continue
+        if not left.moves:
+            broken.append(f"moved.json: {old_page} carries no script to follow its fragments")
+        for fragment, target in sorted(fragments.items()):
+            checked += 1
+            name, _, where = target.partition("#")
+            path = os.path.normpath(os.path.join(dist, "docs", name + ".html"))
+            if path not in pages:
+                broken.append(f"moved.json: {old_page}#{fragment} -> {target}: no such page")
+            elif where and where not in pages[path].ids:
+                broken.append(f"moved.json: {old_page}#{fragment} -> {target}: no id `{where}`")
+            if fragment in left.ids:
+                broken.append(f"moved.json: {fragment} is an id {old_page} still has")
     for b in broken:
         print(b)
     print(f"{checked} internal links over {len(pages)} pages, {len(broken)} broken")

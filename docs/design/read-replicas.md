@@ -7,7 +7,7 @@ The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *Read r
 **A tenant may keep read replicas in other regions, which a router near
 them answers the reads its clients mark from** (`fenec-shard/src/readers.rs`,
 `PUT /_shard/tenants/<t>/read-replicas/<region>`, `fenec-shard --near`,
-`Fenec-Read: replica`; `site/content/docs/sharding.html#read-replicas`). A
+`Fenec-Read: replica`; `site/content/docs/sharding-read-replicas.html#read-replicas`). A
 client in Singapore of a tenant living in Frankfurt paid 158 ms a read. A
 read replica is a follower of the tenant's primary node (`POST
 /_admin/tenants/<t>/follow`, as a replica of its own) on the node of the

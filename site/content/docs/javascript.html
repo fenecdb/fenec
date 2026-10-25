@@ -217,7 +217,7 @@ const stop = db.live(stock.select('available').where('sku', 'TENT-1'), (rows) =>
     each of its runs is a read near, sent after the change its stream told
     of and the rows it last showed too, so it shows every write home takes
     and never goes back; its polls go home (<a
-    href="/docs/sharding#read-replicas">Read replicas</a>). A write sent
+    href="/docs/sharding-read-replicas#read-replicas">Read replicas</a>). A write sent
     with <code>{ read: true }</code> is refused, 403.</li>
 </ul>
 

@@ -777,7 +777,7 @@ get sicily select name where distance(loc, [15, 37]) &lt;= 200000 near loc [15, 
     threads read 701 000 rows a second by id beside four writers (<a
     href="/docs/benchmarks#concurrency">Writers and readers at
     once</a>). Past one machine's writer the data is split by tenant, a
-    file each (<a href="/docs/sharding">Tenants and sharding</a>); there
+    file each (<a href="/docs/sharding-design#why-tenants-and-not-hash-partitioning">Sharding design</a>); there
     are no hash slots.</li>
   <li><b>Fan out across tenants.</b> A subscription and
     <code>/_changes</code> are one file's: on a tenant node each tenant is
