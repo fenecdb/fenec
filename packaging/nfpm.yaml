@@ -1,0 +1,49 @@
+# The .deb and .rpm of a release, from the musl tarballs it already holds
+# (tools/linux-packages.sh runs nfpm over this file once for each package;
+# the NFPM_ variables are its). The binaries are static, so a package
+# depends on nothing and installs on any distribution of its architecture.
+name: fenecdb
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${NFPM_VERSION}
+# 0.2.0-rc1 becomes 0.2.0~rc1, which sorts before 0.2.0 as a pre-release must.
+version_schema: semver
+release: "1"
+section: database
+priority: optional
+maintainer: fenecdb <noreply@fenecdb.com>
+vendor: fenecdb
+homepage: https://fenecdb.com
+license: Apache-2.0
+description: |
+  Embedded database with its own query language, FenecQL.
+  fenec is the shell and fenec-server the HTTP server: REST routes, FenecQL
+  over POST /query, subscriptions, replication and change data capture.
+  A document store with full-text, vector, geo and ordered indexes in a
+  single file.
+
+contents:
+  # expand: the binaries' directory is the script's.
+  - src: ${NFPM_BIN}/fenec
+    dst: /usr/bin/fenec
+    expand: true
+    file_info:
+      mode: 0755
+  - src: ${NFPM_BIN}/fenec-server
+    dst: /usr/bin/fenec-server
+    expand: true
+    file_info:
+      mode: 0755
+  # Where each distribution looks for a licence: Debian's copyright file, and
+  # the %license of an rpm.
+  - src: LICENSE
+    dst: /usr/share/doc/fenecdb/copyright
+    packager: deb
+    file_info:
+      mode: 0644
+  - src: LICENSE
+    dst: /usr/share/licenses/fenecdb/LICENSE
+    type: license
+    packager: rpm
+    file_info:
+      mode: 0644

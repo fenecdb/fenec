@@ -94,7 +94,10 @@ session locally and from the environment in CI.
 Locally, `wrangler login` once, then `make site-deploy`.
 
 `site/dist/_headers` is written by `build.py` on every build: security headers
-for everything, and a year of immutable caching for every content-hashed asset.
+for everything, five minutes of caching and `text/plain` for `/install.sh` (the
+installer, `curl -fsSL https://fenecdb.com/install.sh | sh`: it reaches the next
+install when a change merges, and a browser shows it rather than saving it),
+and a year of immutable caching for every content-hashed asset.
 That now includes the engine — the site loads `fenec.<hash>.js` and
 `fenec.<hash>.wasm`, so a returning visitor pays no revalidation round trip for
 the two largest files on the page.
@@ -133,6 +136,9 @@ site/
   search-embeddings.json  the cache, committed: a vector per section, by hash
   search-fixture.json     the tests' queries' vectors, so CI needs no network
   search-mock.mjs   dist and a stand-in endpoint, to try it with no account
+  install.sh      the installer, copied to dist/install.sh and served as
+                  text/plain at https://fenecdb.com/install.sh
+  test_install.sh it against a release of its own served from localhost
   worker.js       /api/embed, the only code that runs on the edge
   worker.test.mjs its limits and refusals, its bindings faked
   fonts/          Bricolage Grotesque and IBM Plex Mono, Google Fonts' latin

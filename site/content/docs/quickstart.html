@@ -1,6 +1,6 @@
 <!--
 title: Quickstart — fenecdb
-description: Install fenecdb and run a first query in a few commands: in a browser tab from npm, on a server from the Docker image or a release binary and your language's client, or in the shell.
+description: Install fenecdb and run a first query in a few commands: in a browser tab from npm, on a server from Homebrew, an install script, a .deb or .rpm, the Docker image or a release binary and your language's client, or in the shell.
 -->
 
 <h1>Quickstart</h1>
@@ -104,13 +104,14 @@ collections in code instead, and the open makes them.</p>
 <h2 id="as-a-server">As a server</h2>
 
 <p><code>fenec-server</code> is one process over one file, and every language
-reaches it over HTTP and JSON. Start it from the Docker image or a release
-binary, then talk to it with <code>curl</code> and from your language.</p>
+reaches it over HTTP and JSON. Install it with Homebrew, the install script or
+a package, or start it from the Docker image or a release binary, then talk to
+it with <code>curl</code> and from your language.</p>
 
 <ol class="steps-doc">
   <li>
     <p>Start the server with a token. It runs in the foreground when it is
-    a release binary, so the next steps go in another terminal.</p>
+    not the image, so the next steps go in another terminal.</p>
 
 <div class="langs" data-langs data-key="fenec-install" data-tabs="Install with">
 
@@ -121,6 +122,50 @@ binary, then talk to it with <code>curl</code> and from your language.</p>
 <p>The image holds the server and nothing else; the data lives in the
 <code>fenecdata</code> volume. A container listens beyond localhost, so it asks
 for a token.</p>
+</div>
+
+<div class="lang" data-name="Homebrew">
+<pre data-lang="bash" data-label="install">brew install fenecdb/tap/fenecdb</pre>
+<pre data-lang="bash" data-label="run">FENEC_HTTP_TOKEN=secret fenec-server --file data.fenec</pre>
+<pre data-lang="text" data-label="prints">opened: data.fenec
+fenec-server {{version}}: data.fenec  [sync=250 ms]
+fenec-http {{version}} listening on: http://127.0.0.1:8080  [token]</pre>
+<p>The formula installs <code>fenec-server</code> and <code>fenec</code>, the
+shell, on macOS and Linux (arm64 and x86_64): the release's own binaries,
+checked against their SHA-256, not built on your machine.
+<code>brew upgrade fenecdb</code> takes the next release.</p>
+</div>
+
+<div class="lang" data-name="Install script">
+<pre data-lang="bash" data-label="install">curl -fsSL https://fenecdb.com/install.sh | sh</pre>
+<pre data-lang="bash" data-label="run">export PATH="$HOME/.fenecdb/bin:$PATH"   # the script prints this line
+FENEC_HTTP_TOKEN=secret fenec-server --file data.fenec</pre>
+<pre data-lang="text" data-label="prints">opened: data.fenec
+fenec-server {{version}}: data.fenec  [sync=250 ms]
+fenec-http {{version}} listening on: http://127.0.0.1:8080  [token]</pre>
+<p>It puts <code>fenec-server</code> and <code>fenec</code> in
+<code>~/.fenecdb/bin</code> (<code>FENEC_INSTALL</code> names another
+directory) with no <code>sudo</code>, and edits no shell file: it says how to
+put the directory on your <code>PATH</code> and leaves that to you. It
+downloads the latest release (<code>FENEC_VERSION={{version}}</code> names a
+release) from GitHub over https and checks the tarball against the release's
+<code>SHA256SUMS</code> before it unpacks anything. That sum comes from the
+same release as the file, so it catches a damaged or cut-short download, not
+a release someone replaced. For macOS and Linux on arm64 and x86_64. To read
+it before it runs: <code>curl -fsSL https://fenecdb.com/install.sh | less</code>
+(<a href="https://fenecdb.com/install.sh">install.sh</a>).</p>
+</div>
+
+<div class="lang" data-name=".deb and .rpm">
+<pre data-lang="bash" data-label="Debian, Ubuntu">curl -LO https://github.com/fenecdb/fenecdb/releases/download/v{{version}}/fenecdb_{{version}}-1_amd64.deb   # arm64 on an ARM machine
+sudo apt install ./fenecdb_{{version}}-1_amd64.deb</pre>
+<pre data-lang="bash" data-label="Fedora, RHEL">curl -LO https://github.com/fenecdb/fenecdb/releases/download/v{{version}}/fenecdb-{{version}}-1.x86_64.rpm   # aarch64 on an ARM machine
+sudo dnf install ./fenecdb-{{version}}-1.x86_64.rpm</pre>
+<pre data-lang="bash" data-label="run">FENEC_HTTP_TOKEN=secret fenec-server --file data.fenec</pre>
+<p>Each release carries a package for amd64 and one for arm64, with its
+checksum in <code>SHA256SUMS</code>; releases after 0.1.11 have them. They
+install <code>fenec</code> and <code>fenec-server</code> in
+<code>/usr/bin</code> and depend on nothing: the binaries are static.</p>
 </div>
 
 <div class="lang" data-name="Release binary">
@@ -310,12 +355,18 @@ in <a href="sharding.html#deploying">Deploying it</a>.</p>
 <h2 id="in-the-shell">In the shell</h2>
 
 <p><code>fenec</code> opens a database file and runs FenecQL on it, one
-statement at a time. It is in the release tarball beside the server.</p>
+statement at a time. It comes with every way of installing the server above,
+beside it: <code>brew install fenecdb/tap/fenecdb</code>, <code>curl -fsSL
+https://fenecdb.com/install.sh | sh</code>, the packages and the release
+tarball.</p>
 
 <ol class="steps-doc">
   <li>
     <p>Download the release and go into its folder. Skip this if you already
-    have it from the server's steps.</p>
+    have it from the server's steps, or installed it with Homebrew, the script
+    or a package: then <code>fenec</code> is on your <code>PATH</code> (the
+    script says how to put it there) and the steps below run
+    <code>fenec</code> where they say <code>./fenec</code>.</p>
 <pre data-lang="bash">TARGET=aarch64-apple-darwin   # or x86_64-apple-darwin, aarch64-unknown-linux-musl, x86_64-unknown-linux-musl
 curl -LO https://github.com/fenecdb/fenecdb/releases/download/v{{version}}/fenec-v{{version}}-$TARGET.tar.gz
 tar -xzf fenec-v{{version}}-$TARGET.tar.gz

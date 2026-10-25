@@ -30,7 +30,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [lookup-and-aggregates.md](lookup-and-aggregates.md) -- `lookup`, `required`, keys of several fields, folded levels, select-list expressions, HyperLogLog and time zones
 - [native-and-sync.md](native-and-sync.md) -- `fenec-ffi`, the sans-IO sync core and the scenario file both sync runners are held to
 - [router.md](router.md) -- the router's CORS, its pooled connections, the cuts a failover makes, the leading router's and its followers', and queries across tenants
-- [integrations.md](integrations.md) -- `integrations/`, the Grafana data source and the `deploy/` kit
+- [integrations.md](integrations.md) -- `integrations/`, the Grafana data source, the `deploy/` kit and the install channels (Homebrew, `install.sh`, `.deb` and `.rpm`)
 
 ## The original order
 
@@ -176,3 +176,4 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 140. [A replica whose attach failed is tried again, and a file the router left on a node is reported](tenants.md#replicas-tried-again) (added after the move, under *Tenants and leases*)
 141. [A connection no thread can be made for is answered 503, as one past the ceiling is](http.md#connections-without-a-thread) (added after the move, under *The HTTP server*)
 142. [Every way a server stops is the one shutdown](durability.md#the-one-shutdown) (added after the move, under *Durability*)
+143. [A release is installed from its own files, each checked before it is used](integrations.md#install-channels) (added after the move, under *Integrations and deploy*)

@@ -27,6 +27,7 @@ make size-report   # where the module's bytes go (BASE=main, BIN=fenec-server, F
 make ffi           # the native library for apps (crates/fenec-ffi); TARGET=... another, JNI=1 for Kotlin
 make sync-scenarios-check   # both runners of integrations/sync-scenarios.json passed every scenario (after make test)
 make packages      # the PyPI, npm and NuGet packages as a release publishes them, installed and used
+make packaging-test    # site/install.sh against a release of its own on localhost, and the Homebrew formula held to its script
 make version V=X.Y.Z   # one version wherever a release reads it (RELEASING.md)
 make agents-md     # AGENTS.md written again from this file
 make builder-golden   # integrations/builder-golden.json written again from the JS builder (web/golden.mjs)
@@ -1001,6 +1002,20 @@ checks.](docs/design/integrations.md#deploy)** Tokens go in env files or
 copy`, never `sync`; a standby router's unit conflicts with its primary's,
 promoted by `POST /_replication/promote` and the units switched at once;
 `tests/datadog.rs` holds the alerts to scrapes.
+
+**[A release is installed from its own files, each checked before it is
+used.](docs/design/integrations.md#install-channels)** Homebrew's formula, the
+site's `install.sh` and the `.deb` and `.rpm` all install the binaries
+`release.yml` built and rebuild none. The formula is written by
+`tools/homebrew-formula.py` from the release's `SHA256SUMS` (`--check`
+refuses a hand edit, `--verify` holds it to the public URLs) and pushed by
+`packages.yml` after the publish, since a draft's URLs are not public;
+`HOMEBREW_TAP_TOKEN` reaches git through its environment alone. `install.sh`
+is one function called on its last line (`site/build.py` holds it), checks the
+sum before it unpacks, touches no shell file and evals nothing
+(`site/test_install.sh`). A package is installed and run in a container
+before it is kept (`tools/linux-packages-check.sh`). A new channel names what
+it installs by its checksum.
 
 ## Conventions
 

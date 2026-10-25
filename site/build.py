@@ -1533,6 +1533,24 @@ SIDE_RESTORE = (
     "s.scrollTop=h.offsetTop-(v-h.offsetHeight)/2})()</script>")
 
 
+def install_script():
+    """dist/install.sh: the installer `curl -fsSL https://fenecdb.com/install.sh
+    | sh` fetches, as the repository has it. It is a file of its own and not
+    a page, so nothing here rewrites it; what is held is the property that
+    makes piping it to a shell safe -- the body is one function, called on the
+    last line, so a download cut short stops before anything runs."""
+    src = os.path.join(ROOT, "install.sh")
+    text = open(src, encoding="utf-8").read()
+    lines = [l for l in text.splitlines() if l.strip()]
+    if not lines or lines[0] != "#!/bin/sh":
+        raise SystemExit("  site/install.sh must start with #!/bin/sh")
+    if lines[-1] != 'main "$@"':
+        raise SystemExit("  site/install.sh must end by calling main, its one function")
+    if text.count('main "$@"') != 1 or re.search(r"\beval\b", text):
+        raise SystemExit("  site/install.sh calls main once and evals nothing")
+    shutil.copy(src, os.path.join(OUT, "install.sh"))
+
+
 def build():
     if os.path.isdir(OUT):
         shutil.rmtree(OUT)
@@ -1771,6 +1789,13 @@ def build():
         rules += [f"/{hashed}", "  Cache-Control: public, max-age=31536000, immutable", ""]
     for stable in CLIENT_MODULES + ("fenec.wasm", "collate/*"):
         rules += [f"/{stable}", "  Cache-Control: public, max-age=3600, must-revalidate", ""]
+    # The installer, served as plain text: a browser shows it, which is how
+    # someone reads it before `curl | sh`, where a .sh would be saved. Five
+    # minutes, so a fix reaches the next install and not a day's.
+    rules += ["/install.sh",
+              "  Content-Type: text/plain; charset=utf-8",
+              "  Cache-Control: public, max-age=300, must-revalidate",
+              ""]
     open(os.path.join(OUT, "_headers"), "w", encoding="utf-8").write("\n".join(rules))
 
     # Every module a script imports by name is a file of the build: a name
@@ -1783,6 +1808,8 @@ def build():
         for dep in re.findall(r"""(?:from\s*|import\s*\(\s*)["'](\./[^"']+)["']""", body):
             if not os.path.exists(os.path.join(OUT, dep[2:])):
                 raise SystemExit(f"  {name} imports {dep}, which the build did not write")
+
+    install_script()
 
     brief, full = llms_texts()
     open(os.path.join(OUT, "llms.txt"), "w", encoding="utf-8").write(brief)

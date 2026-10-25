@@ -8,7 +8,8 @@ name: packages
 # `fenecdb_flutter` (with PUB_CREDENTIALS) go out when
 # a release is published -- not when its tag is pushed: release.yml leaves
 # the release a draft so its notes get a read, and publishing the draft is
-# the moment the packages follow it. A registry keeps what it is given, so
+# the moment the packages follow it. So does Homebrew's formula
+# (fenecdb/homebrew-tap, with HOMEBREW_TAP_TOKEN, the `homebrew` job). A registry keeps what it is given, so
 # nothing goes to one before every package has been built, installed and
 # used (integrations/packages.sh). Each registry takes a token when its
 # secret is set -- NPM_TOKEN, PYPI_API_TOKEN -- and this workflow's OIDC
@@ -401,3 +402,96 @@ jobs:
               sleep 10
             done
           done
+
+  # Homebrew's tap, fenecdb/homebrew-tap (`brew install fenecdb/tap/fenecdb`).
+  # It follows the published release, as the registries do, and not the tag:
+  # the formula names the release's download URLs, and a draft's are not
+  # public, so a tap updated by release.yml would send `brew install` to a
+  # 404 until someone published the notes. Once the release is public the
+  # formula is written from the release's own SHA256SUMS
+  # (tools/homebrew-formula.py), held to what the public URLs serve, and
+  # pushed to the tap's main. That takes HOMEBREW_TAP_TOKEN, a fine-grained
+  # token with Contents read and write on the tap and nothing else; without it
+  # the job says so and stops, and the registries go on. A token that is set
+  # and does not work fails the job, since a tap that silently stays a release
+  # behind is the failure nobody sees. A pre-release is not offered.
+  homebrew:
+    name: Homebrew tap
+    runs-on: ubuntu-latest
+    environment:
+      name: homebrew
+      url: https://github.com/fenecdb/homebrew-tap
+    steps:
+      - name: Look for the token
+        id: go
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+        run: |
+          set -eu
+          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "::notice::HOMEBREW_TAP_TOKEN is not set: the Homebrew tap is not updated (RELEASING.md, 'Once: the registries' side')"
+            echo "set=false" >> "$GITHUB_OUTPUT"
+          elif ! printf '%s' "${RELEASE_TAG#v}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::notice::$RELEASE_TAG is a pre-release: the Homebrew tap offers releases only"
+            echo "set=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "set=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # This workflow's own commit, not the tag's: the formula is written from
+      # the release's SHA256SUMS, and a tag from before the script has none.
+      - uses: actions/checkout@v7
+        if: steps.go.outputs.set == 'true'
+        with:
+          persist-credentials: false
+
+      - name: Write the formula and hold it to the public downloads
+        if: steps.go.outputs.set == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/release" "$RUNNER_TEMP/tap-files/Formula"
+          gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" -p SHA256SUMS -D "$RUNNER_TEMP/release"
+          formula="$RUNNER_TEMP/tap-files/Formula/fenecdb.rb"
+          python3 tools/homebrew-formula.py --version "${RELEASE_TAG#v}" --sums "$RUNNER_TEMP/release/SHA256SUMS" \
+            --repo "$GITHUB_REPOSITORY" -o "$formula"
+          cat "$formula"
+          python3 tools/homebrew-formula.py --check "$formula"
+          python3 tools/homebrew-formula.py --verify "$formula"
+
+      # The token reaches git in its environment: in no URL, no argument and no
+      # .git/config, and masked in its encoded form too.
+      - name: Push it to the tap
+        if: steps.go.outputs.set == 'true'
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+        run: |
+          set -eu
+          basic=$(printf 'x-access-token:%s' "$HOMEBREW_TAP_TOKEN" | base64 -w0)
+          echo "::add-mask::$basic"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0='http.https://github.com/.extraheader'
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $basic"
+          git clone --quiet "https://github.com/$GITHUB_REPOSITORY_OWNER/homebrew-tap.git" "$RUNNER_TEMP/tap"
+          cd "$RUNNER_TEMP/tap"
+          # The clone's own branch. An empty repository has no commit to be on,
+          # and a git that does not ask the server for its default branch names
+          # one `master`: the tap's is main.
+          git rev-parse -q --verify HEAD >/dev/null || git checkout -q -B main
+          branch=$(git symbolic-ref --short HEAD)
+          mkdir -p Formula
+          cp "$RUNNER_TEMP/tap-files/Formula/fenecdb.rb" Formula/fenecdb.rb
+          cp "$GITHUB_WORKSPACE/packaging/homebrew/README.md" README.md
+          git add Formula/fenecdb.rb README.md
+          if git diff --cached --quiet; then
+            echo "the tap holds this formula already"
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit --quiet -m "fenecdb ${RELEASE_TAG#v}"
+          git push --quiet origin "HEAD:$branch"
+          echo "fenecdb ${RELEASE_TAG#v} is in $GITHUB_REPOSITORY_OWNER/homebrew-tap, branch $branch" | tee -a "$GITHUB_STEP_SUMMARY"

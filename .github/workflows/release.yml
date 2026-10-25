@@ -216,6 +216,66 @@ jobs:
           path: dist/*.aar
           if-no-files-found: error
 
+  # The .deb and .rpm, made from the musl tarballs the `binaries` jobs just
+  # built (tools/linux-packages.sh, packaging/nfpm.yaml). The binaries are
+  # static, so a package depends on nothing, and nfpm makes both formats from
+  # one description without dpkg or rpmbuild. nfpm is the release binary
+  # tools/install-nfpm.sh pins, held to its checksum. Each architecture is
+  # packed on a runner of its own, and its packages are installed, run and
+  # removed in a Debian and a Fedora container of that architecture before
+  # they are kept: a package that does not install stops the release here,
+  # not on a user's machine. They go on the release beside the tarballs and
+  # are in its SHA256SUMS.
+  #
+  # The checkout is this workflow's own commit -- the tag's, when a tag was
+  # pushed -- and not the tag a dispatch names: the tarballs are the
+  # artifacts and the version is the tag's name, so what is needed from the
+  # tree is the packaging files, which a tag from before them (a dispatch to
+  # build v0.1.11 again) does not have.
+  linux-packages:
+    name: .deb and .rpm (${{ matrix.arch }})
+    needs: binaries
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, arch: amd64, artifact: dist-x86_64-linux }
+          - { os: ubuntu-24.04-arm, arch: arm64, artifact: dist-aarch64-linux }
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.artifact }}
+          path: tarballs
+
+      - name: Install nfpm
+        run: |
+          tools/install-nfpm.sh "$RUNNER_TEMP/nfpm"
+          echo "$RUNNER_TEMP/nfpm" >> "$GITHUB_PATH"
+
+      # The files' times are the commit's: the same commit packs the same bytes.
+      - name: Build
+        run: |
+          set -eu
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          export SOURCE_DATE_EPOCH
+          tools/linux-packages.sh "${TAG#v}" tarballs dist ${{ matrix.arch }}
+
+      - name: Install, run and remove them
+        run: tools/linux-packages-check.sh "${TAG#v}" dist ${{ matrix.arch }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-packages-${{ matrix.arch }}
+          path: |
+            dist/*.deb
+            dist/*.rpm
+          if-no-files-found: error
+
   image:
     name: image (${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
@@ -286,7 +346,7 @@ jobs:
 
   publish:
     name: publish the release
-    needs: [binaries, wasm, apple, android]
+    needs: [binaries, wasm, apple, android, linux-packages]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -302,7 +362,7 @@ jobs:
       - name: Checksums
         run: |
           cd dist
-          sha256sum *.tar.gz *.zip *.aar > SHA256SUMS
+          sha256sum *.tar.gz *.zip *.aar *.deb *.rpm > SHA256SUMS
           cat SHA256SUMS
 
       # A Go module in a subdirectory is fetched by a tag naming its
