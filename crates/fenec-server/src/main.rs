@@ -1000,6 +1000,28 @@ fn main() {
         }
     };
 
+    // Both listeners straight after the open, before anything writes the
+    // file or runs beside it: a port that cannot be had stops the start
+    // here, having written nothing but what the open itself does (a file
+    // made where there was none, a torn tail cut). Taken after the threads
+    // started, it stopped a server whose mirror had made its slot and
+    // copied 200 000 rows, and whose shutdown rewrote a file of vectors at
+    // each try a supervisor's restarts made; taken after the history is
+    // settled, a failed `--promote` had forked and synced its file. Not
+    // before the open: a connection would wait in the backlog through it,
+    // where it is refused at once.
+    let metrics_listener = metrics_cfg.as_ref().map(|c| {
+        std::net::TcpListener::bind(&c.addr)
+            .unwrap_or_else(|e| fail(&format!("could not open the metrics endpoint: {e}")))
+    });
+    let listener = match std::net::TcpListener::bind(&http_cfg.addr) {
+        Ok(l) => l,
+        Err(e) => {
+            fenec_http::log!("could not open the HTTP endpoint: {e}");
+            std::process::exit(1);
+        }
+    };
+
     if let Some(m) = &mirror {
         if let Err(e) = db.install_plugin(&fenec_server::mirror::GuardPlugin(m.opts.into.clone())) {
             fenec_http::log!("could not load the plugin: {e}");
@@ -1020,23 +1042,6 @@ fn main() {
             std::process::exit(1);
         }
     }
-
-    // Both listeners before anything runs beside the database: a port that
-    // cannot be had stops the start here, with nothing written to sync.
-    // Taken after it, it stopped a server whose mirror had made its slot
-    // and copied 200 000 rows, and whose shutdown rewrote a file of vectors
-    // at each try a supervisor's restarts made.
-    let metrics_listener = metrics_cfg.as_ref().map(|c| {
-        std::net::TcpListener::bind(&c.addr)
-            .unwrap_or_else(|e| fail(&format!("could not open the metrics endpoint: {e}")))
-    });
-    let listener = match std::net::TcpListener::bind(&http_cfg.addr) {
-        Ok(l) => l,
-        Err(e) => {
-            fenec_http::log!("could not open the HTTP endpoint: {e}");
-            std::process::exit(1);
-        }
-    };
 
     let shared = Arc::new(RwLock::new(db));
     // From here threads run beside the database -- the graph keeper, the
@@ -1269,7 +1274,7 @@ fn serve_dir(
             // The write locks come back held: nothing is accepted between
             // the last sync and exit.
             fenec_http::trace::flush(Duration::from_secs(2));
-            let open = tenants.shutdown_with(durability::served());
+            let open = tenants.shutdown_with(durability::checkpoints());
             fenec_http::log!("\nshutting down: {open} open tenant(s) synced");
             std::process::exit(durability::exit_code());
         }

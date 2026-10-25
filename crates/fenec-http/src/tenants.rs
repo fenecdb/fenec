@@ -1755,10 +1755,10 @@ impl Tenants {
     }
 
     /// [`Tenants::shutdown`], checkpointing only where `checkpoint` and the
-    /// node's own setting both say so: a node that stops before it served
-    /// writes none, since a checkpoint rewrites a tenant's whole file, and
-    /// a node failing to start under a supervisor's restarts rewrote its
-    /// tenants' files at each one.
+    /// node's own setting both say so: a node that stops before it served,
+    /// or on a failure, writes none, since a checkpoint rewrites a tenant's
+    /// whole file, and a node failing to start under a supervisor's
+    /// restarts rewrote its tenants' files at each one.
     pub fn shutdown_with(&self, checkpoint: bool) -> usize {
         // The flag first, the snapshot after: an open that got past the flag
         // inserted its slot before the snapshot, and is waited for below.

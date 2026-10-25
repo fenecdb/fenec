@@ -85,6 +85,24 @@ fn a_server_that_cannot_listen_leaves_its_file_as_it_was() {
     assert_eq!(documents(&path, "v"), 1000);
 }
 
+/// The ports come before the history is settled: a file's first start as
+/// a primary, which gives it a history of its own and syncs it, writes
+/// nothing when its port cannot be had.
+#[test]
+fn a_first_replicated_start_that_cannot_listen_settles_no_history() {
+    let path = tmp("start", "unlistened-primary.fenec");
+    let p = path.to_str().unwrap();
+    vectors(&["--file", p], false);
+    let before = as_it_is(&path);
+
+    let (_held, addr) = held_port();
+    let args = ["--file", p, "--replication-token", "r", "--http", &addr];
+    let (code, log) = ended(command(&args), EXIT);
+    assert_eq!(code, 1, "{log}");
+    assert!(log.contains("could not open the HTTP endpoint"), "{log}");
+    assert!(as_it_is(&path) == before, "the file changed\n{log}");
+}
+
 /// A standby node that cannot have its port opens none of its tenants,
 /// which every standby opens to follow them: their files stay as they were.
 #[test]
@@ -114,6 +132,42 @@ fn a_standby_that_cannot_listen_opens_no_tenant() {
         as_it_is(&tenant) == before,
         "the tenant's file changed\n{log}"
     );
+}
+
+/// A server that stops on a failure once it served writes no checkpoint:
+/// `--follow` to a PostgreSQL that refuses it serves first, then its mirror
+/// fails, at every try a supervisor makes -- and each rewrote the whole
+/// file while it checkpointed.
+#[test]
+fn a_server_that_stops_on_a_failure_writes_no_checkpoint() {
+    let path = tmp("start", "refused-source.fenec");
+    let p = path.to_str().unwrap();
+    vectors(&["--file", p], false);
+    let before = as_it_is(&path);
+    for _ in 0..2 {
+        let (code, log) = ended(
+            command(&[
+                "--file",
+                p,
+                "--http",
+                "127.0.0.1:0",
+                "--follow",
+                "postgres://fenec@127.0.0.1:1/none",
+                "--follow-table",
+                "t",
+            ]),
+            EXIT,
+        );
+        assert_eq!(code, 1, "{log}");
+        assert!(log.contains("listening on"), "{log}");
+        assert!(log.contains("the mirror of t stopped"), "{log}");
+        assert!(!log.contains("checkpoint written"), "{log}");
+        assert!(
+            as_it_is(&path).0 == before.0,
+            "the file was rewritten\n{log}"
+        );
+    }
+    assert_eq!(documents(&path, "v"), 1000);
 }
 
 /// An endpoint on an open network with no token is refused with the flags,

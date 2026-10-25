@@ -614,8 +614,9 @@ type Response2 = fenec_core::query::Response;
 /// which `fenec-server` asks with them, before it opens anything, and
 /// [`Server::bind`] again.
 pub fn exposed(cfg: &Config, metrics: bool) -> Option<String> {
-    let guarded =
-        cfg.token.is_some() || cfg.access.is_some() || metrics && cfg.admin_token.is_some();
+    // An empty token is no token: a config not yet settled may hold one.
+    let set = |t: &Option<String>| t.as_deref().is_some_and(|t| !t.is_empty());
+    let guarded = set(&cfg.token) || cfg.access.is_some() || metrics && set(&cfg.admin_token);
     (is_remote(&cfg.addr) && !guarded && !cfg.insecure).then(|| {
         format!(
             "{} is not a loopback address and there is no token.\n\

@@ -97,15 +97,21 @@ front of it are on <a href="/docs/sharding">Tenants and sharding</a>.</p>
 <thead><tr><th>Code</th><th>When</th></tr></thead>
 <tbody>
 <tr><td><code>0</code></td><td>It stopped as asked: a signal, or the end of stdin under <code>--exit-on-stdin-close</code>, after the final sync. <code>--ping</code>: a server answers.</td></tr>
-<tr><td><code>1</code></td><td>A file server could not open its file — another process holds it — or its HTTP port; or, once serving, its listener failed or <code>--follow</code>'s mirror stopped, after the final sync. <code>--ping</code>: none answers.</td></tr>
+<tr><td><code>1</code></td><td>A server over a file or in memory could not start: its file could not be opened (another process holds it, or it cannot be read), <code>--follow</code>'s guard could not be put on it, a replica's file was started without <code>--replica-of</code> or <code>--promote</code>, or its HTTP port could not be had. Or, once serving, its listener failed or <code>--follow</code>'s mirror stopped, after the final sync and with no checkpoint. <code>--ping</code>: none answers.</td></tr>
 <tr><td><code>2</code></td><td>A flag or its value was refused, before anything was opened: an open address with no token among them. Also a node's HTTP port or <code>--metrics</code>' that could not be had, and a thread the start could not make (after the final sync, with no checkpoint).</td></tr>
 </tbody>
 </table>
 </div>
 
-<p>A start that fails writes nothing to its files: a port that cannot be had
-is found before anything runs beside the database, so a supervisor restarting
-it again and again rewrites nothing.</p>
+<p>A start that fails rewrites nothing. The ports are taken straight after the
+open, before anything writes the file or runs beside it, so a failed start
+has written only what an open writes — the file, or a node's directory, made
+empty where there was none, and a torn tail cut — and a supervisor restarting
+it again and again changes nothing more. A server that stops on a failure
+writes no checkpoint either: the next open links what the graphs kept in the
+file left. Between the ports being taken and the server answering — the open
+of a node's tenants, a moment for a single file — a connection waits in the
+system's queue rather than being refused.</p>
 
 <h2 id="security">Security</h2>
 

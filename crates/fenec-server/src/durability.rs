@@ -154,18 +154,31 @@ pub fn exit_with(code: i32) {
 /// Whether the server got as far as serving: its HTTP thread started.
 static SERVED: AtomicBool = AtomicBool::new(false);
 
-/// Marks the server as serving, once its HTTP thread is started. A shutdown
-/// before it writes no checkpoint: a checkpoint rewrites the whole file, and
-/// a start that failed after the open -- under a supervisor that restarts
-/// it, again and again -- rewrote a file of 100 000 vectors at each try,
-/// 26.4 MB growing to 29.3 over three, each graph a part of one.
+/// Marks the server as serving, once its HTTP thread is started, unless a
+/// stop was asked for meanwhile -- stdin already closed, the app gone while
+/// a standby's tenants opened: that start never served either. A shutdown
+/// before it writes no checkpoint ([`checkpoints`]).
 pub fn serving() {
-    SERVED.store(true, Ordering::SeqCst);
+    if !shutdown_requested() {
+        SERVED.store(true, Ordering::SeqCst);
+    }
 }
 
-/// Whether [`serving`] was reached: a checkpoint is written only then.
+/// Whether [`serving`] was reached.
 pub fn served() -> bool {
     SERVED.load(Ordering::SeqCst)
+}
+
+/// Whether the shutdown writes a checkpoint: only after the server served,
+/// and only when it stops as asked, exit code 0. A checkpoint rewrites the
+/// whole file. A start that failed after the open rewrote a file of 100 000
+/// vectors at each try a supervisor's restarts made, 26.4 MB growing to
+/// 29.3 over three, each graph a part of one; and a `--follow` server whose
+/// PostgreSQL refused it at the start served first, so it rewrote its file
+/// at each try too. The graphs `link::keep` appends as they change keep the
+/// next open's linking short without one.
+pub fn checkpoints() -> bool {
+    served() && exit_code() == 0
 }
 
 /// The code the shutdown exits with: 0 unless [`stop_with`] gave another.
@@ -330,10 +343,17 @@ fn shutdown(db: &RwLock<Database>, checkpoint: bool) -> ! {
     // OOM) the data is already on disk and only the graph is lost, to be
     // rebuilt on open. Because `rewrite` writes to a side file and renames,
     // a half-written checkpoint cannot corrupt the file.
-    // A start that never served writes none ([`serving`]).
+    // A start that never served writes none, nor a failure ([`checkpoints`]).
     if checkpoint && g.stats().iter().any(|s| !s.vector_indexes.is_empty()) {
-        if !served() {
-            fenec_http::log!("no checkpoint: the server stopped before it served");
+        if !checkpoints() {
+            fenec_http::log!(
+                "no checkpoint: the server {}",
+                if served() {
+                    "stops on a failure"
+                } else {
+                    "stopped before it served"
+                }
+            );
         } else {
             match g.checkpoint() {
                 Ok(()) => fenec_http::log!("checkpoint written: the HNSW graph is persisted"),

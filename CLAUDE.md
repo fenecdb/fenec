@@ -219,11 +219,13 @@ A signal's handler, `--exit-on-stdin-close`'s end of stdin
 thread the start cannot make, the listener, `--follow`'s mirror
 (`stop_with`, its exit code) -- set one flag, `SHUTDOWN`, and the syncer
 that sees it, a file's or a node's, looking every `LOOK` (200 ms) whatever
-`--sync` is, syncs, checkpoints (only once it served, `serving`) and exits
-holding the write lock. A new way down sets that flag and never exits on
-its own. What fails before anything runs beside the open database -- a
-flag, the open, a port, both listeners bound first -- exits where it
-fails, writing nothing.
+`--sync` is, syncs, checkpoints (only once it served, `serving`, and exit
+code 0, `checkpoints`) and exits holding the write lock. A new way down
+sets that flag and never exits on its own. What fails before anything
+writes the file or runs beside it -- a flag, the open, a port, both
+listeners bound straight after the open -- exits where it fails, having
+written only what the open does: a file or a node's directory made where
+none was, a torn tail cut.
 
 ### Replication and archives
 

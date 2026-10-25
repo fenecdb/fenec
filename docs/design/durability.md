@@ -121,27 +121,46 @@ under way, whose `before_shutdown` was waiting for it, the sync among what
 was cut -- and a thread the start cannot make (2, as it exited before).
 The mirror stores its code (`exit_with`), then tells that wait it has
 stopped, so the wait is not its `STOP_WAIT` and the exit cannot come before
-the code, and only then asks for the shutdown. A shutdown before the HTTP
-thread started (`serving`) writes no checkpoint, a server's or a node's
-(`Tenants::shutdown_with`): a checkpoint rewrites the whole file, and the
-review of #383 measured a file server of 100 000 64-dimension vectors whose
-port was held log `checkpoint written` at every failed start, its inode new
-and its file 26.4, 28.4, 28.9, 29.3 MB, each graph a part (the next open
-still linked 91 691 vectors), a `--dir --replica-of` standby rewrite its
-vector tenant at each, which `fenec-node.service`'s `Restart=on-failure`
-repeats, and `--follow` make its slot and publication and copy 200 000
-rows within `STOP_WAIT` before it exited 1. So both listeners, `--metrics`'
-and the HTTP one, are bound before anything runs beside the database -- the
-graph keeper, the sweeper, a replica's follower, the mirror, the stdin
-thread, a node's tenants -- and an open address without a token is refused
-with the flags, exit 2, before the open (`fenec_http::exposed`). What fails
-before anything runs beside the opened database -- a flag, the lock, the
-open, its history, a port -- exits where it fails, writing nothing, with
-the exit codes it had: 1 for a file server's HTTP port, 2 for a node's and
-for `--metrics`'. On a node the signal handlers are installed once the
-tenants a standby follows are open, as before: a SIGTERM while they open
-stops it at once by the default action, with nothing yet to sync, rather
-than wait for each to open past a supervisor's grace.
+the code, and only then asks for the shutdown. A shutdown writes a
+checkpoint only once the HTTP thread started (`serving`, unless a stop was
+already asked for) and only when it exits 0 (`checkpoints`), a server's or
+a node's (`Tenants::shutdown_with`): a checkpoint rewrites the whole file,
+and the review of #383 measured a file server of 100 000 64-dimension
+vectors whose port was held log `checkpoint written` at every failed start,
+its inode new and its file 26.4, 28.4, 28.9, 29.3 MB, each graph a part
+(the next open still linked 91 691 vectors), a `--dir --replica-of` standby
+rewrite its vector tenant at each, which `fenec-node.service`'s
+`Restart=on-failure` repeats, and `--follow` make its slot and publication
+and copy 200 000 rows within `STOP_WAIT` before it exited 1. A `--follow`
+server whose PostgreSQL refused it served before its mirror failed, and
+rewrote a file of 6 000 vectors at each of three tries, a new inode each
+time: a failure is not a stop asked for, and the graphs `link::keep` appends
+as they change keep the next open's linking short without a checkpoint.
+So both listeners, `--metrics`' and the HTTP one, are bound straight after
+the open -- before the guard `--follow` puts on it, the history settled
+(a failed `--promote` had forked and synced its file, 24 bytes, and a first
+start as a primary gave its file a history), and anything running beside
+the database: the graph keeper, the sweeper, a replica's follower, the
+mirror, the stdin thread, a node's tenants. Not before the open, whose
+reading of a large file a connection would wait out in the backlog. An open
+address without a token is refused with the flags, exit 2, before the open
+(`fenec_http::exposed`, which counts an empty token as none). What fails
+before anything writes the file or runs beside it -- a flag, the lock, the
+open, a port -- exits where it fails, with the exit codes it had: 1 for a
+file server's HTTP port, 2 for a node's and for `--metrics`'. It has
+written what the open writes and no more: a file, or a node's directory,
+made where none was (an empty file is 8 bytes), and a torn tail cut. Taken
+before the tenants open, a node's port queues the connections that come
+while they do: a standby of 400 vector tenants took 1.36 to 1.67 s to
+answer, macOS kept 128 connections in its backlog and the rest of a burst
+had their SYNs sent again, for up to some 4 s, and through a router a
+request waits up to `--upstream-timeout` -- where before they were refused
+at once. No request was answered by a half-started node. On a node the
+signal handlers are installed once the tenants a standby follows are
+open, as before: a SIGTERM while they open stops it at once by the default
+action, rather than wait for each to open past a supervisor's grace. What
+its followers had applied by then is not lost to the primary: a replica
+asks from its file's own position, so the primary sends it again.
 `--exit-on-stdin-close` sets the flag (`request_shutdown`) from a thread
 that reads stdin to its end. An app
 that starts a server for a file it opened holds a pipe on the server's
@@ -172,9 +191,11 @@ it, a long `--sync` to an exit well inside its interval, a server without
 the flag to never reading stdin, `/dev/null`, a terminal with the flag and
 without it, and a secret on stdin; `wait_tick`'s tests hold a tick to no
 sooner than its interval and a stop to long before it; `tests/start.rs`
-holds a file server and a standby whose port is held to an exit that
-leaves a file of vectors as it was, to the inode and the byte, and an open
-address with no token to an exit 2 before the file is made; and
+holds a file server, a first start as a primary and a standby whose port
+is held to an exit that leaves a file of vectors as it was, to the inode
+and the byte, a `--follow` server whose source refuses it to an exit 1
+with no checkpoint and the same inode, twice, and an open address with no
+token to an exit 2 before the file is made; and
 `tests/follow.rs` (against PostgreSQL) a held port to no slot or
 publication made, and a mirror that cannot go on to an exit 1 through the
 shutdown.
