@@ -67,9 +67,26 @@ def main():
     # release's zip, whose checksum swift-binary.yml writes beside it
     # (integrations/swift/set-binary.sh) before the tag is made.
     sub("Package.swift", r'^let release = "[^"]+"', f'let release = "{v}"')
+    changelogs(v)
     examples(v)
     print(f"version {v}: Cargo.toml, pyproject.toml, every package.json and lock, FenecDb.csproj, README.md, "
-          "the Kotlin and Dart packages, the Flutter plugin, Package.swift, the examples")
+          "the Kotlin and Dart packages and their changelogs, the Flutter plugin, Package.swift, the examples")
+
+
+def changelogs(v):
+    """pub.dev shows a package's CHANGELOG.md and warns at the upload when it
+    names no entry for the version: 0.1.8 to 0.1.11 went up with only
+    0.1.7's. Each release's entry points at its notes, written once."""
+    for package in ("fenecdb", "fenecdb_flutter"):
+        p = ROOT / f"integrations/dart/{package}/CHANGELOG.md"
+        text = p.read_text(encoding="utf-8")
+        if re.search(rf"^## {re.escape(v)}$", text, flags=re.M):
+            continue
+        entry = f"## {v}\n\nThe release notes: https://github.com/fenecdb/fenec/releases/tag/v{v}\n\n"
+        text, n = re.subn(r"^(# Changelog\n\n)", lambda m: m.group(1) + entry, text, count=1, flags=re.M)
+        if n != 1:
+            sys.exit(f"{p}: no '# Changelog' heading")
+        p.write_text(text, encoding="utf-8")
 
 
 def examples(v):
