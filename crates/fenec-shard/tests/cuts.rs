@@ -22,7 +22,7 @@ mod wire;
 
 use fenec_shard::directory::Directory;
 use fenec_shard::{Config, Router};
-use nodes::{call, node, placed, query, until, written, Node};
+use nodes::{call, node, placed, query, until, until_copied, written, Node};
 use wire::*;
 
 /// The lease of the test that waits for one to lapse: long enough that its
@@ -48,7 +48,11 @@ struct Cluster {
 
 impl Cluster {
     fn port_of(&self, name: &str) -> u16 {
-        self.nodes[name[1..].parse::<usize>().unwrap() - 1].port
+        self.node_of(name).port
+    }
+
+    fn node_of(&self, name: &str) -> &Node {
+        &self.nodes[name[1..].parse::<usize>().unwrap() - 1]
     }
 }
 
@@ -527,22 +531,17 @@ fn a_failover_leaves_another_tenant_s_request_on_the_node_be() {
         let (status, b) = query(c.port, &path, "create collection notes (title text)");
         assert_eq!(status, 200, "{b}");
     }
-    // `tenant-q`'s copy holds its collection: it has taken its primary's
-    // image, and is the tenant the failover promotes. A copy that has not is
-    // of a lineage of its own, a new file's, and its node refuses to promote
-    // it (409, `tenants::Expected`): failed over first, `tenant-q` stayed on
-    // n1 -- on CI's ubuntu runner, in 9 runs of 400 on three cores beside
-    // three busy loops, and in every run with its image held a second at
-    // n1's wire.
+    // `tenant-q`'s copy has taken its primary's image and heard from it: it
+    // is the tenant the failover promotes. A copy that has not is of a
+    // lineage of its own, a new file's, and its node refuses to promote it
+    // (409, `tenants::Expected`): failed over first, `tenant-q` stayed on n1
+    // -- on CI's ubuntu runner, in 9 runs of 400 on three cores beside three
+    // busy loops, and in every run with its image held a second at n1's
+    // wire.
     let q = placed(c.port, "tenant-q")
         .1
         .expect("tenant-q has a replica");
-    until(
-        c.port_of(&q),
-        "/t/tenant-q/query",
-        "get notes count",
-        "\"count\":0",
-    );
+    until_copied("tenant-q", &c.nodes[0], c.node_of(&q));
     let copy = placed(c.port, "tenant-1")
         .1
         .expect("tenant-1 has a replica");

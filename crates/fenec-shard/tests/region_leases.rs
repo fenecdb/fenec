@@ -337,6 +337,8 @@ fn until(what: &str, mut check: impl FnMut() -> bool) {
 /// is dropped while the test runs.
 struct World {
     _files: Files,
+    /// What its nodes are named after: us1's admin token is `adm-<tag>-us1`.
+    tag: String,
     eu1: Node,
     /// us1 and us2.
     us_nodes: [Node; 2],
@@ -393,6 +395,7 @@ impl World {
         }
         World {
             _files: files,
+            tag: tag.to_string(),
             eu1,
             us_nodes,
             us_links,
@@ -413,6 +416,74 @@ impl World {
     fn heal(&self) {
         self.to_global.heal();
         self.to_us.heal();
+    }
+
+    /// What us's node `i` (0 for us1) says of its file of `tenant` (`GET
+    /// /_admin/tenants/<t>/lineage`): the status, and the body naming its
+    /// lineage and whether it is `ready`.
+    fn lineage_on(&self, i: usize, tenant: &str) -> (u16, String) {
+        let token = format!("adm-{}-us{}", self.tag, i + 1);
+        let target = format!("/_admin/tenants/{tenant}/lineage");
+        call(self.us_nodes[i].port, "GET", &target, "", Some(&token))
+    }
+
+    /// Waits until us's router places `tenant` with a copy a failover
+    /// promotes -- of its primary's lineage, and ready: it has heard from
+    /// that primary since it was told to follow it -- and answers which of
+    /// us's nodes holds the primary (0 for us1). A copy that has not taken
+    /// its primary's image is of a lineage of its own. And where us's router
+    /// failed the tenant over during the setup -- a renewal two thirds of a
+    /// lease late on a loaded machine -- the copy is the old primary's file,
+    /// made to follow the new one by the repair once its node answered
+    /// again, which lacks the history the new primary forked at until it has
+    /// heard from it. Its node refuses to promote either (409,
+    /// `tenants::Expected`), and the tenant stays on the node the test cuts
+    /// off. Read off the directory each time, as that failover moves both.
+    fn replicated(&self, tenant: &str) -> usize {
+        let on = |shown: &str, key: &str| {
+            let name = shown
+                .split(&format!("\"{key}\":\""))
+                .nth(1)?
+                .split('"')
+                .next()?;
+            match name {
+                "us1" => Some(0),
+                "us2" => Some(1),
+                _ => None,
+            }
+        };
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let (_, shown) = shard(self.us, "GET", &format!("/_shard/tenants/{tenant}"), "");
+            let mut told = format!("us's router placed it {shown}");
+            if let (Some(p), Some(r)) = (on(&shown, "node"), on(&shown, "replica")) {
+                let (status, theirs) = self.lineage_on(p, tenant);
+                let (copy_status, ours) = self.lineage_on(r, tenant);
+                let lineage = theirs
+                    .split("\"lineage\":\"")
+                    .nth(1)
+                    .and_then(|l| l.split('"').next());
+                if status == 200
+                    && copy_status == 200
+                    && lineage.is_some_and(|l| ours.contains(&format!("\"lineage\":\"{l}\"")))
+                    && ours.contains("\"ready\":true")
+                {
+                    return p;
+                }
+                told = format!(
+                    "{told}; its copy on us{} answered {copy_status} {ours}, its primary on us{} \
+                     {status} {theirs}",
+                    r + 1,
+                    p + 1
+                );
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{tenant} never had a copy that took its primary's image and heard from it, so \
+                 no failover would promote it: {told}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }
 
@@ -473,14 +544,6 @@ fn a_region_cut_off_keeps_writing_and_fails_over_inside_itself() {
     until("the standby's directory arrives", || {
         query(w.standby, "acme", r#"put notes {title: "standby"}"#).0 == 200
     });
-    // Its copy on us2 holds them, its primary's image taken: the failover
-    // below promotes it. A copy that has not is of a lineage of its own,
-    // which its node refuses to promote (409), and cut off from us1 it
-    // never takes the image: acme stayed on us1.
-    until("acme's copy on us2 holds its writes", || {
-        let (status, rows) = query(w.us_nodes[1].port, "acme", "get notes select title");
-        status == 200 && rows.contains("\"standby\"")
-    });
     // The global directory names its region and no node; us's router has
     // the placement.
     let (_, list) = shard(w.global, "GET", "/_shard/tenants", "");
@@ -535,15 +598,16 @@ fn a_region_cut_off_keeps_writing_and_fails_over_inside_itself() {
 
     // acme's node cut off from its region's router; its own clients still
     // reach it. It stops taking writes before us's router promotes acme's
-    // replica -- inside us, with eu out of reach. Its node is read here: a
-    // machine loaded enough to leave a renewal two thirds of a lease late
-    // has us's router fail acme over on its own before, as it must.
-    let (_, acme) = shard(w.us, "GET", "/_shard/tenants/acme", "");
-    let p = usize::from(acme.contains(r#""node":"us2""#));
+    // replica -- inside us, with eu out of reach. Its node is read here,
+    // once its copy is one the failover promotes: a machine loaded enough
+    // to leave a renewal two thirds of a lease late has us's router fail
+    // acme over on its own before, as it must.
+    let p = w.replicated("acme");
     let (old, new) = (&w.us_nodes[p], format!(r#""node":"us{}""#, 2 - p));
     w.us_links[p].cut();
     let (mut fenced, mut promoted, mut unknown) = (None, None, false);
-    until("us1 fenced and acme promoted on us2", || {
+    let what = format!("us{} fenced and acme promoted on us{}", p + 1, 2 - p);
+    until(&what, || {
         let (direct, body) = query(old.port, "acme", r#"put notes {title: "direct"}"#);
         match direct {
             200 => assert!(
@@ -571,7 +635,7 @@ fn a_region_cut_off_keeps_writing_and_fails_over_inside_itself() {
                 );
                 unknown = true;
             }
-            other => panic!("us1 answered {other}: {body}"),
+            other => panic!("us{} answered {other}: {body}", p + 1),
         }
         if promoted.is_none() && query(w.us, "acme", r#"put notes {title: "failed over"}"#).0 == 200
         {
