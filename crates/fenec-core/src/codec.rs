@@ -2,8 +2,9 @@
 //!
 //! Why not serde: (1) WASM bundle size, (2) so that segment bytes are
 //! *the same on disk as in memory*. The same byte sequence lives both in
-//! the file and in the arena; that is why no separate page cache (buffer
-//! pool) is needed -- a read decodes straight off the arena slice.
+//! the file and in the arena; that is why no buffer pool (a database's own
+//! copy of the file's pages) is needed -- a read decodes straight off the
+//! arena slice.
 
 use crate::error::{Error, Result};
 use crate::value::{DataType, Value, VecPrec};

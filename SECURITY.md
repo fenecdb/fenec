@@ -88,17 +88,36 @@ These are deliberate, and README explains each one:
   only append is given a scoped token. Against whoever holds the server's
   token and the file, an append-only log is a sealed archive
   (`fenec archive --key-file`) kept elsewhere.
-- **Two processes opening the same file corrupts it.** There is a single writer
-  and no lock file; this is why everything that writes a file runs as a thread
-  of one `fenec-server`.
+- **Two processes opening the same file corrupts it.** There is a single writer,
+  which is why everything that writes a file runs as a thread of one
+  `fenec-server`. `fenec-server --file`, `fenec mcp --file` and the native
+  library each take `<file>.lock` (an `fcntl` record lock, `fenec_abi::lock`)
+  and refuse a file another holds. Nothing else does: the `fenec` shell,
+  `fenec import`, embedded Rust's `fs::open` and the tenants of a `--dir`
+  node take no lock, so one process over each is the operator's to keep.
 - **A batch holds the database.** From its first write to its end every other
   writer waits on it, and readers on a batch that is still being written.
   A batch of reads alone holds the read lock: writers wait for it as for
   any read, readers go on beside it.
   An import that stops halfway cannot be rolled back.
-- **The whole database is resident**, with no page cache and no eviction. An
-  authenticated client can ask for work that costs memory; `--max-memory` is
-  the bound, and `make memory` is how you calibrate it.
+- **Nothing in memory is encrypted, and the live file is plain on disk.** The
+  indexes (a text index's terms, a hash index's keys, vectors), the documents
+  written since the last handover to the file (16 MB, 65 536 records or
+  16 384 writes) and, under `--no-mmap` or on a target that does not map
+  files, every document are anonymous memory, which swap and a core dump can
+  reach. A mapped file's pages are file-backed (`MAP_SHARED`, read-only): the
+  system drops them rather than swapping them, and a default Linux core dump
+  leaves out shared file mappings. Only an archive or a backup can be sealed
+  (`--key-file`), never the file a server serves: the disk's own encryption
+  covers that one, and swap and core dumps are the host's to protect.
+- **What the process holds is resident,** with no buffer pool of its own to
+  evict from: the indexes, and the documents too under `--no-mmap`, since a
+  mapped file's pages are the system's to keep or drop. A `--dir` node does
+  close a tenant nothing has touched for `--idle-close` seconds (300 by
+  default), and idle ones least recently used first when `--max-memory`
+  would be passed, until the next request opens it again. An authenticated
+  client can ask for work that costs memory; `--max-memory` is the bound, and
+  `make memory` is how you calibrate it.
 - **`md5` authentication is not supported** by `fenec import` and
   `--follow` when they sign in to PostgreSQL. SCRAM-SHA-256 or cleartext.
 

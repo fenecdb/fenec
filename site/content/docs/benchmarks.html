@@ -272,8 +272,10 @@ kind of system from the rest, and the tables read with that in mind:</p>
   <li><b>Everything is in memory.</b> Redis holds the whole data set in its
     memory and answers from it; nothing is read from disk, and a data set
     larger than the memory is not an option. fenec-server reads its file
-    through the page cache, PostgreSQL and MongoDB through their buffers.
-    What each held is the last table below.</li>
+    through the operating system's page cache, PostgreSQL and MongoDB through
+    their buffers. What each held is the last table below, and what it means
+    for a cache in front of fenec-server is on
+    <a href="/docs/redis#cache-in-front">Instead of Redis</a>.</li>
   <li><b>One thread runs the commands.</b> Every command runs on Redis's
     main thread, one after another, however many clients there are
     (<code>io-threads</code> is 1 as it comes, and raised it threads the
@@ -1455,7 +1457,7 @@ true neighbours.</p>
 <table>
 <tbody>
 <tr><td>write</td><td class="n"><b>28 656 documents/s</b> (3.5 s), HNSW indexing included, 8 cores</td></tr>
-<tr><td>storage</td><td class="n">52.7 MB · 527 bytes/document · 7 segments · no page cache</td></tr>
+<tr><td>storage</td><td class="n">52.7 MB · 527 bytes/document · 7 segments · no buffer pool of its own</td></tr>
 <tr><td>ANN k=10</td><td class="n">p50 <b>0.070 ms</b> · p95 0.086 ms · p99 0.097 ms</td></tr>
 <tr><td>ANN with a filter</td><td class="n">p50 <b>0.141 ms</b>, candidate set n/4</td></tr>
 <tr><td>ANN with a filter no row near the query matches</td><td class="n">p50 <b>1.15 ms</b>, the n/4 measured on every core</td></tr>

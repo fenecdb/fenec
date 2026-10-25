@@ -133,9 +133,11 @@ each a query error, never a cut result; a new limit takes that shape.
 
 ### Storage
 
-**[No page cache, and the file is mapped.](docs/design/storage.md#the-mapped-file)**
+**[No buffer pool of its own, and the file is mapped.](docs/design/storage.md#the-mapped-file)**
 `fs::open` maps it and a read decodes over its bytes; a rewrite points the
-stores at the new file (`Database::repoint`).
+stores at the new file (`Database::repoint`). "Page cache" always means the
+operating system's; a database's own is a "buffer pool", which fenecdb has
+none of -- in code, docs and site alike.
 
 **[Writes are handed over to the mapped file.](docs/design/storage.md#handover)**
 Past `HANDOVER_AT` or `HANDOVER_DOCS`, `Database::hand_over` points the

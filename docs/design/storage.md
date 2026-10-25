@@ -4,9 +4,12 @@ The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *Storag
 
 ## The mapped file
 
-**No page cache, and the file is mapped.** The byte sequence on disk and in
-memory are the same format, so a read decodes straight over the bytes --
-there is no eviction policy, no dirty pages and no cache of fenecdb's own.
+**No buffer pool of its own, and the file is mapped.** The byte sequence on
+disk and in memory are the same format, so a read decodes straight over the
+bytes -- there is no eviction policy, no dirty pages and no cache of fenecdb's
+own. "Page cache" is the operating system's, which keeps the mapped file's
+pages and starts cold after a restart, as for any file; it was called "no page
+cache" here before, which read as nothing being cached.
 `fs::open` maps the file where the target maps files (unix, 64-bit), so the
 documents stay in it and the process holds what it derived from them: the
 offset index, the hash, ordered and text indexes, the graph, and the

@@ -152,7 +152,7 @@ fn main() {
 
     let st = &db.stats()[0];
     println!(
-        "storage    {:.1} MB  ({:.0} bytes/doc, {} segments, no page cache)",
+        "storage    {:.1} MB  ({:.0} bytes/doc, {} segments, no buffer pool of its own)",
         st.bytes as f64 / 1e6,
         st.bytes as f64 / n as f64,
         st.segments

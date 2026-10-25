@@ -497,9 +497,10 @@ amd64 and 2.44 MB on arm64 — since no target is written in, both come out of
 the same file. <code>make docker</code> builds it, and
 <code>docker compose up -d</code> starts the compose file's.</p>
 
-<p><b>The memory limit comes from the data.</b> With no page cache there is
-no knob to tune: the file is mapped and what the process holds is the
-indexes, which is what <code>--max-memory</code> counts. Below that the
+<p><b>The memory limit comes from the data.</b> With no buffer pool of its own
+there is no knob to tune: the file is mapped, the system's page cache keeps its
+pages, and what the process holds is the indexes, which is what
+<code>--max-memory</code> counts. Below that the
 cgroup sends <code>SIGKILL</code>, the clean shutdown never runs and up to
 one sync interval is lost. Set <code>--max-memory</code> to a third of the
 container limit to bring that forward.</p>
