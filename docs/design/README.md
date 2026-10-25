@@ -35,7 +35,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 ## The original order
 
 1. [Zero dependencies is a hard rule](crates.md#zero-dependencies)
-2. [No page cache, and the file is mapped](storage.md#the-mapped-file)
+2. [No buffer pool of its own, and the file is mapped](storage.md#the-mapped-file)
 3. [A mapped database hands what it writes over to its file](storage.md#handover)
 4. [A block that outgrows 16 MB spills into the file before it lands](storage.md#spills)
 5. [Single writer, and readers beside it](engine.md#single-writer)

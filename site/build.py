@@ -717,7 +717,7 @@ CLAIMS = [
     ("site/content/docs/benchmarks.html", r"A, 50% updates, one client</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:pg:durable:A:1", 0),
     ("site/content/docs/benchmarks.html", r"A, 50% updates, one client</td>(?:<td[^>]*>(?:<b>)?[\d.]+ k(?:</b>)?</td>){2}<td class=\"n\">([\d.]+) k", "ycsb:mongo:durable:A:1", 0),
     ("site/content/index.html", r"YCSB B over HTTP, 16 clients, durable</dt><dd><b>([\d.]+) k ops/s", "ycsb:server-docker:durable:B:16", 0),
-    ("site/content/index.html", r"<span>PostgreSQL ([\d.]+) k, both in Docker", "ycsb:pg:durable:B:16", 0),
+    ("site/content/index.html", r"PostgreSQL ([\d.]+) k, both in Docker", "ycsb:pg:durable:B:16", 0),
     ("site/content/docs/vs-sqlite.html", r"B, 95% reads, 16 threads, buffered</td><td class=\"n\"><b>([\d.]+) k", "ycsb:fenec:buffered:B:16", 0),
     ("site/content/docs/vs-sqlite.html", r"B, 95% reads, 16 threads, buffered</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:sqlite:buffered:B:16", 0),
     ("site/content/docs/vs-sqlite.html", r"A, 50% updates, 16 threads, durable</td><td class=\"n\"><b>([\d.]+) k", "ycsb:fenec:durable:A:16", 0),
@@ -755,6 +755,39 @@ CLAIMS = [
     ("site/content/docs/benchmarks.html", r"A [\d.]+ k at one client and ([\d.]+) k at 16, F", "ycsb:server:durable:A:16", 0),
     ("site/content/docs/benchmarks.html", r"at 16, F ([\d.]+) k and [\d.]+ k\. Half", "ycsb:server:durable:F:1", 0),
     ("site/content/docs/benchmarks.html", r"at 16, F [\d.]+ k and ([\d.]+) k\. Half", "ycsb:server:durable:F:16", 0),
+    # A cache in front of fenec-server (concepts.html tells the architecture,
+    # these pages the comparison with Redis): the cells they quote, their
+    # latencies, the count of cells Redis led in and the read by key taken
+    # apart, each held to what the results (or benchmarks.html) say.
+    ("site/content/index.html", r"YCSB C, all reads, 16 clients, buffered</dt><dd><b>([\d.]+) k ops/s", "ycsb:server-docker:buffered:C:16", 0),
+    ("site/content/index.html", r"<span>p99 ([\d.]+) ms; Redis [\d.]+ k", "ycsbms:server-docker:buffered:C:16:slowest_p99", 0),
+    ("site/content/index.html", r"<span>p99 [\d.]+ ms; Redis ([\d.]+) k, p99", "ycsb:redis:buffered:C:16", 0),
+    ("site/content/index.html", r"Redis [\d.]+ k, p99 ([\d.]+) ms; both in Docker", "ycsbms:redis:buffered:C:16:slowest_p99", 0),
+    ("site/content/index.html", r"<span>Redis ([\d.]+) k, PostgreSQL [\d.]+ k, both in Docker", "ycsb:redis:durable:B:16", 0),
+    ("site/content/index.html", r"<b>(none) of \d+</b>", "redis:lost", 0),
+    ("site/content/index.html", r"<b>none of (\d+)</b>", "redis:both", 0),
+    ("site/content/index.html", r"spends\s+([\d.]+) ms\s+inside\s+the\s+server\s+of\s+a\s+[\d.]+ ms\s+round\s+trip", "rt:docker:read:inside", 0),
+    ("site/content/index.html", r"inside\s+the\s+server\s+of\s+a\s+([\d.]+) ms\s+round\s+trip", "rt:docker:read:round_trip", 0),
+    ("site/content/docs/redis.html", r"C: 100% read, 16 clients, buffered</td><td class=\"n\"><b>([\d.]+) k", "ycsb:server-docker:buffered:C:16", 0),
+    ("site/content/docs/redis.html", r"C: 100% read, 16 clients, buffered</td><td class=\"n\"><b>[\d.]+ k</b><br><small>p99 ([\d.]+) ms", "ycsbms:server-docker:buffered:C:16:slowest_p99", 0),
+    ("site/content/docs/redis.html", r"C: 100% read, 16 clients, buffered</td>(?:<td[^>]*>.*?</td>){1}<td class=\"n\">([\d.]+) k", "ycsb:redis:buffered:C:16", 0),
+    ("site/content/docs/redis.html", r"C: 100% read, 16 clients, buffered</td>(?:<td[^>]*>.*?</td>){1}<td class=\"n\">[\d.]+ k<br><small>p99 ([\d.]+) ms", "ycsbms:redis:buffered:C:16:slowest_p99", 0),
+    ("site/content/docs/redis.html", r"B: 95% read, 5% update, 16 clients, durable</td><td class=\"n\"><b>([\d.]+) k", "ycsb:server-docker:durable:B:16", 0),
+    ("site/content/docs/redis.html", r"B: 95% read, 5% update, 16 clients, durable</td><td class=\"n\"><b>[\d.]+ k</b><br><small>p99 ([\d.]+) ms", "ycsbms:server-docker:durable:B:16:slowest_p99", 0),
+    ("site/content/docs/redis.html", r"B: 95% read, 5% update, 16 clients, durable</td>(?:<td[^>]*>.*?</td>){1}<td class=\"n\">([\d.]+) k", "ycsb:redis:durable:B:16", 0),
+    ("site/content/docs/redis.html", r"B: 95% read, 5% update, 16 clients, durable</td>(?:<td[^>]*>.*?</td>){1}<td class=\"n\">[\d.]+ k<br><small>p99 ([\d.]+) ms", "ycsbms:redis:durable:B:16:slowest_p99", 0),
+    ("site/content/docs/redis.html", r"(none)\s+of\s+the\s+\d+\s+cells\s+measured\s+both\s+ways", "redis:lost", 0),
+    ("site/content/docs/redis.html", r"none\s+of\s+the\s+(\d+)\s+cells\s+measured\s+both\s+ways", "redis:both", 0),
+    ("site/content/docs/redis.html", r"takes\s+([\d.]+) ms\s+at\s+the\s+median\s+from\s+fenec-server", "ycsbms:server-docker:buffered:C:1:READ_p50", 0),
+    ("site/content/docs/redis.html", r"and\s+([\d.]+) ms\s+from\s+Redis", "ycsbms:redis:buffered:C:1:READ_p50", 0),
+    ("site/content/docs/redis.html", r"spends\s+([\d.]+) ms\s+inside\s+the\s+server\s+of\s+a\s+[\d.]+ ms\s+round\s+trip", "rt:docker:read:inside", 0),
+    ("site/content/docs/redis.html", r"inside\s+the\s+server\s+of\s+a\s+([\d.]+) ms\s+round\s+trip", "rt:docker:read:round_trip", 0),
+    ("README.md", r"fenec-server's C at 16 clients, buffered, is ([\d.]+) k against", "ycsb:server-docker:buffered:C:16", 0),
+    ("README.md", r"buffered, is [\d.]+ k against Redis's ([\d.]+) k, and its B", "ycsb:redis:buffered:C:16", 0),
+    ("README.md", r"and its B, durable, ([\d.]+) k against [\d.]+ k \(one node", "ycsb:server-docker:durable:B:16", 0),
+    ("README.md", r"and its B, durable, [\d.]+ k against ([\d.]+) k \(one node", "ycsb:redis:durable:B:16", 0),
+    ("README.md", r"Redis does more operations a second in (none) of the \d+ cells", "redis:lost", 0),
+    ("README.md", r"Redis does more operations a second in none of the (\d+) cells", "redis:both", 0),
 ]
 
 
@@ -822,6 +855,89 @@ def ycsb_facts():
     """Each YCSB cell's median ops/s, as `ycsb report` takes it."""
     return {"ycsb:" + ":".join(key): cell["ops_s"] for key, cell in ycsb_cells().items()
             if key[2] in YCSB_WORKLOADS}
+
+
+def ycsb_latency_facts():
+    """A latency a page quotes beside a cell, in microseconds, held to the
+    last digit it shows: `ycsbms:<system>:<mode>:<workload>:<threads>:<stat>`,
+    the stat being `slowest_p99` (the p99 the tables put under a figure) or
+    an operation's `READ_p50` or `READ_p99`. The pages that say a cache in
+    front of fenec-server saves nothing quote these, so they cannot drift
+    from the results they rest on."""
+    out = {}
+    for key, cell in ycsb_cells().items():
+        if key[2] not in YCSB_WORKLOADS:
+            continue
+        base = "ycsbms:" + ":".join(key)
+        if any(f"{op}_p99" in cell for op in YCSB_OPS):
+            out[base + ":slowest_p99"] = slowest_p99(cell)
+        for stat in ("READ_p50", "READ_p99"):
+            if stat in cell:
+                out[f"{base}:{stat}"] = cell[stat]
+    return out
+
+
+def redis_compared(cells):
+    """The cells measured for fenec-server in Docker and for Redis alike,
+    the same mode against the same, as (mode, workload, clients, ours,
+    theirs), durable first."""
+    out = []
+    for mode in ("durable", "buffered"):
+        for wl in YCSB_WORKLOADS:
+            for n in sorted({int(k[3]) for k in cells if k[0] == "redis" and k[1] == mode}):
+                ours = cells.get(("server-docker", mode, wl, str(n)))
+                theirs = cells.get(("redis", mode, wl, str(n)))
+                if ours and theirs:
+                    out.append((mode, wl, n, ours, theirs))
+    return out
+
+
+def redis_facts():
+    """How many cells were measured both ways (`redis:both`) and in how many
+    Redis did more operations a second (`redis:lost`). A page may say "none
+    of the 33 cells", and the build fails when one stops being so."""
+    compared = redis_compared(ycsb_cells())
+    if not compared:
+        return {}
+    return {"redis:both": len(compared),
+            "redis:lost": sum(1 for *_, ours, theirs in compared if theirs["ops_s"] > ours["ops_s"])}
+
+
+# A read by key in Docker taken apart (`make roundtrip-bench`) has no results
+# file: benchmarks.html's table is where its medians are recorded, so a page
+# quoting them is held to that table (`rt:docker:read:<part>`, microseconds).
+ROUND_TRIP_PAGE = os.path.join(ROOT, "content", "docs", "benchmarks.html")
+ROUND_TRIP_ROWS = (
+    ("rt:docker:read:round_trip",
+     r'<tr><td>round trip, p50</td><td class="n">[\d.]+ ms</td><td class="n"><b>([\d.]+) ms</b>'),
+    ("rt:docker:read:inside",
+     r'<tr><td>inside the server</td><td class="n">[\d.]+ ms</td><td class="n">([\d.]+) ms</td>'),
+)
+
+
+def round_trip_facts():
+    page = open(ROUND_TRIP_PAGE, encoding="utf-8").read()
+    out = {}
+    for fact, pattern in ROUND_TRIP_ROWS:
+        m = re.search(pattern, page)
+        if m:
+            out[fact] = float(m.group(1)) * 1000
+    return out
+
+
+# What the bench's figures give: every fact with the unit a drifted claim is
+# reported in, and the prefixes that say a fact is one of them.
+BENCH_FACTS = ("ycsb:", "ycsbms:", "redis:", "rt:")
+
+
+def bench_facts():
+    ycsb = ycsb_facts()
+    latency = {**ycsb_latency_facts(), **round_trip_facts()}
+    counts = redis_facts()
+    # `redis:lost` is how many cells Redis led in, which a page says as `none`.
+    unit = {**{k: " k ops/s" for k in ycsb}, **{k: " ms" for k in latency},
+            "redis:both": " cells measured both ways", "redis:lost": " (the cells Redis led in)"}
+    return {**ycsb, **latency, **counts}, unit
 
 
 # ---- Redis on benchmarks.html#ycsb
@@ -924,23 +1040,17 @@ def redis_tables(cells):
 def redis_lost(cells):
     """Every cell in which Redis does more operations a second than
     fenec-server in Docker, the same mode against the same mode."""
-    lost, compared = [], 0
-    for mode in ("durable", "buffered"):
-        for wl in YCSB_WORKLOADS:
-            for n in sorted({int(k[3]) for k in cells if k[0] == "redis" and k[1] == mode}):
-                ours = cells.get(("server-docker", mode, wl, str(n)))
-                theirs = cells.get(("redis", mode, wl, str(n)))
-                if not ours or not theirs:
-                    continue
-                compared += 1
-                if theirs["ops_s"] > ours["ops_s"]:
-                    clients = "one client" if n == 1 else f"{n} clients"
-                    lost.append(f"<li>{mode} {wl}, {clients}: {kops(ours['ops_s'])} k against "
-                                f"{kops(theirs['ops_s'])} k, p99 {ms(slowest_p99(ours))} ms against "
-                                f"{ms(slowest_p99(theirs))} ms</li>")
+    compared = redis_compared(cells)
+    lost = []
+    for mode, wl, n, ours, theirs in compared:
+        if theirs["ops_s"] > ours["ops_s"]:
+            clients = "one client" if n == 1 else f"{n} clients"
+            lost.append(f"<li>{mode} {wl}, {clients}: {kops(ours['ops_s'])} k against "
+                        f"{kops(theirs['ops_s'])} k, p99 {ms(slowest_p99(ours))} ms against "
+                        f"{ms(slowest_p99(theirs))} ms</li>")
     if not lost:
-        return f"<p>None of the {compared} cells measured both ways.</p>"
-    return (f"<p>{len(lost)} of the {compared} cells measured both ways:</p>\n<ul>\n"
+        return f"<p>None of the {len(compared)} cells measured both ways.</p>"
+    return (f"<p>{len(lost)} of the {len(compared)} cells measured both ways:</p>\n<ul>\n"
             + "\n".join(lost) + "\n</ul>")
 
 
@@ -1073,10 +1183,10 @@ def check_claims():
     if not os.path.exists(wasm):
         # The copy step above already said so. The bench's figures and the
         # studio's need no module, so they are still held to their truth.
-        ycsb = ycsb_facts()
-        unit = {**{k: " k ops/s" for k in ycsb}, "kb_studio_gz": " KB"}
-        return claims_against({**ycsb, "kb_studio_gz": studio_gz()}, unit,
-                              lambda f: f.startswith("ycsb:") or f == "kb_studio_gz")
+        bench, bench_unit = bench_facts()
+        unit = {**bench_unit, "kb_studio_gz": " KB"}
+        return claims_against({**bench, "kb_studio_gz": studio_gz()}, unit,
+                              lambda f: f.startswith(BENCH_FACTS) or f == "kb_studio_gz")
     size = os.path.getsize(wasm)
     wasm_gz, wasm_br = compressed(wasm)
     # The client is fenec.js and the two modules it imports, as a page loads
@@ -1122,12 +1232,12 @@ def check_claims():
         "version": workspace_version(),
         "kb_studio_gz": studio_gz(),
     }
-    ycsb = ycsb_facts()
+    bench, bench_unit = bench_facts()
     unit = {"glue": " lines", "version": "", "bytes": " bytes"}
     # Every size fact is in KB; without a default the report of a drifted
     # size died on a KeyError instead of saying which file drifted.
-    unit = {**{k: " KB" for k in truth}, **{k: " k ops/s" for k in ycsb}, **unit}
-    return claims_against({**truth, **ycsb}, unit, lambda f: True)
+    unit = {**{k: " KB" for k in truth}, **bench_unit, **unit}
+    return claims_against({**truth, **bench}, unit, lambda f: True)
 
 
 # The flags of fenec-shard, which docs/sharding-reference lists in a table of
@@ -1201,7 +1311,10 @@ def claims_against(truth, unit, wanted):
                 else "a module `make wasm-lite` did not build" if fact not in truth
                 else "a brotli size and `brotli` is not installed"
             )
-            why = "a YCSB cell crates/fenec-bench/ycsb/results.tsv does not hold" if fact.startswith("ycsb:") else why
+            why = ("a YCSB cell crates/fenec-bench/ycsb/results.tsv does not hold"
+                   if fact.startswith(("ycsb:", "ycsbms:", "redis:")) else
+                   "a row of benchmarks.html's round-trip table it no longer has"
+                   if fact.startswith("rt:") else why)
             problems.append(f"{rel}: /{pattern}/ claims {why}, so it went unchecked")
             continue
         for m in found:
@@ -1214,6 +1327,18 @@ def claims_against(truth, unit, wanted):
                 room = 0.5 * 10 ** -places + tol + 1e-9
                 said, drifted = float(said), abs(float(said) - want / 1000) > room
                 want = f"{want / 1000:.{places}f}"
+            elif fact.startswith(("ycsbms:", "rt:")):
+                # Milliseconds, to the last digit written.
+                places = len(said.partition(".")[2])
+                room = 0.5 * 10 ** -places + tol + 1e-9
+                said, drifted = float(said), abs(float(said) - want / 1000) > room
+                want = f"{want / 1000:.{places}f}"
+            elif fact.startswith("redis:"):
+                # A count; a page says `none` for zero.
+                said, want = (0 if said == "none" else int(said)), int(want)
+                drifted = said != want
+                said = "none" if said == 0 else said
+                want = "none" if want == 0 else want
             elif fact.startswith("kb"):
                 room = 0.5 + tol + (NOISE_KB if fact in COMPRESSED else 0)
                 said, drifted = int(said), abs(int(said) - want) > room

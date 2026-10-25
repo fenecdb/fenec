@@ -6,8 +6,9 @@
 //! 1. **Zero dependencies.** The core uses only `std`; the WASM output stays
 //!    small and auditable.
 //! 2. **No buffer pool.** Storage is immutable, append-only segments; the
-//!    byte format is identical on disk and in memory, so no page cache sits
-//!    in between. See [`store`].
+//!    byte format is identical on disk and in memory, so no cache of the
+//!    database's own sits in between (the operating system's page cache
+//!    keeps the mapped file's pages). See [`store`].
 //! 3. **Vectors are first class.** `vector<N>` is a type, `@hnsw` is an
 //!    index, `near` is a query clause -- not an add-on.
 //! 4. **Extension through plugins.** A registry of functions and write

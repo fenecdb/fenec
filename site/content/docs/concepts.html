@@ -1,17 +1,25 @@
 <!--
 title: How it works — fenecdb
-description: The design decisions under fenecdb — no page cache, a mapped file, vectors in the language, one writer — and what each one costs.
+description: The design decisions under fenecdb — no buffer pool of its own, a mapped file, vectors in the language, one writer — and what each one costs.
 -->
 
 <h1>How it works</h1>
 <p class="kicker">A handful of design decisions carry the whole engine, and
 this page gives what each one bought and what it cost.</p>
 
-<h2>No page cache</h2>
+<span id="no-page-cache"></span>
+<h2 id="no-buffer-pool">No buffer pool of its own</h2>
 
-<p>fenecdb keeps no cache of its own between the disk and your queries. The
-bytes on disk are already in the form a query reads, so there is nothing to
-copy in, evict or warm up.</p>
+<p>The operating system keeps the pages of the file in memory, and fenecdb
+reads a row straight from them: it copies nothing in between, so there is
+no buffer pool of its own to warm, evict or keep in step with the file. A
+page read often stays in memory with nothing to configure; one that is not
+there is read from the disk by the system, as for any file.</p>
+
+<p>The <b>page cache</b> on these pages is the operating system's, which
+every file has. What fenecdb leaves out is a <b>buffer pool</b>: the copy of
+the file's pages that a database keeps in memory of its own, with an eviction
+policy to run it.</p>
 
 <ul>
   <li><b>Writes only append.</b> Old data is never changed in place.</li>
@@ -22,9 +30,9 @@ copy in, evict or warm up.</p>
 </ul>
 
 <details class="deep"><summary>Details</summary>
-<p>Classic databases cut the disk into pages and copy those pages into a cache
-in user space. The eviction policy, dirty-page tracking, checkpoints and most
-of the locking cost all follow from that one structure.</p>
+<p>Classic databases cut the disk into pages and copy those pages into a buffer
+pool in user space. The eviction policy, dirty-page tracking, checkpoints and
+most of the locking cost all follow from that one structure.</p>
 
 <p>fenecdb skips the layer:</p>
 
@@ -32,19 +40,23 @@ of the locking cost all follow from that one structure.</p>
   <li>Segments are <b>immutable</b>. A write only appends to the active one,
     which is sealed at 8 MiB.</li>
   <li>The byte sequence on disk and the byte sequence in memory are <b>the same
-    format</b>, so there is no caching stage — a read decodes directly over the
-    arena slice.</li>
+    format</b>, so no stage copies pages into a cache of its own — a read
+    decodes directly over the mapped bytes.</li>
   <li>The only helper structure is the <code>HashMap&lt;DocId, Loc&gt;</code>
     offset index.</li>
   <li>Projection and filters decode a single field; the fields in front of it
     are skipped without allocating.</li>
 </ul>
 
-<p>No eviction policy, no dirty pages, no warm-up. Dead bytes are reclaimed by
-<code>compact</code>, which <code>fenec-server</code> and the native library
-run on their own (<a href="/docs/server#compaction">Compaction</a>): left to
-grow, a file of updated rows spreads its live records thin over pages of
-dead ones, and reads wait for the disk.</p>
+<p>No eviction policy, no dirty pages, no buffer pool to warm. The system's page
+cache is cold after a restart, as for any file, and a page's first read comes
+from the disk. Dead bytes are reclaimed by <code>compact</code>, which
+<code>fenec-server</code> and the native library run on their own
+(<a href="/docs/server#compaction">Compaction</a>): left to grow, a file of
+updated rows spreads its live records thin over pages of dead ones, and reads
+wait for the disk. What this means for a cache in front of the server, with
+the measurements and their conditions, is on
+<a href="/docs/redis#cache-in-front">Instead of Redis</a>.</p>
 </details>
 
 <h2 id="the-file-is-mapped">The file is mapped</h2>

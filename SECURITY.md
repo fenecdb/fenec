@@ -96,9 +96,11 @@ These are deliberate, and README explains each one:
   A batch of reads alone holds the read lock: writers wait for it as for
   any read, readers go on beside it.
   An import that stops halfway cannot be rolled back.
-- **The whole database is resident**, with no page cache and no eviction. An
-  authenticated client can ask for work that costs memory; `--max-memory` is
-  the bound, and `make memory` is how you calibrate it.
+- **What the process holds is resident**, with no buffer pool of its own and
+  no eviction: the indexes, and the documents too under `--no-mmap`, since a
+  mapped file's pages are the system's to keep or drop. An authenticated
+  client can ask for work that costs memory; `--max-memory` is the bound, and
+  `make memory` is how you calibrate it.
 - **`md5` authentication is not supported** by `fenec import` and
   `--follow` when they sign in to PostgreSQL. SCRAM-SHA-256 or cleartext.
 

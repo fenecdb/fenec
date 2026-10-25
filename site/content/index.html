@@ -1,6 +1,6 @@
 <!--
 title: fenecdb — lives anywhere, hears everything
-description: One database from the screen to the server: state your screens follow live, a replica that syncs with your server, a server with no cache in front, many clients writing to one file through one writer, a file per tenant in every region, and search built in. The engine compiles to 330 KB of gzipped WebAssembly and runs as a server any language reaches over HTTP.
+description: One database from the screen to the server: state your screens follow live, a replica that syncs with your server, a server that needs no cache in front, many clients writing to one file through one writer, a file per tenant in every region, and search built in. The engine compiles to 330 KB of gzipped WebAssembly and runs as a server any language reaches over HTTP.
 -->
 
 <section class="hero">
@@ -45,8 +45,8 @@ description: One database from the screen to the server: state your screens foll
       <h1 class="hero-say reveal">Lives anywhere.<br> Hears everything.</h1>
       <p class="hero-sub reveal">One database from the screen to the server:
         state your screens follow live, a replica that syncs with your server,
-        a server with no cache in front of it, a file per tenant in every
-        region, and search built in.</p>
+        a server that needs no cache in front of it, a file per tenant in
+        every region, and search built in.</p>
       <p class="hero-cta reveal">
         <a class="btn btn-fill" href="docs/quickstart.html">Get started</a>
         <a class="btn btn-line" href="playground.html">Try it in the browser</a>
@@ -130,7 +130,7 @@ description: One database from the screen to the server: state your screens foll
   <a href="#state"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2-6 4 12 2-6h6"/></svg><b>App state</b><span>A write redraws every screen that reads it</span></a>
   <a href="#sync"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="8" height="16" rx="2"/><path d="M6 17h2"/><path d="M14 9h7l-2.5-2.5M21 15h-7l2.5 2.5"/></svg><b>Local and server</b><span>Written offline, sent once, on every device</span></a>
   <a href="#writers"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 3h6l4 4v14H11z"/><path d="M17 3v4h4"/><path d="M2 8h6M2 12h6M2 16h6"/></svg><b>Many writers, one file</b><span>Writes in microseconds, disk syncs shared</span></a>
-  <a href="#traffic"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg><b>No cache in front</b><span>A row by id over HTTP in 0.022 ms</span></a>
+  <a href="#traffic"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg><b>Needs no cache in front</b><span>A row by id over HTTP in 0.022 ms</span></a>
   <a href="#tenants"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="13" width="16" height="7" rx="1.5"/><path d="M8 7.5h.01M8 16.5h.01"/></svg><b>Scale by tenant</b><span>A file each, failed over, in every region</span></a>
   <a href="#search"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><path d="M15 15l6 6"/><path d="M7 8.5h6M7 11.5h4"/></svg><b>Search built in</b><span>Words, typos and facets, then meaning</span></a>
 </nav>
@@ -214,11 +214,12 @@ description: One database from the screen to the server: state your screens foll
 
 <section class="band lit" id="traffic">
   <div class="band-in">
-    <h2 class="rise">Traffic without a cache in front</h2>
-    <p class="lede rise">The file is mapped into memory, and a read decodes
-      the row straight from its bytes. There is no cache of fenecdb's own to
-      warm, evict or keep in step with the database, so the server can take
-      the reads you would have put a cache in front of.</p>
+    <h2 class="rise">Traffic that needs no cache</h2>
+    <p class="lede rise">The operating system keeps the pages of the file in
+      memory, and a read decodes the row straight from them. fenecdb copies
+      nothing in between, so there is no buffer pool of its own to warm, evict
+      or keep in step with the database, and a separate cache in front of the
+      server is usually unnecessary while the working set fits in memory.</p>
 
     <figure class="motion rise" data-scenes="traffic">
       <canvas role="img" aria-label="A cache in front of the server is crossed out and fades away. Requests from eight clients go straight to fenec-server, which reads each row from its file mapped into memory, and the answers come back in the mark's light."></canvas>
@@ -227,13 +228,25 @@ description: One database from the screen to the server: state your screens foll
     <dl class="versus rise">
       <div><dt>A row by id over HTTP</dt><dd><b>0.022 ms</b><span>median, one client</span></dd></div>
       <div><dt>Rows by id, eight clients at once</dt><dd><b>149 268/s</b></dd></div>
-      <div><dt>A row written over HTTP</dt><dd><b>0.022 ms</b><span>median, one client</span></dd></div>
-      <div><dt>YCSB B over HTTP, 16 clients, durable</dt><dd><b>18.2 k ops/s</b><span>PostgreSQL 13.0 k, both in Docker; <a href="docs/benchmarks.html#ycsb">every cell</a></span></dd></div>
+      <div><dt>YCSB C, all reads, 16 clients, buffered</dt><dd><b>18.4 k ops/s</b><span>p99 2.9 ms; Redis 14.0 k, p99 4.0 ms; both in Docker</span></dd></div>
+      <div><dt>YCSB B over HTTP, 16 clients, durable</dt><dd><b>18.2 k ops/s</b><span>Redis 9.25 k, PostgreSQL 13.0 k, both in Docker; <a href="docs/benchmarks.html#ycsb">every cell</a></span></dd></div>
+      <div><dt>Cells where Redis did more operations a second</dt><dd><b>none of 33</b><span>the same durability mode against the same</span></dd></div>
     </dl>
-    <p class="after rise">Over 10 000 rows on loopback, an M1, one
-      <code>POST /query</code> a request on a kept-alive connection.
-      <a href="docs/benchmarks.html#requests">Method</a> and
-      <a href="docs/concepts.html#the-file-is-mapped">why the file is mapped</a></p>
+    <p class="after rise">The first two figures are over 10 000 rows on loopback,
+      an M1, one <code>POST /query</code> a request on a kept-alive connection
+      (<a href="docs/benchmarks.html#requests">method</a>). The YCSB figures are one
+      node, 1 000 000 records of 1 KB, fenec-server and Redis 7.4 in Docker
+      (<a href="docs/benchmarks.html#ycsb-redis">every cell</a>).</p>
+    <p class="after rise">In Docker a read by key spends 0.023 ms inside the server of
+      a 0.288 ms round trip and the rest is the network, so a cache in front can
+      take off at most the time spent inside the server, and brings an invalidation
+      to keep right.
+      This holds while the working set fits in memory: past it a read waits
+      for the disk, as in any database (<a href="docs/server.html#compaction">before
+      the file outgrows the page cache</a>). It is about the database&rsquo;s
+      reads, not an HTTP or CDN response cache.
+      <a href="docs/redis.html#cache-in-front">The figures and their conditions</a>
+      and <a href="docs/concepts.html#no-buffer-pool">why there is no buffer pool of its own</a></p>
   </div>
 </section>
 
