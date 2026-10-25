@@ -82,18 +82,41 @@ and `in` takes one per element (`in [$2, $3]`), since a parameter binds a
 value and not a list.
 
 The FenecQL reference pages show an example's statement beside the same
-query in each builder, in tabs. The tabs are written from golden cases by
+query in each builder, in tabs, and Your language's builder section is a
+tour in the same tabs. The tabs are written from golden cases by
 `site/builder_tabs.py`, from `{{builder "case" ...}}` above the page's
 block. Snippets written by hand in seven languages would drift from the
 builders, which is what the golden file is there to stop; a tab rendered
 from a case can be held to it.
 
-- **The page's statements stay as they were.** The build holds each case's
-  statement to the page's: the text, each parameter written in as FenecQL
-  writes the value or matched to a `$n` the page has there. So only an
-  example the builders make byte for byte gets tabs. `fuzzy` without a
-  number, `facet` before `limit` and `match` before `near` are FenecQL the
-  builders write otherwise, and those blocks have none.
+- **A page's statement is the one the builders send.** The build holds
+  each case's statement to the page's: the text, each parameter written in
+  as FenecQL writes the value or matched to a `$n` the page has there. So
+  only an example the builders make byte for byte gets tabs. Where the
+  builders' order reads as well, the page took it: `order x asc` with its
+  direction written, `facet` after `limit` and `order`, `select` before
+  `where`, and a `lookup` level's list before its `order` and `limit` (the
+  second pass, which also wrote JSON keys bare and split each
+  `create`/`alter` group off into a block of its own, since no builder
+  writes one). The rest stays as written, with no tabs, where the builders
+  have no form for it or the page leans on its own wording: `fuzzy`
+  without a number (the page teaches the default), `match` before `near`
+  in a `fuse` (the text-search page leads with the words), `insert` (every
+  builder's insert sends `put`), one `$n` in two places (a builder binds
+  each use apart), `in (get ...)` (the JavaScript builder alone takes an
+  inner query, and the golden file has no word for one), an `order` key
+  that is an expression, `explain` with its plan, and a block holding any
+  of these, which is not split to tab the rest.
+- **A placeholder over no block writes its FenecQL tab.** languages.html's
+  tour of the builder has no statement of its own in the prose, so
+  `{{builder ...}}` alone on its line makes the FenecQL tab of the cases:
+  each statement with its parameters written in, broken before a clause
+  where it passes 72 characters and before every `lookup` level. A
+  parameter text holding a character FenecQL's strings cannot write (a C0
+  control, U+0085, U+2028, U+2029: FenecQL has no `\u` escape) fails the
+  build. The tour replaced two tables of the seven builders' spellings side
+  by side, a call a cell: cut off on the right at a phone's width, written
+  by hand and run by nothing.
 - **Each language is proven its own way.** The JavaScript and Python tabs
   run as the page shows them, against `connect` with a recording `fetch`
   and a `Client` whose `query` records (`builder_tabs.py --check`, CI's

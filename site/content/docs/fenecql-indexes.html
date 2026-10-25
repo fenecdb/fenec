@@ -310,10 +310,13 @@ the same values in every part.</p>
   title    text,
   @sorted(owner, created desc)
 )
-get posts where owner = $1 order created desc limit 20     -- a run of the index, 20 rows read
+create index on pages (org, slug) @unique                   -- or @unique(org, slug) in the collection
+</pre>
+
+{{builder "docs: an owner's newest posts" "docs: three owners' newest posts" "docs: an owner's posts counted since a time"}}
+<pre data-lang="fenecql">get posts where owner = $1 order created desc limit 20     -- a run of the index, 20 rows read
 get posts where owner in [$1, $2, $3] order created desc limit 20   -- three runs, merged
 get posts where owner = $1 and created >= $2 count          -- counted off the index
-create index on pages (org, slug) @unique                   -- or @unique(org, slug) in the collection
 </pre>
 
 <ul>
@@ -442,10 +445,13 @@ while.</p>
 </ul>
 
 <details class="deep"><summary>The reaper, and what @ttl costs, measured</summary>
+{{builder "docs: a session seen" "docs: a session seen again" "docs: a user's sessions"}}
 <pre data-lang="fenecql">put sessions {user: "ada", seen: now()}
 set sessions {seen: now()} where user = "ada"        -- seen again: lives on
 get sessions where user = "ada"                       -- nothing once 30 minutes pass
-create index on events (at) @ttl(7d)                  -- an existing timestamp field
+</pre>
+
+<pre data-lang="fenecql">create index on events (at) @ttl(7d)                  -- an existing timestamp field
 alter collection sessions alter field seen @ttl(1h)   -- another expiry
 alter collection sessions alter field seen @sorted    -- none: the rows live
 </pre>

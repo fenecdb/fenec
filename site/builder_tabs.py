@@ -16,6 +16,13 @@ language with the case's chain written in that language's builder, and the
 statement it sends. FenecQL's tab keeps nothing (`data-keep="false"`), so
 the reader's language, where one was chosen, is what a box opens on.
 
+A placeholder over no FenecQL block makes its FenecQL tab of the cases --
+each statement with its parameters written in, broken before its clauses
+where it is long (`written`) -- for a page whose prose has no statement of
+its own to hold them to, as languages.html's tour of the builder:
+
+    {{builder "docs: a page of documents with their comments" "docs: a document inserted"}}
+
 Every tab's code is code that works, each language proven its own way:
 
   JavaScript   run here (`--check`): each snippet as the page shows it, in
@@ -1310,10 +1317,76 @@ def render(lang, name):
 
 # -------------------------------------------------------------------- the box
 
+# The block under the placeholder is the box's FenecQL tab; with none, the
+# tab is written from the cases (`written`).
 PLACEHOLDER = re.compile(
-    r'\{\{builder(?P<names>(?:\s+"[^"]+")+)\s*\}\}\s*\n'
-    r'(?P<pre><pre data-lang="fenecql"[^>]*>(?P<code>[\s\S]*?)</pre>)')
+    r'\{\{builder(?P<names>(?:\s+"[^"]+")+)\s*\}\}'
+    r'(?:\s*\n(?P<pre><pre data-lang="fenecql"[^>]*>(?P<code>[\s\S]*?)</pre>))?')
 NAME = re.compile(r'"([^"]+)"')
+
+# Where a statement too long for its line is broken: before a clause, outside
+# any bracket and string.
+CLAUSES = ("select", "where", "group", "near", "match", "rerank", "fuse", "order", "limit", "offset",
+           "require", "count", "facet", "lookup", "returning")
+
+
+def _texts(v):
+    """Every text in a value, its keys among them."""
+    if isinstance(v, str):
+        yield v
+    elif isinstance(v, list):
+        for x in v:
+            yield from _texts(x)
+    elif isinstance(v, dict):
+        for k, x in v.items():
+            yield k
+            yield from _texts(x)
+
+
+def written(c):
+    """A case's statement as a page writes it: each parameter written in as
+    FenecQL writes the value, and one longer than WIDTH broken before its
+    clauses, a line going on indented -- before each `lookup` level, whose
+    clauses are its children's."""
+    out = []
+    for p in re.split(r"(\$\d+)", c["text"]):
+        if not p.startswith("$"):
+            out.append(p)
+            continue
+        v = c["params"][int(p[1:]) - 1]
+        if any(ord(ch) in ESCAPED for s in _texts(v) for ch in s):
+            # FenecQL's strings take no `\u` escape: such a value is a page's
+            # own block to write.
+            raise SystemExit(f"builder tabs: case {c['name']!r} binds a text FenecQL cannot write in")
+        out.append(literal(v))
+    text = "".join(out)
+    if len(text) <= WIDTH:
+        return text
+    cuts, depth, quote, i = [0], 0, None, 0
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 1
+            elif ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == " " and not depth and re.match(rf"({'|'.join(CLAUSES)}) ", text[i + 1:]):
+            cuts.append(i)
+        i += 1
+    parts = [text[a:b] for a, b in zip(cuts, cuts[1:] + [len(text)])]
+    lines = [parts[0]]
+    for p in parts[1:]:
+        if p.startswith(" lookup ") or len(lines[-1]) + len(p) > WIDTH:
+            lines.append("  " + p[1:])
+        else:
+            lines[-1] += p
+    return "\n".join(lines)
 
 
 def sends(names):
@@ -1328,6 +1401,11 @@ def sends(names):
 
 
 def box(names, pre, code, where):
+    if pre is None:
+        # No block of the page's: the statements as the cases make them, a
+        # blank line between two as between the tabs' chains.
+        code = html.escape("\n\n".join(written(case(n)) for n in names), quote=False)
+        pre = f'<pre data-lang="fenecql">{code}</pre>'
     found = statements(html.unescape(code))
     if len(found) != len(names):
         raise SystemExit(
@@ -1361,11 +1439,13 @@ def expand(raw, where="a page"):
         return raw
 
     def sub(m):
+        if m.group("pre") is None and raw[m.end():].lstrip().startswith("<pre"):
+            raise SystemExit(f'{where}: a {{{{builder "case"}}}} over a block that is not <pre data-lang="fenecql">')
         return box(NAME.findall(m.group("names")), m.group("pre"), m.group("code"), where)
 
     out = PLACEHOLDER.sub(sub, raw)
     if "{{builder" in out:
-        raise SystemExit(f'{where}: a {{{{builder "case"}}}} not followed by the <pre data-lang="fenecql"> it is for')
+        raise SystemExit(f'{where}: a {{{{builder}}}} that names no case')
     return out
 
 
@@ -1387,7 +1467,7 @@ def used():
 # ------------------------------------------------------- the SDKs' test files
 
 WRITTEN = "Written by site/builder_tabs.py (make docs-builder): do not edit."
-HEADER = ("The code of each builder tab on the site's FenecQL pages, as the page shows it, run against a "
+HEADER = ("The code of each builder tab on the site, as the page shows it, run against a "
           "transport that records and held to the statement its case of integrations/builder-golden.json "
           "makes: a tab shows code this SDK runs. make docs-builder writes the file again as the pages' "
           "tabs change, and site/builder_tabs.py --check fails while it is behind them.")

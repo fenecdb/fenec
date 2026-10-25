@@ -59,7 +59,11 @@ SDKs (`make docs-builder` writes them: `integrations/go/docs_builder_test.go`
 and the like), which their own jobs run, and the check fails while they are
 behind the pages. A new example takes a case ending at an endpoint (`rows`,
 `count`, `update` ...) in `web/golden.mjs` (`make builder-golden`), the
-placeholder, then `make docs-builder`. FenecQL's tab keeps no language
+placeholder, then `make docs-builder`. A placeholder alone on its line, over
+no FenecQL block, writes the FenecQL tab from its cases -- each statement with
+its parameters written in, broken before its clauses where it is long -- as
+Your language's tour of the builder does, its prose having no statement of
+its own. FenecQL's tab keeps no language
 (`data-keep="false"`), so a box opens on the reader's language where one was
 chosen; JavaScript's tab is "JavaScript" in every box of languages, Your
 language's and the Quickstart's too, or one would not open on the other's
