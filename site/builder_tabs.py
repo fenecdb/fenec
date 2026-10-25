@@ -66,8 +66,26 @@ def golden():
     return _cases
 
 
+# Cases of the check's own, never on a page and not the golden file's: a
+# text holding every character a literal escapes, in a filter and in a
+# document, written by every renderer and run as each language's tab is --
+# each must send the text it was given. The JS builder makes these
+# statements of these chains, as the golden file's cases show for any text.
+SPECIALS = "".join(map(chr, (0, 1, 9, 10, 13, 31, 0x85, 0x2028, 0x2029))) + " \"'\\$`${x}$1\\(x) …"
+LINES = "one two\r\nthree\u0085four "
+ESCAPES = {
+    "escapes: every character a literal escapes, in a filter": {
+        "steps": [{"op": "from", "args": ["docs"]}, {"op": "where", "args": ["title", SPECIALS]}, {"op": "rows"}],
+        "text": "get docs where title = $1", "params": [SPECIALS]},
+    "escapes: line ends, in a document": {
+        "steps": [{"op": "from", "args": ["docs"]}, {"op": "where", "args": ["id", 1]},
+                  {"op": "update", "args": [{"title": LINES, "note": SPECIALS}]}],
+        "text": "set docs {title: $1, note: $2} where id = $3", "params": [LINES, SPECIALS, 1]},
+}
+
+
 def case(name):
-    c = golden().get(name)
+    c = golden().get(name) or ESCAPES.get(name)
     if c is None:
         raise SystemExit(f"builder tabs: no case {name!r} in integrations/builder-golden.json")
     if "error" in c:
@@ -84,13 +102,16 @@ ENDPOINTS = ("rows", "first", "count", "explain", "insert", "update", "upsert", 
 
 
 def _uncommented(line):
-    """A line without its `--` comment, a string's `--` kept."""
-    quote = None
+    """A line without its `--` comment, a string's `--` kept, an escaped
+    quote no end of its string."""
+    quote, escaped = None, False
     for i, ch in enumerate(line):
-        if quote:
+        if escaped:
+            escaped = False
+        elif quote:
             if ch == "\\":
-                continue
-            if ch == quote:
+                escaped = True
+            elif ch == quote:
                 quote = None
         elif ch in "\"'":
             quote = ch
@@ -125,7 +146,7 @@ def literal(v):
     if isinstance(v, (int, float)):
         return _num(v)
     if isinstance(v, str):
-        return json.dumps(v, ensure_ascii=False)
+        return quoted(v, '"')
     if isinstance(v, list):
         return "[" + ", ".join(literal(x) for x in v) + "]"
     return "{" + ", ".join(f"{k}: {literal(x)}" for k, x in v.items()) + "}"
@@ -175,6 +196,28 @@ class Call:
         return f"{self.name}{self.open}{', '.join(self.args)}{self.close}"
 
 
+# What every renderer writes as an escape, never as itself: the C0
+# controls (`\r` among them), U+0085, U+2028 and U+2029, which some
+# lexers take for a line's end -- C# refuses U+2028 in a string literal.
+ESCAPED = frozenset(range(0x20)) | {0x85, 0x2028, 0x2029}
+
+
+def quoted(s, q, also="", u="\\u%04x"):
+    """`s` as a string literal between `q`s: a backslash, the quote and
+    `also` (`$`, a template's start in Kotlin and Dart) escaped by a
+    backslash, and each of ESCAPED as `u` spells a code point -- `\\u0085`,
+    or Swift's `\\u{85}`."""
+    out = [q]
+    for ch in s:
+        if ch == "\\" or ch == q or ch in also:
+            out.append("\\" + ch)
+        elif ord(ch) in ESCAPED:
+            out.append(u % ord(ch))
+        else:
+            out.append(ch)
+    return "".join(out) + q
+
+
 def _ident_js(k):
     return re.fullmatch(r"[A-Za-z_$][\w$]*", k) is not None
 
@@ -199,6 +242,13 @@ class Lang:
 
     name = code = ""
     indent = "    "
+    # Where the code's names come from, its block's label: the import, with
+    # the helpers called where a language imports each by name.
+    IMPORT, HELPERS = "", ()
+
+    def needs(self, code):
+        used = [h for h in self.HELPERS if re.search(rf"(?<![\w.]){h}\(", code)]
+        return self.IMPORT.format(", ".join(used) and ", " + ", ".join(used))
 
     # -- the chain, laid out
 
@@ -263,10 +313,12 @@ class Lang:
 
 class JS(Lang):
     name, code = "JavaScript", "js"
+    IMPORT = "import {{ connect{} }} from '@fenecdb/web/client'"
+    HELPERS = ("or", "and", "not", "raw", "inc", "expr", "bucket", "countDistinct", "distance", "first", "last")
     indent = "  "
 
     def s(self, v):
-        return "'" + v.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n") + "'"
+        return quoted(v, "'")
 
     def v(self, x):
         k, w = _special(x)
@@ -375,10 +427,12 @@ class JS(Lang):
 
 class Python(Lang):
     name, code = "Python", "python"
+    IMPORT = "from fenecdb import Client{}"
+    HELPERS = ("or_", "and_", "not_", "raw", "inc", "expr", "bucket", "count_distinct", "distance", "first", "last")
     SNAKE = {"parentKey": "parent_key", "ifAbsent": "if_absent"}
 
     def s(self, v):
-        return json.dumps(v, ensure_ascii=False)
+        return quoted(v, '"')
 
     def v(self, x):
         k, w = _special(x)
@@ -485,10 +539,11 @@ class Python(Lang):
 
 class Go(Lang):
     name, code = "Go", "go"
+    IMPORT = 'import fenecdb "github.com/fenecdb/fenecdb/integrations/go"'
     indent = "\t"
 
     def s(self, v):
-        return json.dumps(v, ensure_ascii=False)
+        return quoted(v, '"')
 
     def v(self, x, vector=False):
         k, w = _special(x)
@@ -678,11 +733,12 @@ class Go(Lang):
 
 class CSharp(Lang):
     name, code = ".NET", "csharp"
+    IMPORT = "using FenecDb;"
     ASYNC = {"rows": "RowsAsync", "first": "FirstAsync", "count": "CountAsync", "explain": "ExplainAsync",
              "insert": "InsertAsync", "update": "UpdateAsync", "upsert": "UpsertAsync", "delete": "DeleteAsync"}
 
     def s(self, v):
-        return json.dumps(v, ensure_ascii=False)
+        return quoted(v, '"')
 
     def v(self, x, vector=False):
         k, w = _special(x)
@@ -837,9 +893,10 @@ class CSharp(Lang):
 
 class Swift(Lang):
     name, code = "Swift", "swift"
+    IMPORT = "import FenecDB"
 
     def s(self, v):
-        return '"' + v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t") + '"'
+        return quoted(v, '"', u="\\u{%x}")
 
     def v(self, x, top=True):
         """A value: `top`, an argument standing alone (`any FenecValue`),
@@ -987,9 +1044,10 @@ class Swift(Lang):
 
 class Kotlin(Lang):
     name, code = "Kotlin", "kotlin"
+    IMPORT = "import com.fenecdb.*"
 
     def s(self, v):
-        return '"' + v.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("\n", "\\n") + '"'
+        return quoted(v, '"', also="$")
 
     def v(self, x, vector=False):
         k, w = _special(x)
@@ -1112,9 +1170,10 @@ class Kotlin(Lang):
 
 class Dart(Lang):
     name, code = "Dart", "dart"
+    IMPORT = "import 'package:fenecdb/fenecdb.dart';"
 
     def s(self, v):
-        return "'" + v.replace("\\", "\\\\").replace("'", "\\'").replace("$", "\\$").replace("\n", "\\n") + "'"
+        return quoted(v, "'", also="$")
 
     def v(self, x):
         k, w = _special(x)
@@ -1281,12 +1340,16 @@ def box(names, pre, code, where):
                 f"which is not the page's\n  {stmt}")
     out = ['<div class="langs builder" data-langs>',
            f'<div class="lang" data-name="FenecQL" data-keep="false">\n{pre}\n</div>']
-    sent = html.escape(sends(names), quote=False)
     for lang in LANGS:
         snippet = "\n\n".join(render(lang, n) for n in names)
         out.append(f'<div class="lang" data-name="{lang.name}">\n'
-                   f'<pre data-lang="{lang.code}">{html.escape(snippet, quote=False)}</pre>\n'
-                   f'<pre data-lang="fenecql" data-label="sends">{sent}</pre>\n</div>')
+                   f'<pre data-lang="{lang.code}" data-label="{html.escape(lang.needs(snippet))}">'
+                   f'{html.escape(snippet, quote=False)}</pre>\n</div>')
+    # Once for every tab, which the widget leaves showing beside the
+    # panels: the same statements under seven tabs were seven copies in the
+    # page's text, its search sections and llms-full.txt.
+    out.append(f'<div class="builder-sends">\n<pre data-lang="fenecql" data-label="sends">'
+               f'{html.escape(sends(names), quote=False)}</pre>\n</div>')
     out.append("</div>")
     return "\n".join(out)
 
@@ -1362,10 +1425,11 @@ def go_test(names):
     for n in names:
         c = case(n)
         body.append(
-            f"\tt.Run({json.dumps(n, ensure_ascii=False)}, func(t *testing.T) {{\n"
+            f"\tt.Run({lang.s(n)}, func(t *testing.T) {{\n"
+            # A tab that sent nothing finds no body of the tab before it.
+            "\t\trec.body = nil\n"
             f"\t\t_, err := {_indented(render(lang, n), chr(9) * 2).lstrip()}\n"
-            f"\t\tsent(t, err, {json.dumps(c['text'], ensure_ascii=False)}, "
-            f"`{json.dumps(c['params'], ensure_ascii=False)}`)\n"
+            f"\t\tsent(t, err, {lang.s(c['text'])}, {lang.s(json.dumps(c['params'], ensure_ascii=False))})\n"
             "\t})\n")
     return f"""// Code generated by site/builder_tabs.py (make docs-builder); DO NOT EDIT.
 
@@ -1420,13 +1484,12 @@ def cs_test(names):
     for n in names:
         c = case(n)
         body.append(
-            f"    [Fact(DisplayName = {json.dumps(n, ensure_ascii=False)})]\n"
+            f"    [Fact(DisplayName = {lang.s(n)})]\n"
             f"    public async Task {_ident(n, True, taken)}()\n"
             "    {\n"
             "        using var db = Db(out var sent);\n"
             f"{_indented(render(lang, n), ' ' * 8)}\n"
-            f"        Sends(sent, {json.dumps(c['text'], ensure_ascii=False)}, "
-            f"{json.dumps(json.dumps(c['params'], ensure_ascii=False), ensure_ascii=False)});\n"
+            f"        Sends(sent, {lang.s(c['text'])}, {lang.s(json.dumps(c['params'], ensure_ascii=False))});\n"
             "    }\n")
     return f"""// {WRITTEN}
 
@@ -1651,7 +1714,9 @@ void main() {{
 
 # Each file, and the formatter its SDK's tests hold it to, run where the file
 # is: `dart format` lays a file out by its package's language version, which
-# it reads off what `dart pub get` writes (3.4's style, which adds no comma).
+# it reads off what `dart pub get` writes -- 3.4's style; from a 3.7
+# constraint on it writes a comma after a broken list's last item, which the
+# comparison below allows for.
 TESTS = {
     "integrations/go/docs_builder_test.go": (go_test, None),
     "integrations/dotnet/FenecDb.Tests/DocsBuilderTests.cs": (cs_test, None),
@@ -1662,13 +1727,73 @@ TESTS = {
 }
 
 
-def _bare(text):
-    # The formatters move only whitespace, so a file is compared without it.
-    return re.sub(r"\s+", "", text)
+# Each file's string syntax: its quotes, which take a backslash's escape;
+# its raw strings, which take none; Dart's `r'...'`.
+STRINGS = {
+    ".go": {"quotes": "\"'", "raw": ("`",)},
+    ".cs": {"quotes": "\"'", "raw": ('"""',)},
+    ".swift": {"quotes": '"', "raw": ()},
+    ".kt": {"quotes": "\"'", "raw": ()},
+    ".dart": {"quotes": "\"'", "raw": ("r'", 'r"')},
+}
+
+
+def tokens(text, ext):
+    """A source file as its formatter cannot change it: each string literal
+    and each `//` comment whole, every other character outside whitespace
+    one token, and a comma before a closing bracket gone -- `gofmt` and
+    `dart format` move whitespace, and Dart's tall style adds that comma.
+    Whitespace inside a string is part of it."""
+    syntax, out, i, n = STRINGS[ext], [], 0, len(text)
+    while i < n:
+        ch = text[i]
+        raw = next((r for r in syntax["raw"] if text.startswith(r, i)
+                    and not (r[0] == "r" and i and (text[i - 1].isalnum() or text[i - 1] == "_"))), None)
+        if raw:
+            close = raw[-1] if raw[0] == "r" else raw
+            end = text.find(close, i + len(raw))
+            end = n if end < 0 else end + len(close)
+        elif text.startswith("//", i):
+            end = text.find("\n", i)
+            end = n if end < 0 else end
+            out.append(text[i:end].rstrip())
+            i = end
+            continue
+        elif ch in syntax["quotes"]:
+            end = i + 1
+            while end < n and text[end] not in (ch, "\n"):
+                end += 2 if text[end] == "\\" else 1
+            end = min(end + 1, n)
+        elif ch.isspace():
+            i += 1
+            continue
+        else:
+            end = i + 1
+        out.append(text[i:end])
+        i = end
+    return [t for k, t in enumerate(out) if not (t == "," and k + 1 < len(out) and out[k + 1] in (")", "]", "}"))]
+
+
+def selftest():
+    """The comparison and the comment cutter held to what they are for."""
+    assert tokens('f("pub lished")', ".go") != tokens('f("published")', ".go"), "a string's space"
+    assert tokens("f( a ,\n  b, )", ".dart") == tokens("f(a, b)", ".dart"), "a formatter's comma and spaces"
+    assert tokens("// the site's\nx('a b')", ".kt") != tokens("// the site's\nx('ab')", ".kt"), "a comment's quote"
+    assert tokens("RegExp(r'^(put|set) \\d')", ".dart") != tokens("RegExp(r'^(put|set)\\d')", ".dart"), "a raw string"
+    assert tokens('x = """{"a": 1}""" ', ".cs") != tokens('x = """{"a":1}"""', ".cs"), "a raw C# string"
+    assert _uncommented('get a where b = "x\\" -- y" -- z') == 'get a where b = "x\\" -- y" ', "an escaped quote"
+    for lang in LANGS:
+        assert not set(lang.s(SPECIALS)) & set(map(chr, ESCAPED)), f"{lang.name} writes a character raw"
+
+
+def tested():
+    """What the SDKs' test files run: every tab a page shows, and the
+    check's own cases of the characters a literal escapes."""
+    return used() + list(ESCAPES)
 
 
 def write_tests():
-    names = used()
+    names = tested()
     for rel, (make, fmt) in TESTS.items():
         path = os.path.join(REPO, rel)
         with open(path, "w", encoding="utf-8") as f:
@@ -1682,11 +1807,12 @@ def write_tests():
 
 
 def stale_tests():
-    names, stale = used(), []
+    names, stale = tested(), []
     for rel, (make, _) in TESTS.items():
         path = os.path.join(REPO, rel)
         have = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
-        if _bare(have) != _bare(make(names)):
+        ext = os.path.splitext(rel)[1]
+        if tokens(have, ext) != tokens(make(names), ext):
             stale.append(rel)
     return stale
 
@@ -1745,7 +1871,11 @@ def run_js(names):
         path = os.path.join(d, "tabs.mjs")
         with open(path, "w", encoding="utf-8") as f:
             f.write(src)
-        run = subprocess.run(["node", path], capture_output=True, text=True)
+        try:
+            # A few hundred milliseconds; a tab that never settled is a failure.
+            run = subprocess.run(["node", path], capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            raise SystemExit("builder tabs: the JavaScript tabs ran past 120 s")
     if run.returncode != 0:
         raise SystemExit(f"builder tabs: the JavaScript tabs did not run:\n{run.stderr}")
     return json.loads(run.stdout)
@@ -1779,9 +1909,10 @@ def run_python(names):
 
 
 def check():
-    names = used()
-    if not names:
+    selftest()
+    if not used():
         raise SystemExit("builder tabs: no page shows one")
+    names = tested()
     # The build's own check, every page's statements against their cases.
     for dirpath, _, files in os.walk(CONTENT):
         for f in files:
@@ -1802,8 +1933,8 @@ def check():
         failed.append(f"{rel} is not what the tabs make: make docs-builder")
     if failed:
         raise SystemExit("builder tabs:\n  " + "\n  ".join(failed))
-    print(f"builder tabs: {len(names)} cases; the JavaScript and Python tabs ran and sent their statements; "
-          f"the Go, .NET, Swift, Kotlin and Dart tests are the tabs'")
+    print(f"builder tabs: {len(used())} cases on the pages and {len(ESCAPES)} of escapes; the JavaScript and "
+          "Python tabs ran and sent their statements; the Go, .NET, Swift, Kotlin and Dart tests are the tabs'")
 
 
 if __name__ == "__main__":

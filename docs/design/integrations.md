@@ -43,31 +43,7 @@ builder again so the file cannot drift, and `make python-test`, `go-test`
 and `dotnet-test` run every case through their own builder, the
 endpoints' statements read off a recording transport. A builder change
 starts in `web/builder.js` and a case in `golden.mjs`, then the three
-follow, and the Swift, Kotlin and Dart builders with them. The FenecQL
-reference pages show an example's statement beside the same query in each
-builder, in tabs written from golden cases (`site/builder_tabs.py`, from
-`{{builder "case" ...}}` over the page's block): snippets written by hand
-in seven languages would drift from the builders as the golden file is
-there to stop, and a tab rendered from a case can be held to it. The build
-holds each case's statement to the page's -- the text, each parameter
-written in as FenecQL writes the value or a `$n` the page has there -- so
-the pages' statements stay as they were and only an example the builders
-make byte for byte gets tabs (`fuzzy` alone, `facet` before `limit` and
-`match` before `near` are FenecQL the builders write otherwise, and those
-blocks have none). Each language is proven its own way: the JavaScript
-and Python tabs run as the page shows them, against `connect` with a
-recording `fetch` and a `Client` whose `query` records
-(`builder_tabs.py --check`, CI's integrations job); the Go, .NET, Swift,
-Kotlin and Dart tabs are tests of those SDKs (`make docs-builder` writes
-`integrations/go/docs_builder_test.go` and its four siblings), run by
-their own jobs against each SDK's recording transport, and the check
-fails while a file is behind the pages, whitespace aside since `gofmt`
-and `dart format` lay them out. A tab's case ends at an endpoint (`rows`,
-`count`, `update` ...), since an app runs its query; the tab shows that
-call on `db` (and Go's `ctx`) and the statement it sends. When the
-renderer was written, every golden case it can render -- 222, those with
-a `$date` or a `$f32` value aside -- was rendered in all seven languages and
-run through each SDK, and each sent its case's text and parameters. Go's object conditions are `Fields`/`Ops` and a document a
+follow, and the Swift, Kotlin and Dart builders with them. Go's object conditions are `Fields`/`Ops` and a document a
 `D(...)`, names and values in turn, since a map has no order and the order
 is the text's; its options are functional, since a struct cannot tell
 `limit 0` from none. CI also builds the five packages as a release
@@ -104,6 +80,53 @@ its collection and metadata columns in the statement's text, so both are
 checked against FenecQL's name pattern; values always go in as parameters,
 and `in` takes one per element (`in [$2, $3]`), since a parameter binds a
 value and not a list.
+
+The FenecQL reference pages show an example's statement beside the same
+query in each builder, in tabs. The tabs are written from golden cases by
+`site/builder_tabs.py`, from `{{builder "case" ...}}` above the page's
+block. Snippets written by hand in seven languages would drift from the
+builders, which is what the golden file is there to stop; a tab rendered
+from a case can be held to it.
+
+- **The page's statements stay as they were.** The build holds each case's
+  statement to the page's: the text, each parameter written in as FenecQL
+  writes the value or matched to a `$n` the page has there. So only an
+  example the builders make byte for byte gets tabs. `fuzzy` without a
+  number, `facet` before `limit` and `match` before `near` are FenecQL the
+  builders write otherwise, and those blocks have none.
+- **Each language is proven its own way.** The JavaScript and Python tabs
+  run as the page shows them, against `connect` with a recording `fetch`
+  and a `Client` whose `query` records (`builder_tabs.py --check`, CI's
+  integrations job). The Go, .NET, Swift, Kotlin and Dart tabs are tests
+  of those SDKs: `make docs-builder` writes
+  `integrations/go/docs_builder_test.go` and its four siblings, and each
+  SDK's job runs its file against the SDK's recording transport.
+- **A stale test file fails the check.** The comparison is token by token:
+  whitespace outside strings and comments is dropped, since `gofmt` and
+  `dart format` lay the files out, and so is a comma before a closing
+  bracket, which `dart format`'s tall style (a 3.7 constraint on) adds.
+  The first version dropped all whitespace, and a space put into a
+  string passed it.
+- **Every string goes through one escaper.** The C0 controls, U+0085,
+  U+2028 and U+2029 are written as each language's `\u` escape; C#
+  refuses U+2028 in a string literal. Two cases of the check's own, not
+  the golden file's, run a text of every such character through every
+  language's tab code, in the tests and in `--check`.
+- **What a tab shows.** A tab's case ends at an endpoint (`rows`,
+  `count`, `update` ...), since an app runs its query. The tab shows that
+  call on `db` (and Go's `ctx`), under a label naming its import. The
+  statement it sends is written once under the panels; the widget leaves
+  it showing under every language's tab and CSS hides it under FenecQL's.
+  A copy under each tab put six more of 3.2 KB of statements into the
+  page text, its search sections and `llms-full.txt`: 19.4 KB.
+- **One language name site-wide.** The tabs share the reader's remembered
+  language (`fenec-lang`) with the Quickstart's and Your language's, so
+  each names JavaScript one way: "JavaScript". Your language's tab still
+  shows TypeScript code; its file labels say so.
+- **A one-off sweep.** When the renderer was written, every golden case it
+  can render (222, leaving out those with a `$date` or a `$f32` value) was
+  rendered in all seven languages and run through each SDK. Each sent its
+  case's text and parameters.
 
 ## Grafana
 

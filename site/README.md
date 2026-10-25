@@ -59,9 +59,13 @@ SDKs (`make docs-builder` writes them: `integrations/go/docs_builder_test.go`
 and the like), which their own jobs run, and the check fails while they are
 behind the pages. A new example takes a case ending at an endpoint (`rows`,
 `count`, `update` ...) in `web/golden.mjs` (`make builder-golden`), the
-placeholder, then `make docs-builder`; FenecQL's tab keeps no language
+placeholder, then `make docs-builder`. FenecQL's tab keeps no language
 (`data-keep="false"`), so a box opens on the reader's language where one was
-chosen. All are filled before the claims are checked and before the search and `llms.txt` read
+chosen; JavaScript's tab is "JavaScript" in every box of languages, Your
+language's and the Quickstart's too, or one would not open on the other's
+choice. Each code block's label is the import its names come from, and the
+statements the tabs send are written once, under the panels (`styles.css`
+hides them under FenecQL's tab). All are filled before the claims are checked and before the search and `llms.txt` read
 the page, and a version in prose that is a fact about the past (a comparison
 checked against a competitor's page on a day, a benchmark's build) stays as
 written. The Quickstart installs that release, so its steps use only what the

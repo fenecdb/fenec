@@ -352,7 +352,9 @@ def render_code_blocks(body):
             return f"<pre{keep}>{highlight(code, lang)}</pre>"
         head = ""
         if label:
-            head = f'<div class="code-label">{html.escape(label.group(1))}</div>'
+            # An attribute's entities read back first (a builder tab's label
+            # names Go's import path in quotes), so a label is escaped once.
+            head = f'<div class="code-label">{html.escape(html.unescape(label.group(1)))}</div>'
         return (f'<div class="code" data-lang="{html.escape(lang)}">{head}'
                 f'<pre><code>{highlight(code, lang)}</code></pre></div>')
     return PRE_RE.sub(sub, body)
@@ -430,7 +432,7 @@ def docs_map():
 # database in an app and their first example opens a file, so they stay on
 # Your language; a tab in neither list is a build error, or a new HTTP
 # language would be skipped here with nothing said.
-HTTP_TABS = ("Python", "TypeScript", "Go", "Rust", ".NET", "Java", "PHP", "Ruby")
+HTTP_TABS = ("Python", "JavaScript", "Go", "Rust", ".NET", "Java", "PHP", "Ruby")
 EMBEDDED_TABS = ("Swift", "Kotlin", "Dart")
 LANG_TAB = re.compile(r'<div class="lang" data-name="([^"]+)">\n([\s\S]*?)\n</div>')
 CODE_BLOCK = re.compile(r'<pre[^>]*>[\s\S]*?</pre>\n')

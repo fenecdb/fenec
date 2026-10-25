@@ -993,9 +993,10 @@ held to `integrations/builder-golden.json`; `make types-check` holds
 case's chain rendered by `site/builder_tabs.py`, never written by hand:
 its statement held to the page's, the JS and Python tabs run by its
 `--check`, the others tests of their SDKs (`make docs-builder`); a
-builder's API change owes its renderer. Go's and .NET's SDKs bound a request by its
-context or token, never the HTTP client's timeout; a store checks its
-names against FenecQL's and passes values as parameters.
+builder's API change owes its renderer. Go's and .NET's SDKs bound a
+request by its context or token, never the HTTP client's timeout; a
+store checks its names against FenecQL's and passes values as
+parameters.
 
 **[Grafana's data source binds a dashboard's values; it never splices
 them.](docs/design/integrations.md#grafana)** Names become `$n`s

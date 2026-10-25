@@ -1413,3 +1413,7 @@ html { scrollbar-color: var(--rule-hot) transparent; }
 .langs:not(.on) .lang::before { content: attr(data-name); display: block; font-weight: 600; color: var(--star); margin: 22px 0 6px; }
 .lang .code { margin: 0 0 12px; }
 .lang > p { color: var(--sand-dim); font-size: 15px; }
+/* A builder box's statement as its tabs send it, once under them all: shown
+   under a language's tab, not under FenecQL's, which is the statement. */
+.builder-sends .code { margin: 0; }
+.langs.builder.on:has(> .lang[data-name="FenecQL"]:not([hidden])) > .builder-sends { display: none; }

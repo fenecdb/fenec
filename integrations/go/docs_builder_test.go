@@ -46,32 +46,36 @@ func TestDocsBuilderTabs(t *testing.T) {
 	}
 
 	t.Run("docs: aggregates over every order", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("orders").
 			Select("count(*)", "sum(total)", "avg(total)", "min(at)", "max(at)").
 			Rows(ctx)
-		sent(t, err, "get orders select count(*), sum(total), avg(total), min(at), max(at)", `[]`)
+		sent(t, err, "get orders select count(*), sum(total), avg(total), min(at), max(at)", "[]")
 	})
 
 	t.Run("docs: aggregates of each status", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("orders").
 			Select("status", "count(*)", "avg(total)").
 			Where("year", "=", 2026).
 			Group("status").
 			Rows(ctx)
-		sent(t, err, "get orders select status, count(*), avg(total) where year = $1 group status", `[2026]`)
+		sent(t, err, "get orders select status, count(*), avg(total) where year = $1 group status", "[2026]")
 	})
 
 	t.Run("docs: the ten customers who spent most", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("orders").
 			Select("customer", "sum(total)").
 			Group("customer").
 			Order("sum(total)", "desc").
 			Limit(10).
 			Rows(ctx)
-		sent(t, err, "get orders select customer, sum(total) group customer order sum(total) desc limit $1", `[10]`)
+		sent(t, err, "get orders select customer, sum(total) group customer order sum(total) desc limit $1", "[10]")
 	})
 
 	t.Run("docs: distinct users an hour and event", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("events").
 			Select(
 				fenecdb.Bucket("at", "1h").As("hour"),
@@ -80,10 +84,11 @@ func TestDocsBuilderTabs(t *testing.T) {
 			).
 			Group("hour", "name").
 			Rows(ctx)
-		sent(t, err, "get events select bucket(at, 1h) as hour, name, count(distinct user) as users group hour, name", `[]`)
+		sent(t, err, "get events select bucket(at, 1h) as hour, name, count(distinct user) as users group hour, name", "[]")
 	})
 
 	t.Run("docs: one-minute bars of a symbol", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("ticks").
 			Select(
 				fenecdb.Bucket("at", "1m").As("bar"),
@@ -96,26 +101,29 @@ func TestDocsBuilderTabs(t *testing.T) {
 			Where("sym", "=", "S07").
 			Group("bar").
 			Rows(ctx)
-		sent(t, err, "get ticks select bucket(at, 1m) as bar, first(px by at) as open, max(px) as high, min(px) as low, last(px by at) as close, sum(qty) as volume where sym = $1 group bar", `["S07"]`)
+		sent(t, err, "get ticks select bucket(at, 1m) as bar, first(px by at) as open, max(px) as high, min(px) as low, last(px by at) as close, sum(qty) as volume where sym = $1 group bar", "[\"S07\"]")
 	})
 
 	t.Run("docs: vwap of each symbol", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("ticks").
 			Select("sym", fenecdb.Expr("sum(px * qty) / sum(qty)").As("vwap")).
 			Group("sym").
 			Rows(ctx)
-		sent(t, err, "get ticks select sym, sum(px * qty) / sum(qty) as vwap group sym", `[]`)
+		sent(t, err, "get ticks select sym, sum(px * qty) / sum(qty) as vwap group sym", "[]")
 	})
 
 	t.Run("docs: totals of a json path", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("events").
 			Select("props.plan", "sum(props.v)").
 			Group("props.plan").
 			Rows(ctx)
-		sent(t, err, "get events select props.plan, sum(props.v) group props.plan", `[]`)
+		sent(t, err, "get events select props.plan, sum(props.v) group props.plan", "[]")
 	})
 
 	t.Run("docs: the three statuses that took most", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("orders").
 			Select("status", "count(*)", "sum(total)").
 			Where("year", "=", 2026).
@@ -123,10 +131,11 @@ func TestDocsBuilderTabs(t *testing.T) {
 			Order("sum(total)", "desc").
 			Limit(3).
 			Rows(ctx)
-		sent(t, err, "get orders select status, count(*), sum(total) where year = $1 group status order sum(total) desc limit $2", `[2026, 3]`)
+		sent(t, err, "get orders select status, count(*), sum(total) where year = $1 group status order sum(total) desc limit $2", "[2026, 3]")
 	})
 
 	t.Run("docs: one-minute bars since a time", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("ticks").
 			Select(
 				fenecdb.Bucket("at", "1m").As("bar"),
@@ -140,41 +149,46 @@ func TestDocsBuilderTabs(t *testing.T) {
 			Where("at", ">=", "2026-05-03T09:00:00Z").
 			Group("bar").
 			Rows(ctx)
-		sent(t, err, "get ticks select bucket(at, 1m) as bar, first(px by at) as open, max(px) as high, min(px) as low, last(px by at) as close, sum(qty) as volume where sym = $1 and at >= $2 group bar", `["S07", "2026-05-03T09:00:00Z"]`)
+		sent(t, err, "get ticks select bucket(at, 1m) as bar, first(px by at) as open, max(px) as high, min(px) as low, last(px by at) as close, sum(qty) as volume where sym = $1 and at >= $2 group bar", "[\"S07\", \"2026-05-03T09:00:00Z\"]")
 	})
 
 	t.Run("docs: the newest articles", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("articles").Order("published", "desc").Limit(20).Rows(ctx)
-		sent(t, err, "get articles order published desc limit $1", `[20]`)
+		sent(t, err, "get articles order published desc limit $1", "[20]")
 	})
 
 	t.Run("docs: the newest articles since a day", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("articles").
 			Where("published", ">=", "2026-09-01").
 			Order("published", "desc").
 			Limit(20).
 			Rows(ctx)
-		sent(t, err, "get articles where published >= $1 order published desc limit $2", `["2026-09-01", 20]`)
+		sent(t, err, "get articles where published >= $1 order published desc limit $2", "[\"2026-09-01\", 20]")
 	})
 
 	t.Run("docs: articles counted over a range of titles", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("articles").
 			Where("title", ">=", "k").
 			Where("title", "<", "l").
 			Count(ctx)
-		sent(t, err, "get articles where title >= $1 and title < $2 count", `["k", "l"]`)
+		sent(t, err, "get articles where title >= $1 and title < $2 count", "[\"k\", \"l\"]")
 	})
 
 	t.Run("docs: the nearest articles since a day", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("articles").
 			Where("published", ">=", "2026-01-01").
 			Near("embed", []float64{0.9, 0.1, 0}).
 			Limit(10).
 			Rows(ctx)
-		sent(t, err, "get articles where published >= $1 near embed $2 limit $3", `["2026-01-01", [0.9, 0.1, 0], 10]`)
+		sent(t, err, "get articles where published >= $1 near embed $2 limit $3", "[\"2026-01-01\", [0.9, 0.1, 0], 10]")
 	})
 
 	t.Run("docs: products with their newest reviews", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("products").
 			Limit(20).
 			Lookup(
@@ -184,19 +198,21 @@ func TestDocsBuilderTabs(t *testing.T) {
 				fenecdb.Limit(3),
 			).
 			Rows(ctx)
-		sent(t, err, "get products limit $1 lookup reviews on product_id order created desc limit $2", `[20, 3]`)
+		sent(t, err, "get products limit $1 lookup reviews on product_id order created desc limit $2", "[20, 3]")
 	})
 
 	t.Run("docs: shops, their orders and the orders' lines", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("shops").
 			Limit(20).
 			Lookup("orders", fenecdb.On("shop_id"), fenecdb.Limit(3)).
 			Lookup("lines", fenecdb.On("order_id"), fenecdb.Limit(5)).
 			Rows(ctx)
-		sent(t, err, "get shops limit $1 lookup orders on shop_id limit $2 lookup lines on order_id limit $3", `[20, 3, 5]`)
+		sent(t, err, "get shops limit $1 lookup orders on shop_id limit $2 lookup lines on order_id limit $3", "[20, 3, 5]")
 	})
 
 	t.Run("docs: products with a five-star review", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("products").
 			Limit(20).
 			Lookup(
@@ -206,10 +222,11 @@ func TestDocsBuilderTabs(t *testing.T) {
 				fenecdb.Where(fenecdb.Fields("stars", 5)),
 			).
 			Rows(ctx)
-		sent(t, err, "get products limit $1 lookup reviews on product_id required where stars = $2", `[20, 5]`)
+		sent(t, err, "get products limit $1 lookup reviews on product_id required where stars = $2", "[20, 5]")
 	})
 
 	t.Run("docs: products with a five-star review counted", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("products").
 			Lookup(
 				"reviews",
@@ -218,78 +235,87 @@ func TestDocsBuilderTabs(t *testing.T) {
 				fenecdb.Where(fenecdb.Fields("stars", 5)),
 			).
 			Count(ctx)
-		sent(t, err, "get products count lookup reviews on product_id required where stars = $1", `[5]`)
+		sent(t, err, "get products count lookup reviews on product_id required where stars = $1", "[5]")
 	})
 
 	t.Run("docs: articles counted since a year", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("articles").Where("year", ">=", 2024).Count(ctx)
-		sent(t, err, "get articles where year >= $1 count", `[2024]`)
+		sent(t, err, "get articles where year >= $1 count", "[2024]")
 	})
 
 	t.Run("docs: articles matching words", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("articles").Match("body", "ownership").Limit(10).Rows(ctx)
-		sent(t, err, "get articles match body $1 limit $2", `["ownership", 10]`)
+		sent(t, err, "get articles match body $1 limit $2", "[\"ownership\", 10]")
 	})
 
 	t.Run("docs: articles matching words since a year", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("articles").
 			Where("year", ">=", 2024).
 			Match("body", "ownership").
 			Limit(10).
 			Rows(ctx)
-		sent(t, err, "get articles where year >= $1 match body $2 limit $3", `[2024, "ownership", 10]`)
+		sent(t, err, "get articles where year >= $1 match body $2 limit $3", "[2024, \"ownership\", 10]")
 	})
 
 	t.Run("docs: articles matching words reranked", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("articles").
 			Match("body", "ownership").
 			Rerank("embed", []float64{0.9, 0.1, 0}, fenecdb.Candidates(500)).
 			Limit(10).
 			Rows(ctx)
-		sent(t, err, "get articles match body $1 rerank embed $2 candidates 500 limit $3", `["ownership", [0.9, 0.1, 0], 10]`)
+		sent(t, err, "get articles match body $1 rerank embed $2 candidates 500 limit $3", "[\"ownership\", [0.9, 0.1, 0], 10]")
 	})
 
 	t.Run("docs: matches with their marks", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("articles").
 			Select("title").
 			Highlight("body").
 			Match("body", "ownership").
 			Limit(10).
 			Rows(ctx)
-		sent(t, err, "get articles select title, highlight(body) match body $1 limit $2", `["ownership", 10]`)
+		sent(t, err, "get articles select title, highlight(body) match body $1 limit $2", "[\"ownership\", 10]")
 	})
 
 	t.Run("docs: matches with their marks tagged", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("articles").
 			Select("title").
 			Highlight("body", fenecdb.Tags("<mark>", "</mark>")).
 			Match("body", "ownership").
 			Limit(10).
 			Rows(ctx)
-		sent(t, err, "get articles select title, highlight(body, $1, $2) match body $3 limit $4", `["<mark>", "</mark>", "ownership", 10]`)
+		sent(t, err, "get articles select title, highlight(body, $1, $2) match body $3 limit $4", "[\"<mark>\", \"</mark>\", \"ownership\", 10]")
 	})
 
 	t.Run("docs: matches with a snippet", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("articles").
 			Select("title").
 			Snippet("body", 20, fenecdb.Ellipsis("…")).
 			Match("body", "ownership").
 			Limit(10).
 			Rows(ctx)
-		sent(t, err, "get articles select title, snippet(body, 20, $1) match body $2 limit $3", `["…", "ownership", 10]`)
+		sent(t, err, "get articles select title, snippet(body, 20, $1) match body $2 limit $3", "[\"…\", \"ownership\", 10]")
 	})
 
 	t.Run("docs: matches with a snippet tagged", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("articles").
 			Select("title").
 			Snippet("body", 20, fenecdb.Ellipsis("…"), fenecdb.Tags("<b>", "</b>")).
 			Match("body", "ownership").
 			Limit(10).
 			Rows(ctx)
-		sent(t, err, "get articles select title, snippet(body, 20, $1, $2, $3) match body $4 limit $5", `["…", "<b>", "</b>", "ownership", 10]`)
+		sent(t, err, "get articles select title, snippet(body, 20, $1, $2, $3) match body $4 limit $5", "[\"…\", \"<b>\", \"</b>\", \"ownership\", 10]")
 	})
 
 	t.Run("docs: tents counted by price range", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("products").
 			Where("category", "=", "tents").
 			Limit(24).
@@ -299,35 +325,39 @@ func TestDocsBuilderTabs(t *testing.T) {
 				fenecdb.Disjunctive(),
 			).
 			Rows(ctx)
-		sent(t, err, "get products where category = $1 limit $2 facet price ranges [0, 2500, 5000, 10000, 25000] disjunctive", `["tents", 24]`)
+		sent(t, err, "get products where category = $1 limit $2 facet price ranges [0, 2500, 5000, 10000, 25000] disjunctive", "[\"tents\", 24]")
 	})
 
 	t.Run("docs: the nearest articles", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("articles").
 			Near("embed", []float64{0.9, 0.1, 0}).
 			Limit(10).
 			Rows(ctx)
-		sent(t, err, "get articles near embed $1 limit $2", `[[0.9, 0.1, 0], 10]`)
+		sent(t, err, "get articles near embed $1 limit $2", "[[0.9, 0.1, 0], 10]")
 	})
 
 	t.Run("docs: the nearest articles since a year", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("articles").
 			Where("year", ">=", 2024).
 			Near("embed", []float64{0.9, 0.1, 0}, fenecdb.Ef(200)).
 			Limit(10).
 			Rows(ctx)
-		sent(t, err, "get articles where year >= $1 near embed $2 ef 200 limit $3", `[2024, [0.9, 0.1, 0], 10]`)
+		sent(t, err, "get articles where year >= $1 near embed $2 ef 200 limit $3", "[2024, [0.9, 0.1, 0], 10]")
 	})
 
 	t.Run("docs: the nearest articles exactly", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("articles").
 			Near("embed", []float64{0.9, 0.1, 0}, fenecdb.Exact()).
 			Limit(10).
 			Rows(ctx)
-		sent(t, err, "get articles near embed $1 exact limit $2", `[[0.9, 0.1, 0], 10]`)
+		sent(t, err, "get articles near embed $1 exact limit $2", "[[0.9, 0.1, 0], 10]")
 	})
 
 	t.Run("docs: the nearest articles filtered", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("articles").
 			Select("title", "year").
 			Where("year", ">=", 2024).
@@ -336,54 +366,83 @@ func TestDocsBuilderTabs(t *testing.T) {
 			Near("embed", []float64{0.9, 0.1, 0}, fenecdb.Ef(128)).
 			Limit(10).
 			Rows(ctx)
-		sent(t, err, "get articles select title, year where year >= $1 and tags has $2 and not (title ~ $3) near embed $4 ef 128 limit $5", `[2024, "rust", "draft", [0.9, 0.1, 0], 10]`)
+		sent(t, err, "get articles select title, year where year >= $1 and tags has $2 and not (title ~ $3) near embed $4 ef 128 limit $5", "[2024, \"rust\", \"draft\", [0.9, 0.1, 0], 10]")
 	})
 
 	t.Run("docs: a product that must be there at its price", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("products").
 			Where("sku", "=", "tee").
 			Where("price", "=", 1200).
 			Where("stock", ">", 0).
 			Require(1).
 			Rows(ctx)
-		sent(t, err, "get products where sku = $1 and price = $2 and stock > $3 require 1", `["tee", 1200, 0]`)
+		sent(t, err, "get products where sku = $1 and price = $2 and stock > $3 require 1", "[\"tee\", 1200, 0]")
 	})
 
 	t.Run("docs: a coupon that must still be usable", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("coupons").
 			Where("code", "=", "X1").
 			WhereCond(fenecdb.Raw("uses < max_uses")).
 			Limit(1).
 			Require(1).
 			Rows(ctx)
-		sent(t, err, "get coupons where code = $1 and uses < max_uses limit $2 require 1", `["X1", 1]`)
+		sent(t, err, "get coupons where code = $1 and uses < max_uses limit $2 require 1", "[\"X1\", 1]")
 	})
 
 	t.Run("docs: no hold that must be there", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("holds").
 			Where("order_ref", "=", "o-17").
 			Where("state", "=", "held").
 			Require(0).
 			Rows(ctx)
-		sent(t, err, "get holds where order_ref = $1 and state = $2 require 0", `["o-17", "held"]`)
+		sent(t, err, "get holds where order_ref = $1 and state = $2 require 0", "[\"o-17\", \"held\"]")
 	})
 
 	t.Run("docs: an article set by id", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("articles").
 			Where("id", "=", 42).
 			Update(ctx, fenecdb.D("year", 2025))
-		sent(t, err, "set articles {year: $1} where id = $2", `[2025, 42]`)
+		sent(t, err, "set articles {year: $1} where id = $2", "[2025, 42]")
 	})
 
 	t.Run("docs: an article's views counted", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("articles").
 			Where("id", "=", 42).
 			Update(ctx, fenecdb.D("views", fenecdb.Inc(1)))
-		sent(t, err, "set articles {views: coalesce(views, 0) + $1} where id = $2", `[1, 42]`)
+		sent(t, err, "set articles {views: coalesce(views, 0) + $1} where id = $2", "[1, 42]")
 	})
 
 	t.Run("docs: the articles before a year deleted", func(t *testing.T) {
+		rec.body = nil
 		_, err := db.From("articles").Where("year", "<", 2000).Delete(ctx)
-		sent(t, err, "del articles where year < $1", `[2000]`)
+		sent(t, err, "del articles where year < $1", "[2000]")
+	})
+
+	t.Run("escapes: every character a literal escapes, in a filter", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("docs").
+			Where(
+				"title",
+				"=",
+				"\u0000\u0001\u0009\u000a\u000d\u001f\u0085\u2028\u2029 \"'\\$`${x}$1\\(x) …",
+			).
+			Rows(ctx)
+		sent(t, err, "get docs where title = $1", "[\"\\u0000\\u0001\\t\\n\\r\\u001f\u0085\u2028\u2029 \\\"'\\\\$`${x}$1\\\\(x) …\"]")
+	})
+
+	t.Run("escapes: line ends, in a document", func(t *testing.T) {
+		rec.body = nil
+		_, err := db.From("docs").
+			Where("id", "=", 1).
+			Update(
+				ctx,
+				fenecdb.D("title", "one\u2028two\u000d\u000athree\u0085four\u2029", "note", "\u0000\u0001\u0009\u000a\u000d\u001f\u0085\u2028\u2029 \"'\\$`${x}$1\\(x) …"),
+			)
+		sent(t, err, "set docs {title: $1, note: $2} where id = $3", "[\"one\u2028two\\r\\nthree\u0085four\u2029\", \"\\u0000\\u0001\\t\\n\\r\\u001f\u0085\u2028\u2029 \\\"'\\\\$`${x}$1\\\\(x) …\", 1]")
 	})
 }

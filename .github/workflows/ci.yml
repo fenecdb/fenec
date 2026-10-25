@@ -252,6 +252,7 @@ jobs:
       # makes, and the Go, .NET, Swift, Kotlin and Dart tests of the tabs --
       # which those SDKs' jobs run -- what the pages' tabs make.
       - name: Builder tabs on the FenecQL pages
+        timeout-minutes: 5
         run: python3 site/builder_tabs.py --check
 
       # The Go and .NET SDKs against a primary, a replica of it and a node

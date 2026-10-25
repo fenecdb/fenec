@@ -405,4 +405,23 @@ import Testing
         _ = try await db.from("articles").where("year", "<", 2000).delete()
         try await db.sends("del articles where year < $1", "[2000]")
     }
+
+    @Test("escapes: every character a literal escapes, in a filter") func escapesEveryCharacterALiteralEscapesInAFilter() async throws {
+        let db = Recording()
+        _ = try await db.from("docs")
+            .where(
+                "title",
+                "\u{0}\u{1}\u{9}\u{a}\u{d}\u{1f}\u{85}\u{2028}\u{2029} \"'\\$`${x}$1\\(x) …"
+            )
+            .rows()
+        try await db.sends("get docs where title = $1", "[\"\\u0000\\u0001\\t\\n\\r\\u001f\u{85}\u{2028}\u{2029} \\\"'\\\\$`${x}$1\\\\(x) …\"]")
+    }
+
+    @Test("escapes: line ends, in a document") func escapesLineEndsInADocument() async throws {
+        let db = Recording()
+        _ = try await db.from("docs")
+            .where("id", 1)
+            .update(["title": "one\u{2028}two\u{d}\u{a}three\u{85}four\u{2029}", "note": "\u{0}\u{1}\u{9}\u{a}\u{d}\u{1f}\u{85}\u{2028}\u{2029} \"'\\$`${x}$1\\(x) …"] as Value)
+        try await db.sends("set docs {title: $1, note: $2} where id = $3", "[\"one\u{2028}two\\r\\nthree\u{85}four\u{2029}\", \"\\u0000\\u0001\\t\\n\\r\\u001f\u{85}\u{2028}\u{2029} \\\"'\\\\$`${x}$1\\\\(x) …\", 1]")
+    }
 }

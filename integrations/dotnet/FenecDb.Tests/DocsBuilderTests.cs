@@ -510,4 +510,27 @@ public sealed class DocsBuilderTests
         await db.From("articles").Where("year", "<", 2000).DeleteAsync();
         Sends(sent, "del articles where year < $1", "[2000]");
     }
+
+    [Fact(DisplayName = "escapes: every character a literal escapes, in a filter")]
+    public async Task EscapesEveryCharacterALiteralEscapesInAFilter()
+    {
+        using var db = Db(out var sent);
+        await db.From("docs")
+            .Where(
+                "title",
+                "\u0000\u0001\u0009\u000a\u000d\u001f\u0085\u2028\u2029 \"'\\$`${x}$1\\(x) …"
+            )
+            .RowsAsync();
+        Sends(sent, "get docs where title = $1", "[\"\\u0000\\u0001\\t\\n\\r\\u001f\u0085\u2028\u2029 \\\"'\\\\$`${x}$1\\\\(x) …\"]");
+    }
+
+    [Fact(DisplayName = "escapes: line ends, in a document")]
+    public async Task EscapesLineEndsInADocument()
+    {
+        using var db = Db(out var sent);
+        await db.From("docs")
+            .Where("id", 1)
+            .UpdateAsync(new { title = "one\u2028two\u000d\u000athree\u0085four\u2029", note = "\u0000\u0001\u0009\u000a\u000d\u001f\u0085\u2028\u2029 \"'\\$`${x}$1\\(x) …" });
+        Sends(sent, "set docs {title: $1, note: $2} where id = $3", "[\"one\u2028two\\r\\nthree\u0085four\u2029\", \"\\u0000\\u0001\\t\\n\\r\\u001f\u0085\u2028\u2029 \\\"'\\\\$`${x}$1\\\\(x) …\", 1]");
+    }
 }

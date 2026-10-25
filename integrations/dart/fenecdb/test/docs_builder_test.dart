@@ -362,4 +362,24 @@ void main() {
     await db.from('articles').where('year', '<', 2000).delete();
     db.sends('del articles where year < \$1', '[2000]');
   });
+
+  test('escapes: every character a literal escapes, in a filter', () async {
+    final db = _Recording();
+    await db
+        .from('docs')
+        .where('title', '\u0000\u0001\u0009\u000a\u000d\u001f\u0085\u2028\u2029 "\'\\\$`\${x}\$1\\(x) …')
+        .rows();
+    db.sends('get docs where title = \$1',
+        '["\\u0000\\u0001\\t\\n\\r\\u001f\u0085\u2028\u2029 \\"\'\\\\\$`\${x}\$1\\\\(x) …"]');
+  });
+
+  test('escapes: line ends, in a document', () async {
+    final db = _Recording();
+    await db.from('docs').where('id', 1).update({
+      'title': 'one\u2028two\u000d\u000athree\u0085four\u2029',
+      'note': '\u0000\u0001\u0009\u000a\u000d\u001f\u0085\u2028\u2029 "\'\\\$`\${x}\$1\\(x) …'
+    });
+    db.sends('set docs {title: \$1, note: \$2} where id = \$3',
+        '["one\u2028two\\r\\nthree\u0085four\u2029", "\\u0000\\u0001\\t\\n\\r\\u001f\u0085\u2028\u2029 \\"\'\\\\\$`\${x}\$1\\\\(x) …", 1]');
+  });
 }
