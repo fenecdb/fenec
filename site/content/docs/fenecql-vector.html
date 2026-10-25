@@ -145,6 +145,10 @@ sparse <code>near</code> as it takes a dense one.</p>
 
 <h2 id="a-hybrid-query">A hybrid query</h2>
 
+<p>A filter beside <code>near</code>. It is not <code>fuse</code>, which ranks
+words and vectors together: that is <a href="fenecql-search.html#hybrid">Hybrid
+search</a>.</p>
+
 <pre data-lang="fenecql">get articles select title, year
   where year >= 2024 and tags has "rust" and not (title ~ "draft")
   near embed $1 ef 128

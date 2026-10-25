@@ -13,7 +13,7 @@
   "disjunctive-facets": "fenecql-search#disjunctive-facets",
   "explain": "fenecql-reading#explain",
   "facets": "fenecql-search#facets",
-  "functions": "fenecql-aggregates#functions",
+  "functions": "fenecql-reading#functions",
   "geo": "fenecql-schema#geo",
   "highlights": "fenecql-search#highlights",
   "hybrid": "fenecql-search#hybrid",

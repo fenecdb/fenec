@@ -122,7 +122,7 @@ right; so does going past the two <code>json</code> depths.</p>
 <tr><td>parallel build threshold</td><td class="n">1024 vectors</td><td>below it, the serial path</td></tr>
 <tr><td>gap in an externally given <code>id</code></td><td class="n">4096</td><td>a larger jump falls into a sparse map rather than a dense array</td></tr>
 <tr><td><code>timestamp</code></td><td class="n">1 ms, i64</td><td>±2.9×10<sup>8</sup> years; microseconds truncated, always UTC</td></tr>
-<tr><td><a href="/docs/fenecql-aggregates#functions"><code>bucket</code> by a named zone</a></td><td class="n">from 2000</td><td>IANA's rules of the build's tzdata (2026c); a time before 2000 is a query error, never answered by rules the build does not hold; an offset written out (<code>'+03:00'</code>) answers any time</td></tr>
+<tr><td><a href="/docs/fenecql-reading#functions"><code>bucket</code> by a named zone</a></td><td class="n">from 2000</td><td>IANA's rules of the build's tzdata (2026c); a time before 2000 is a query error, never answered by rules the build does not hold; an offset written out (<code>'+03:00'</code>) answers any time</td></tr>
 <tr><td><code>vector&lt;N, f16&gt;</code></td><td class="n">±65 504</td><td>~3 decimal digits; outside it, values silently become <code>inf</code> or 0</td></tr>
 <tr><td><code>geo</code> point</td><td class="n">±180°, ±90°</td><td>two <code>f64</code>s kept as written; past either range a write is refused, never wrapped</td></tr>
 <tr><td><code>sparse&lt;N&gt;</code> dimension</td><td class="n">10<sup>9</sup></td><td>pgvector's; the weights are <code>f32</code>, finite, and a zero is dropped</td></tr>

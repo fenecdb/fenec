@@ -16,7 +16,7 @@ the rows a <code>where</code> keeps, and <code>del</code> removes them.</p>
 collection `stock` created
 fenec&gt; put stock [{sku: "tea", qty: 10}, {sku: "jam", qty: 2}];
 2 records (152.00µs)
-fenec&gt; insert stock {sku: "tea", qty: 1}
+fenec&gt; insert stock {sku: "tea", qty: 1};
 error: duplicate: `stock.sku` is unique, and document 1 holds "tea" already
 fenec&gt; put stock {sku: "tea", qty: 1} if absent;
 0 records (94.58µs)
@@ -30,9 +30,9 @@ sku  qty
 ---  ---
 tea  12
 (1 rows, 194.00µs)
-fenec&gt; set stock {qty: qty - 3} where sku = "jam" and qty &gt;= 3 require 1
+fenec&gt; set stock {qty: qty - 3} where sku = "jam" and qty &gt;= 3 require 1;
 error: unmet: `set stock` wrote 0 rows, and requires 1
-fenec&gt; del stock where qty &lt; 3 returning sku
+fenec&gt; del stock where qty &lt; 3 returning sku;
 sku
 ---
 jam

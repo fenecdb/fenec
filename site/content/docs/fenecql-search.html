@@ -188,6 +188,10 @@ completions 4 µs.</p>
 ranking. Use it when some answers share your words and others only your
 meaning.</p>
 
+<p>A filter beside <code>near</code> is another thing, though it is also called
+a hybrid query: <a href="fenecql-vector.html#a-hybrid-query">A hybrid query</a>
+on Vector search.</p>
+
 <pre data-lang="fenecql">get articles match body $1 near embed $2 fuse limit 10
 get articles where year >= 2024 match body $1 near embed $2 fuse limit 10
 get articles match body $1 near embed $2 fuse k 60 candidates 50 limit 10

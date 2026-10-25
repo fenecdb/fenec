@@ -14,7 +14,7 @@ links are not fetched: a build must not depend on the network.
 The fragments `docs/fenecql` once held (`moved.json`) are held to the same:
 each has to name a page and an id that were built, and none may still be an
 id of `docs/fenecql`, whose script would send a reader away from a section
-that is there.
+that is there; and `docs/fenecql` has to carry that script, or the map is dead.
 
 Standard library only, as `build.py` is. Exits 1 and lists every broken link.
 """
@@ -36,8 +36,21 @@ class Page(html.parser.HTMLParser):
         super().__init__(convert_charrefs=True)
         self.ids = set()
         self.hrefs = []
+        self.scripts = []
+        self.in_script = False
+
+    def handle_endtag(self, tag):
+        if tag == "script":
+            self.in_script = False
+
+    def handle_data(self, data):
+        if self.in_script:
+            self.scripts[-1] += data
 
     def handle_starttag(self, tag, attrs):
+        if tag == "script":
+            self.in_script = True
+            self.scripts.append("")
         for k, v in attrs:
             if k in ("id", "name") and v:
                 self.ids.add(v)
@@ -116,6 +129,10 @@ def main():
             broken.append(f"moved.json: {fragment} -> {target}: no id `{where}`")
         if old is not None and fragment in old.ids:
             broken.append(f"moved.json: {fragment} is an id docs/fenecql still has")
+    # The map is read by the one script on docs/fenecql: without it every
+    # target above is a page nobody is sent to.
+    if old is None or not any("location.replace" in script for script in old.scripts):
+        broken.append("moved.json: docs/fenecql carries no script that follows it, so the map is dead")
     for b in broken:
         print(b)
     print(f"{checked} internal links over {len(pages)} pages, {len(broken)} broken")

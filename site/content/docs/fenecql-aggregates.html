@@ -1,6 +1,6 @@
 <!--
 title: Aggregates and grouping — FenecQL — fenecdb
-description: Aggregates in FenecQL: count, sum, avg, min, max, first and last, group and having, bucket and time zones, and the functions over a row.
+description: Aggregates in FenecQL: count, sum, avg, min, max, first and last, group and having, totals per group and bars by the minute.
 -->
 
 <h1>Aggregates and grouping</h1>
@@ -43,8 +43,9 @@ north   8
 </pre>
 
 <p>An aggregate folds any expression, <code>sum(qty * price)</code>;
-<code>bucket(at, 1h)</code> truncates a timestamp to the hour it falls in; and
-<code>having</code> keeps the groups it holds for. Bars, VWAP, distinct users
+<code>bucket(at, 1h)</code> truncates a timestamp to the hour it falls in, and
+its intervals and time zones are under <a href="fenecql-reading.html#functions">Functions
+over a row</a>; and <code>having</code> keeps the groups it holds for. Bars, VWAP, distinct users
 and funnels are on <a href="analytics.html">Analytics and market data</a>.</p>
 
 <h2 id="aggregates">Aggregates</h2>
@@ -192,54 +193,6 @@ bars, VWAP, distinct users, counts by the minute — are on <a
 href="/docs/analytics">Analytics and market data</a>, each with what it
 costs over a million rows.</p>
 </details>
-
-<h2 id="functions">Functions over a row</h2>
-
-<p>Functions work wherever an expression goes: <code>where</code>, a
-<code>set</code>'s values, a select list's items and a group's keys.</p>
-
-<pre data-lang="fenecql">get events select bucket(at, 15m) as q, count(*) group q
-get events where bucket(at, 1d) = "2026-05-03" count
-set bars {high: greatest(high, $1), low: least(low, $1)} where key = $2
-get orders select id, case when total is null then 0 when total &lt; 0 then -1 else 1 end as sign
-</pre>
-
-<ul>
-  <li><b><code>bucket(ts, interval)</code></b> is the start of the interval
-    a <code>timestamp</code> falls in, in UTC: <code>ms</code>,
-    <code>s</code>, <code>m</code>, <code>h</code> and <code>d</code> count
-    from the epoch, <code>w</code> from a Monday as ISO's weeks begin, and
-    <code>mo</code> and <code>y</code> by the calendar —
-    <code>bucket(at, 3mo)</code> is a quarter. The interval is written as a
-    duration, <code>15m</code>, or passed as a parameter holding one as
-    text or a number of milliseconds. An <code>int</code> of epoch
-    milliseconds gives an <code>int</code>.</li>
-  <li><b><code>bucket(ts, interval, zone)</code></b> is the same by a zone's
-    clock: an IANA name, <code>bucket(at, 1d, 'Europe/Istanbul')</code>, in
-    any case, or an offset written out — <code>'+03:00'</code>,
-    <code>'-0530'</code>, <code>'+03'</code>, <code>'Z'</code>,
-    <code>'UTC'</code> — or a parameter holding either, which is how a
-    page passes its own. A day, a week, a month or a year starts at local
-    midnight — the first instant whose clock reads that date, where a clock
-    skips midnight the instant it jumps past it — so where daylight time
-    begins or ends a day is 23 or 25 hours. A shorter interval starts each
-    time the clock reads its start or jumps past it: the hour a clock shows
-    twice is two buckets, and one it skips none. The rules are IANA's from
-    2000 on, of the tzdata the build was made with (2026c), each zone's
-    transitions and the rule after them; a time before 2000 in a named zone
-    is refused rather than answered by rules the build does not hold, and
-    an offset answers any time. A named zone's table is 31 KB that native
-    builds carry and the browser module is handed beside its collation data
-    the first time a statement names one.</li>
-  <li><b><code>greatest(a, b, …)</code> and <code>least(a, b, …)</code></b>
-    are the largest and smallest of their values, as PostgreSQL's are: a
-    null is passed over, and the answer is null only when every value
-    is.</li>
-  <li><b><code>case when c then v … else e end</code></b> is the value of
-    the first condition that holds, or the <code>else</code>, or null.
-    Only the branch taken is worked out: <code>case when qty = 0 then null
-    else px / qty end</code> divides only where it may.</li>
-</ul>
 
 <h2 id="totals-per-group">Totals per group</h2>
 

@@ -143,6 +143,12 @@ test('a question the words miss finds its page by its meaning', () => {
 const embedded = (url) => dbv.run('get docs where url = $1 count', [url]).rows[0].count > 0
   && dbv.run('get docs where url = $1 and embed is null count', [url]).rows[0].count === 0;
 
+/** The sections a move left without a vector until the deploy embeds them
+ *  and the cache is committed: held to the list the words give them while
+ *  they have none, and to their own bound once they do. Any other section
+ *  that loses its vector fails the test. Emptied by that commit. */
+const UNTIL_EMBEDDED = new Set(['docs/fenecql-schema#collation']);
+
 test('what the words found, the meaning keeps', () => {
   for (const [q, url, within] of [
     // The words left the compaction section off the list until it told of
@@ -161,9 +167,7 @@ test('what the words found, the meaning keeps', () => {
     ['work offline and catch up later', 'docs/sync', 1],
   ]) {
     const [, meaning] = standing(q, url);
-    // A section the cache holds no vector for is held to the list the
-    // words give it, and to the first place once it has one.
-    const bound = embedded(url) ? within : 10;
+    const bound = UNTIL_EMBEDDED.has(url) && !embedded(url) ? 10 : within;
     assert.ok(meaning >= 1 && meaning <= bound, `${q}: ${url} at ${meaning} by meaning, within ${bound} wanted`);
   }
 });
