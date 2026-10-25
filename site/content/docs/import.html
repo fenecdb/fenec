@@ -276,8 +276,8 @@ table is served over HTTP and subscriptions while it follows.</p>
     --follow-index "category@hash"
 opened: articles.fenec
 following: docs
-fenec-server 0.1.10: articles.fenec  [sync=250 ms]
-fenec-http 0.1.10 listening on: http://0.0.0.0:8080  [token]
+fenec-server {{version}}: articles.fenec  [sync=250 ms]
+fenec-http {{version}} listening on: http://0.0.0.0:8080  [token]
 follow: docs: slot fenec_articles (created), publication fenec_articles (created)
 follow: the slot keeps the server's WAL until this server confirms it; to stop following for good: select pg_drop_replication_slot('fenec_articles')
 follow: copying docs: there is none yet

@@ -9,9 +9,13 @@ nothing reaches a registry before the notes have had a read.
 1. `make version V=X.Y.Z`: the one version goes into the workspace, the
    Python package, the npm packages, the NuGet package, the Kotlin and Dart
    packages, the Flutter plugin, `Package.swift`'s release, the image the
-   README pulls and the examples' dependencies (`examples/`). Then
-   `cargo check` moves `Cargo.lock`, and the change goes through a pull
-   request like any other.
+   README pulls and the examples' dependencies (`examples/`). The site needs
+   nothing more: `site/build.py` writes the workspace's version into every
+   `{{version}}` of the docs (the Quickstart's install lines and the image's
+   tag among them). Then `cargo check` moves `Cargo.lock`, and the change goes
+   through a pull request like any other. Once the release is published, run
+   the Quickstart's commands once more: the outputs it shows come from the
+   release it installs.
 2. Build the Swift package's binary: `gh workflow run swift-binary.yml -f
    version=X.Y.Z`. SwiftPM fetches the package by its tag, and the
    `Package.swift` at that tag must already name the XCFramework's zip by

@@ -679,13 +679,17 @@ if (motions.length) {
 
 /* A block of examples, one per language: a tab for each, the reader's
    choice kept for the next page and the next visit. Without script every
-   example shows, one under another, each under its name. */
+   example shows, one under another, each under its name. A set of tabs that
+   are not languages (the Quickstart's ways to install) names what they are,
+   `data-tabs`, and the key to keep the choice under, `data-key`: the
+   languages share `fenec-lang`, and a choice of Docker is not a language. */
 for (const box of document.querySelectorAll('[data-langs]')) {
   const panels = [...box.querySelectorAll(':scope > .lang')];
+  const key = box.dataset.key || 'fenec-lang';
   const bar = document.createElement('div');
   bar.className = 'lang-tabs';
   bar.setAttribute('role', 'tablist');
-  bar.setAttribute('aria-label', 'Language');
+  bar.setAttribute('aria-label', box.dataset.tabs || 'Language');
   const tabs = panels.map((p, i) => {
     const b = document.createElement('button');
     b.type = 'button';
@@ -698,15 +702,96 @@ for (const box of document.querySelectorAll('[data-langs]')) {
   const show = (i, keep) => {
     panels.forEach((p, j) => { p.hidden = j !== i; });
     tabs.forEach((b, j) => b.setAttribute('aria-selected', String(j === i)));
-    if (keep) { try { localStorage.setItem('fenec-lang', panels[i].dataset.name); } catch {} }
+    if (keep) { try { localStorage.setItem(key, panels[i].dataset.name); } catch {} }
   };
   box.prepend(bar);
   box.classList.add('on');
   let start = 0;
   try {
-    const kept = localStorage.getItem('fenec-lang');
+    const kept = localStorage.getItem(key);
     const at = panels.findIndex((p) => p.dataset.name === kept);
     if (at >= 0) start = at;
   } catch {}
   show(start, false);
+}
+
+/* ============================================================ copy buttons */
+
+/* A button on every code block, copying its text. A prompt is not code:
+   where a block has lines that begin with one (`$ ` or the shell's
+   `fenec> `), only those lines are copied, minus the prompt and with the
+   lines a trailing backslash goes on to -- the answers between them are
+   not commands. A block with no prompt is copied whole. The button sits
+   over the block's corner and takes no room, so adding it moves nothing;
+   it says "Copied" in its own label and, for a screen reader, in one polite
+   status the page keeps. */
+const PROMPT = /^(?:\$|fenec>) /;
+const codeToCopy = (text) => {
+  const lines = text.split('\n');
+  if (!lines.some((l) => PROMPT.test(l))) return text;
+  const out = [];
+  let more = false;
+  for (const l of lines) {
+    if (PROMPT.test(l)) {
+      out.push(l.replace(PROMPT, ''));
+      more = l.endsWith('\\');
+    } else if (more) {
+      out.push(l);
+      more = l.endsWith('\\');
+    }
+  }
+  return out.join('\n');
+};
+const copyText = async (text) => {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    // No clipboard API (an insecure origin, an older browser): a selection.
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+    document.body.append(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch {}
+    ta.remove();
+    return ok;
+  }
+};
+const codeBlocks = [...document.querySelectorAll('.code')];
+if (codeBlocks.length) {
+  const status = document.createElement('div');
+  status.className = 'sr-only';
+  status.setAttribute('role', 'status');
+  status.setAttribute('aria-live', 'polite');
+  document.body.append(status);
+  let quiet = 0;
+  for (const block of codeBlocks) {
+    const code = block.querySelector('pre code');
+    if (!code) continue;
+    const lang = block.dataset.lang;
+    const name = block.querySelector('.code-label')?.textContent.trim()
+      || (lang && lang !== 'text' ? `${lang} code` : 'code');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = block.querySelector('.code-label') ? 'code-copy in-bar' : 'code-copy';
+    btn.textContent = 'Copy';
+    btn.setAttribute('aria-label', `Copy ${name}`);
+    let back = 0;
+    btn.addEventListener('click', async () => {
+      const ok = await copyText(codeToCopy(code.textContent));
+      clearTimeout(back);
+      clearTimeout(quiet);
+      btn.textContent = ok ? 'Copied' : 'Copy failed';
+      btn.classList.toggle('done', ok);
+      // Emptied first: the same words twice in a row are not announced.
+      status.textContent = '';
+      setTimeout(() => { status.textContent = ok ? `Copied ${name}` : 'Could not copy'; }, 30);
+      back = setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('done'); }, 1800);
+      quiet = setTimeout(() => { status.textContent = ''; }, 4000);
+    });
+    block.append(btn);
+  }
 }

@@ -369,7 +369,7 @@ hits = query("get docs select title match title $1 fuzzy", ["oasys"])</pre>
 </div>
 
 <div class="lang" data-name="Swift">
-<pre data-lang="text" data-label="Package.swift">.package(url: "https://github.com/fenecdb/fenec", from: "0.1.7")   // product "FenecDB"</pre>
+<pre data-lang="text" data-label="Package.swift">.package(url: "https://github.com/fenecdb/fenec", from: "{{version}}")   // product "FenecDB"</pre>
 <pre data-lang="swift" data-label="Search.swift">import FenecDB
 
 // Embedded: the database is a file the app holds, no server.
@@ -410,7 +410,7 @@ and <code>withIdempotencyKey</code> makes a write once
 </div>
 
 <div class="lang" data-name="Kotlin">
-<pre data-lang="text" data-label="build.gradle.kts">implementation("com.fenecdb:fenecdb-android:0.1.7")   // the AAR; the JVM: com.fenecdb:fenecdb</pre>
+<pre data-lang="text" data-label="build.gradle.kts">implementation("com.fenecdb:fenecdb-android:{{version}}")   // the AAR; the JVM: com.fenecdb:fenecdb</pre>
 <pre data-lang="kotlin" data-label="Search.kt">import com.fenecdb.*
 
 // Embedded: the database is a file the app holds, no server.

@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.parse
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(ROOT)
@@ -103,6 +104,11 @@ NAV = [
         ("docs/file-format", "File format"),
         ("docs/limits", "Limits"),
     ]),
+    # Last, after the reader has what they came for: the Quickstart installs
+    # a release, and what is left for a clone is here.
+    ("Contribute", [
+        ("docs/build", "Build from source"),
+    ]),
 ]
 
 # ---------------------------------------------------------------- highlighting
@@ -155,6 +161,9 @@ KEYWORDS = {
     "ruby": """def end return if else elsif unless do require nil true false
         raise""".split(),
 }
+# A page whose script is the point of showing it (the Quickstart's): the
+# tags are plain words and the script's words are JavaScript's.
+KEYWORDS["html"] = KEYWORDS["js"]
 
 TYPES = """bool int float text bytes timestamp vector f16 cosine l2 dot
     Fenec FenecSync Database Collection Value Error String Vec Option Result""".split()
@@ -178,6 +187,7 @@ COMMENT = {
     "java": r"//[^\n]*|/\*[\s\S]*?\*/",
     "php": r"//[^\n]*|/\*[\s\S]*?\*/",
     "ruby": r"#[^\n]*",
+    "html": r"//[^\n]*|/\*[\s\S]*?\*/|<!--[\s\S]*?-->",
 }
 
 
@@ -330,6 +340,31 @@ def clean_links(html):
 META_RE = re.compile(r"^<!--\s*(?P<meta>[\s\S]*?)-->\s*")
 
 
+def docs_map():
+    """Every page of NAV, a group at a time, for the docs index: written
+    from the navigation, so a page added there is reachable from the index
+    with nothing else to remember. Links are relative to docs/."""
+    groups = []
+    for group, items in NAV:
+        links = "".join(
+            f'<li><a href="{key[len("docs/"):]}.html">{html.escape(label)}</a></li>'
+            for key, label in items if key != "docs/index")
+        if links:
+            groups.append(f'<div><p class="docmap-group">{html.escape(group)}</p><ul>{links}</ul></div>')
+    return f'<div class="docmap">{"".join(groups)}</div>'
+
+
+def filled(raw):
+    """A page's text with what the build writes into it: the release's
+    number wherever the page says `{{version}}`, from the one place
+    `make version` writes it (the workspace's Cargo.toml), so a release moves
+    the install lines, the image's tag and the sample output with it; and the
+    docs index's map of every page. Claims are checked against this text, as
+    it is read."""
+    return (raw.replace("{{version}}", workspace_version())
+               .replace("{{docs_map}}", docs_map()))
+
+
 def read_page(path):
     raw = open(path, encoding="utf-8").read()
     meta = {}
@@ -340,7 +375,7 @@ def read_page(path):
                 k, v = line.split(":", 1)
                 meta[k.strip()] = v.strip()
         raw = raw[m.end():]
-    return meta, ycsb_redis(raw)
+    return meta, filled(ycsb_redis(raw))
 
 
 def nav_html(active, base):
@@ -989,8 +1024,9 @@ def claims_against(truth, unit, wanted):
         path = os.path.join(REPO, rel)
         if not os.path.exists(path):
             continue  # AGENTS.md is optional
-        # As built: Redis's YCSB rows are written into the page then.
-        body = ycsb_redis(open(path, encoding="utf-8").read())
+        # As built: Redis's YCSB rows are written into the page then, and
+        # the release's number into every `{{version}}`.
+        body = filled(ycsb_redis(open(path, encoding="utf-8").read()))
         found = list(re.finditer(pattern, body, re.MULTILINE))
         if not found:
             problems.append(f"{rel}: nothing matched /{pattern}/ -- reworded?")
@@ -1155,7 +1191,8 @@ def page_text(body):
     # escaped here and unescaped only by the last pass, or `<name>` and
     # `vector<384>` would read as tags to the pass that strips them.
     def code(m):
-        lang = m.group(1) or ""
+        # Any attributes: a block with a label (`data-label`) is code too.
+        lang = (re.search(r'data-lang="([^"]*)"', m.group(1)) or [None, ""])[1]
         src = html.escape(html.unescape(m.group(2)), quote=False)
         return f"\n```{lang}\n{src.strip()}\n```\n"
 
@@ -1166,11 +1203,13 @@ def page_text(body):
     def link(m):
         href, text = m.group(1), m.group(2)
         if not re.match(r"https?:|mailto:|#", href):
-            href = f"{SITE}/docs/" + re.sub(r"\.html(?=#|$)", "", href)
+            # Relative to a docs page, as the browser reads it: `../playground.html`
+            # and `/docs/http` both land on their page.
+            href = re.sub(r"\.html(?=#|$)", "", urllib.parse.urljoin(f"{SITE}/docs/", href))
         return f"[{text}]({href})"
 
     t = re.sub(r"<!--[\s\S]*?-->", "", body)
-    t = re.sub(r'<pre(?: data-lang="([^"]*)")?>([\s\S]*?)</pre>', code, t)
+    t = re.sub(r"<pre([^>]*)>([\s\S]*?)</pre>", code, t)
     t = re.sub(r"<tr[^>]*>([\s\S]*?)</tr>", row, t)
     t = re.sub(r"<h1[^>]*>([\s\S]*?)</h1>", r"\n# \1\n", t)
     t = re.sub(r"<h2[^>]*>([\s\S]*?)</h2>", r"\n## \1\n", t)

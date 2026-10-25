@@ -633,6 +633,45 @@ html:not(.js) .search-open-btn { display: none; }
 .t-anno    { color: #C79BF2; }
 .t-comment { color: var(--sand-dim); font-style: italic; }
 
+/* The copy button (site.js): over the block's top corner, so it takes no
+   room and adding it moves nothing. A fixed width holds its words, "Copy",
+   "Copied" and "Copy failed", in one box. The block's corner is its own
+   panel colour, so the button is too: text running under it stays legible
+   behind its edge. Always shown: hidden until hover, it could not be found
+   on a phone, nor by anyone who does not move a pointer. */
+.code-copy {
+  position: absolute; top: 5px; right: 6px; z-index: 1;
+  box-sizing: border-box; width: 78px; height: 24px; padding: 0;
+  font: 500 12px/1 var(--sans); text-align: center;
+  color: var(--sand-2); background: var(--panel);
+  border: 1px solid var(--rule-hot); border-radius: 5px; cursor: pointer;
+  transition: color .15s, border-color .15s, background-color .15s, opacity .15s;
+}
+.code-copy:hover { color: var(--star); border-color: var(--sun); }
+.code-copy:focus-visible { outline: 2px solid var(--oasis); outline-offset: 2px; }
+.code-copy.done { color: #0C0819; background: var(--oasis); border-color: var(--oasis); }
+/* In a label bar (`in-bar`) it covers nothing and is always shown. Over a
+   block with no label it would sit on the end of the first line, so where
+   there is a pointer it appears as the block is pointed at or the button
+   is reached by the keyboard; without a pointer (a phone) it is always
+   shown, as nothing else would tell of it. */
+@media (hover: hover) {
+  .code-copy:not(.in-bar) { opacity: 0; }
+  .code:hover .code-copy, .code-copy:focus-visible, .code-copy.done { opacity: 1; }
+}
+@media (forced-colors: active) {
+  .code-copy { border-color: ButtonText; }
+  .code-copy.done { border-color: Highlight; }
+}
+/* A label bar is 34 px tall, and its text is not under the button. */
+.code-label { padding-right: 96px; }
+
+/* Text for a screen reader alone: the copy button's status. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
+}
+
 code:not(.code code) {
   font: 400 .87em/1.4 var(--mono); color: var(--sun-hot);
   background: rgba(244,169,60,.09); border: 1px solid rgba(244,169,60,.16);
@@ -797,6 +836,25 @@ tbody tr:last-child td { border-bottom: 0; }
 }
 .cards a { font-weight: 600; font-size: 17px; text-decoration: none; color: var(--sun-hot); }
 .cards p { margin: 6px 0 0; color: var(--sand-dim); font-size: 15px; max-width: none; }
+
+/* The docs index's map of every page, a column a group of the sidebar's
+   (build.py writes it from the same list). */
+.doc .docmap {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 26px 28px; margin: 24px 0 30px; max-width: none;
+}
+.doc .docmap-group {
+  margin: 0 0 9px; max-width: none; font: 600 12.5px/1 var(--sans);
+  color: var(--sun); letter-spacing: .06em;
+}
+.doc .docmap ul { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--rule); }
+.doc .docmap li { margin: 0; }
+.doc .docmap a {
+  display: block; padding: 6px 0 6px 15px; font-size: 15px;
+  color: var(--sand-2); text-decoration: none; overflow-wrap: anywhere;
+  transition: color .2s, transform .2s var(--ease);
+}
+.doc .docmap a:hover { color: var(--sand); transform: translateX(2px); }
 
 /* Scrolls on its own: FenecQL's 28 entries ran past the bottom of a laptop's
    screen, out of reach until the page ended. */

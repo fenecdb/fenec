@@ -33,6 +33,27 @@ footer: the two stylesheets name the same classes and tokens (`.top`,
 `.btn`, `--sun`), and a frame keeps each to its own. `_headers` lets the
 site alone frame `/studio/*`, where every other page is `DENY`.
 
+Two placeholders are written into a page as it is read (`filled`): `{{version}}`
+is the release's number, from the workspace's `Cargo.toml` -- the one place
+`make version` writes -- so an install line, an image's tag or a sample's
+banner moves with a release instead of being found and edited; and
+`{{docs_map}}` is every page of `NAV` by group, for the docs index. Both are
+filled before the claims are checked and before the search and `llms.txt` read
+the page, and a version in prose that is a fact about the past (a comparison
+checked against a competitor's page on a day, a benchmark's build) stays as
+written. The Quickstart installs that release, so its steps use only what the
+release has (`fuzzy` and `limit $1` were `main`'s when 0.1.10 was released and
+failed against it), and the outputs it shows -- a score, the server's banner --
+were taken from that release by running the page's commands. Nothing checks
+them in CI: after a release, run the page's commands again and compare.
+
+Every code block gets a copy button (`site.js`): over its corner, taking no
+room, in the label bar where a block has one and shown on hover otherwise; a
+block with prompt lines (`$ `, `fenec> `) copies those commands alone, with no
+prompt and none of the answers beneath. A set of tabs that are not languages
+names its own `data-tabs` and `data-key` (the Quickstart's Docker and
+release binary).
+
 Because it has the module in hand, `build.py` also checks the numbers the prose
 puts on it. The module's size is written into eight files and had drifted by
 13 KB across all of them before this existed; `CLAIMS` at the top of the

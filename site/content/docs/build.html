@@ -1,0 +1,123 @@
+<!--
+title: Build from source — fenecdb
+description: Clone the repository, build the shell, the server and the browser module with cargo and make, run the test suites, and build the site.
+-->
+
+<h1>Build from source</h1>
+<p class="kicker">For working on fenecdb, or for a build the releases do not
+have. To use it, install a release instead: the <a
+href="quickstart.html">Quickstart</a> has the image, the binaries and the
+packages.</p>
+
+<h2 id="clone">Clone and build</h2>
+
+<p>You need Rust from <a href="https://rustup.rs">rustup</a> and
+<code>make</code>; the repository's <code>rust-toolchain.toml</code> picks the
+stable channel and asks for the wasm32 target. Node runs the JS tests and
+Python 3 serves the console and builds this site.</p>
+
+<ol class="steps-doc">
+  <li>
+    <p>Clone the repository.</p>
+<pre data-lang="bash">git clone https://github.com/fenecdb/fenec
+cd fenec</pre>
+  </li>
+  <li>
+    <p>Build the shell and the server.</p>
+<pre data-lang="bash">cargo build --release -p fenec-cli -p fenec-server</pre>
+<pre data-lang="text" data-label="produces">target/release/fenec          the shell
+target/release/fenec-server   the server</pre>
+  </li>
+  <li>
+    <p>Build the browser module.</p>
+<pre data-lang="bash">make wasm</pre>
+<pre data-lang="text" data-label="produces">web/fenec.wasm    the engine, every feature
+web/collate/      the collation data it fetches beside it</pre>
+  </li>
+  <li>
+    <p>Run the tests.</p>
+<pre data-lang="bash">make test</pre>
+  </li>
+</ol>
+
+<div class="note">
+  <p><b>The wasm32 target comes from rustup.</b> Homebrew's <code>cargo</code>
+  ships no wasm32 standard library. The Makefile prefers
+  <code>~/.cargo/bin/cargo</code>; building by hand needs
+  <code>rustup target add wasm32-unknown-unknown</code> first.</p>
+</div>
+
+<details class="deep"><summary>Details</summary>
+<p>The binaries come from <code>cargo build</code>, not from <code>make
+test</code>: that builds with the debug profile, leaves
+<code>target/debug/fenec-server</code> for the JS tests, and makes nothing under
+<code>target/release</code>. The release workflow builds
+<code>fenec</code> in the <code>cli</code> profile (<code>cargo build --profile
+cli -p fenec-cli</code>, <code>target/cli/fenec</code>), the smaller one that
+aborts on a panic rather than unwind: a single process has nothing to recover
+from. <code>fenec-server</code> stays on <code>release</code>, where a panicking
+connection thread drops only its own request.</p>
+</details>
+
+<h2 id="tests">What <code>make test</code> runs</h2>
+
+<p>The Rust suites first, then the JS ones, on purpose: <code>cargo test</code>
+builds the <code>fenec-server</code> binary, and the JS sync tests run against
+it.</p>
+
+<ul>
+  <li>every crate's tests and doc tests, but <code>fenec-bench</code>'s, whose
+    SQLite and PostgreSQL clients are the heaviest thing a build compiles;</li>
+  <li><code>fenec-core</code> again without its indexes, and without any
+    feature, which is how the small browser modules are made;</li>
+  <li>the JS suites with <code>node --test</code>: the query builder and the
+    module, the sync layer against a real server, persistence, files, schema in
+    code, the client and the replica reads, and the studio's statements;</li>
+  <li>the sync scenarios, held to both the native core and the browser's.</li>
+</ul>
+
+<p>The JS suites that need <code>web/fenec.wasm</code> or the server binary skip
+themselves when it is missing, so run <code>make wasm</code> first to have the
+end-to-end cases actually run. A narrower run, by crate, file or name:</p>
+
+<pre data-lang="bash">cargo test -p fenec-core --test all persist::   # one file of a crate's integration tests
+cargo test -p fenec-ql near                      # by name substring
+node --test web/fenec.test.js                    # one JS suite</pre>
+
+<h2 id="make-targets">Make targets worth knowing</h2>
+
+<p>The Makefile wraps the commands you will run most. <code>make</code> with no
+target runs the tests and builds the module; the comments in the
+<code>Makefile</code> say what the rest do.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Command</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><code>make test</code></td><td>Rust suite, then the JS suite</td></tr>
+<tr><td><code>make wasm</code></td><td>Build for wasm32 and copy to <code>web/fenec.wasm</code></td></tr>
+<tr><td><code>make wasm FEATURES="text sorted"</code></td><td>The same with those features alone (<a href="javascript.html#features">A smaller module</a>)</td></tr>
+<tr><td><code>make serve</code></td><td>Build the wasm and serve the browser console on <code>http://localhost:8787</code> (<code>PORT=3000</code> for another)</td></tr>
+<tr><td><code>make server TOKEN=secret</code></td><td>Run the server over <code>./data.fenec</code> on <code>127.0.0.1:8080</code></td></tr>
+<tr><td><code>make site</code></td><td>Build this site into <code>site/dist</code> (<code>make site-serve</code> to read it on <code>http://localhost:8788</code>)</td></tr>
+<tr><td><code>make bench</code></td><td>Scale measurement</td></tr>
+<tr><td><code>make memory</code></td><td>Memory footprint, for calibrating <code>--max-memory</code></td></tr>
+<tr><td><code>make sweep</code></td><td>The ef/recall trade-off</td></tr>
+<tr><td><code>make compare</code></td><td>Against SQLite and pgvector (run <code>make pgvector-up</code> first)</td></tr>
+<tr><td><code>make small</code></td><td>The 1880 KB binary: <code>--profile cli --no-default-features</code></td></tr>
+</tbody>
+</table>
+</div>
+
+<p><code>make serve</code> serves <code>web/index.html</code>, a full console: a
+FenecQL editor, a sample data generator, live statistics and IndexedDB
+persistence.</p>
+
+<h2 id="contributing">Contributing</h2>
+
+<p><a href="https://github.com/fenecdb/fenec/blob/main/CONTRIBUTING.md">CONTRIBUTING.md</a>
+is the short version of what a change has to respect: no dependencies in the
+engine, the crates' dependency direction, limits that error rather than
+truncate, an append-only file format. The reasoning behind each is in these
+docs, starting with <a href="concepts.html">How it works</a> and <a
+href="file-format.html">File format</a>.</p>
