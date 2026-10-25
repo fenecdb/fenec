@@ -250,7 +250,10 @@ with none. Past it the client is answered 502, the request perhaps run.
   collection, a `compact` of a large tenant, a large batch or a heavy
   aggregate. A write so cut may have run, which an `Idempotency-Key` makes
   safe to send again; run such statements against the node on the private
-  network, or raise the timeout for them. A move copies a tenant's image
+  network, or raise the timeout for them. A new replica's follow slower
+  than it -- a node's rename of `.follows` took 13 s under load -- leaves
+  its tenant `unreplicated` for a moment: the router tries again by itself
+  and adopts the copy (Tenants without a replica). A move copies a tenant's image
   through the region's router under the same bound, read by read: a
   tenant whose export or install takes longer fails the move, which puts
   it back as it was.
@@ -518,6 +521,93 @@ disk was lost stays down until it has been failed over -- a lease -- and
 then starts empty: the repair places replicas there from images. Started
 sooner, it would hold the leases of tenants it no longer has.
 
+## Tenants without a replica
+
+`FenecTenantsWithoutReplica`: for 15 minutes the region's router has
+counted tenants with no copy a failover could promote -- no replica of
+their own, no standby on their node
+(`fenec_router_tenants_unreplicated{region}`). Such a tenant whose primary
+dies stays on it, writing nothing, until the node is back. Find them with
+`GET /_shard/tenants?region=<r>` on the region's router -- the entries with
+no `"replica"` whose node has no standby in `GET /_shard/nodes` (a paired
+node's tenants have their copy on the standby) -- and the router's log,
+which says why each has none:
+
+- **A node failed over** (`FenecNodeFailedOver`). Its own tenants were
+  promoted on their replicas, and the replicas it held are gone: none of
+  them has a copy until the node answers again (A node back), when its
+  files follow the new primaries. A node gone for good: `POST
+  /_shard/replicas` gives them copies on the nodes left.
+- **A replica that did not take**: `tenant `t` has no replica yet: `eu-b`
+  answered 503 ...; a repair tries again`, or `did not answer`. The router
+  tries again by itself 2, 4, 8 s ... later, up to a minute apart, eight
+  times, about four minutes; a copy whose follow landed after the router
+  stopped waiting is adopted, not made twice. Past that it logs `repair: 8
+  repairs in a row left a tenant without its replica ...`. Look at the node
+  it names -- its load, its disk (a slow rename of `.follows` outlasts the
+  10 s `FENEC_UPSTREAM_TIMEOUT`), its connections -- then `POST
+  /_shard/replicas`.
+- **No other node in the region**: `there is no other node in region `eu`
+  to keep it`. Add one (Adding a node), then `POST /_shard/replicas`.
+- **Its primary did not answer the repair's look**: as A node lost.
+
+```sh
+curl -X POST http://10.1.0.21:8090/_shard/replicas -H "Authorization: Bearer $ROOT"
+# {"replicated":[{"tenant":"acme","replica":"eu-b"}],"left":[],"failed":[]}
+```
+
+A repair answers what it did, and why it did not, tenant by tenant; only a
+tenant left without its replica makes it 502. It also lists the files the
+router may have left on nodes, in `left` (Files left on nodes).
+
+## Files left on nodes
+
+`FenecFilesLeftOnNodes`: for half an hour the router keeping the directory
+has counted files it may have left on nodes, placed by nothing
+(`fenec_router_files_left`). Each is a tenant's file the router made, or
+meant to take off, and did not: a create taken back (its schema refused)
+whose `DELETE` the node did not take, a create whose `PUT` went unanswered,
+a move undone whose target kept the copy, a move's source that would not
+go, a copy a failed try at a replica made or found, a deleted or detached
+tenant's copy that stayed, or an old primary on a node that was silent as
+its tenant was given its replica elsewhere. The router never deletes one,
+and a create of the name on that node is answered 409 while it is there.
+List them, with why, from a repair:
+
+```sh
+curl -X POST http://10.1.0.21:8090/_shard/replicas -H "Authorization: Bearer $ROOT"
+# {"replicated":[],"left":[{"tenant":"acme","node":"eu-b","why":"a create taken back, its schema not applied, its file not taken back: `eu-b` did not answer: ..."}],"failed":[]}
+```
+
+**Look at the file before removing it.** A row names where the router may
+have left a file, not that the file there now is the one it left: the
+tenant may have been moved back onto that node since, or made there again,
+or a file put there by hand, and a router that took such files back on its
+own lost tenants that way -- a standby promoted behind its primary deleted
+a tenant moved back onto the node, and a tenant made again on nodes with
+no replication token went as a file of no write. For each entry:
+
+1. Ask the router where the tenant is: `GET /_shard/tenants/<t>`. Its
+   node, its node's standby, its `replica` or a read replica on the node
+   named is the tenant's own copy -- leave it; the next repair forgets the
+   entry. Ask the global router too where regions keep their own
+   directories.
+2. Ask the node what the file is: `GET /_admin/tenants/<t>/lineage` with
+   the node's admin token (its `lineage`, against the same call's answer
+   on the tenant's own node, and `ready`), and read it through `/t/<t>/`
+   on the node. A file holding rows anyone wants is kept, or moved where
+   it belongs.
+3. Keep a copy before removing it: `GET /_admin/tenants/<t>/file` writes
+   the tenant's image, which `PUT /_admin/tenants/<t>/file` puts back.
+4. Remove it on the node: `DELETE /_admin/tenants/<t>` with the node's
+   admin token.
+5. Run a repair (`POST /_shard/replicas`): its look finds the file gone and
+   forgets the entry, and `fenec_router_files_left` falls.
+
+An entry whose node does not answer says so (`did not answer this repair's
+look`) and stays until a repair finds the node; a node removed from the
+directory takes its entries with it.
+
 ## A lease late
 
 `FenecLeaseRenewalLate`: in the last five minutes a node went more than
@@ -626,7 +716,9 @@ placements it writes, so a standby from before it promoted in the middle
 of an upgrade over a directory a newer router wrote can have the routers
 following it end a move's requests as a failover's, a 502 for a write that
 may have landed: upgrade the standbys first, as step 2 does, and promote
-none older than the router it replaces. Files go one way: a binary refuses record
+none older than the router it replaces. A router from before the files
+left on nodes were noted notes none and reports none; the entries a newer
+one noted wait in the directory for the next that reads them. Files go one way: a binary refuses record
 kinds newer than it, so once an upgraded
 node has written a tenant, that node cannot go back to the older binary --
 and an older node may not follow a newer primary's replication stream where
@@ -903,7 +995,8 @@ textfile collector).
 | `FenecAutoFailoverIncomplete` | critical | a node failed over still has tenants placed on it: they take no writes | A node lost, step 1 |
 | `FenecAutoFailover` | warning | a node was failed over | A node lost |
 | `FenecLeaseRenewalLate` | warning | a renewal to a node was late in the last five minutes (threshold for a 5 s lease); not a node failed over in the last ten | A lease late |
-| `FenecTenantsWithoutReplica` | warning | tenants with no replica, a node lost away | A node back |
+| `FenecTenantsWithoutReplica` | warning | tenants with no copy to fail over to: a node failed over, a replica that did not take in four minutes, no other node | Tenants without a replica |
+| `FenecFilesLeftOnNodes` | warning | files the router may have left on nodes, placed by nothing, for half an hour: the router never deletes them | Files left on nodes |
 | `FenecSameZoneCopies` | warning | copies in their primary's zone | Adding a node |
 | `FenecReadReplicasGivenUp` | warning | read replicas no longer made again | Read replicas |
 | `FenecTenantsMoving` | warning | a move did not record done | Placing and moving a tenant |

@@ -152,17 +152,36 @@ groups:
         annotations:
           summary: "Node {{ $labels.node }} went {{ $value }} s without a lease in the last five minutes"
           runbook: deploy/RUNBOOK.md#a-lease-late
-      # With --replicas, every tenant keeps one. A node's replica count is
-      # absent where it holds none -- every node of a region of two once one
-      # is lost -- hence the `or`, which counts it 0.
+      # With --replicas, every tenant keeps a copy a failover can promote:
+      # its replica, or its node's standby. The router counts those without
+      # by region -- a replica that did not take, which it tries again for
+      # about four minutes; the replicas of a node failed over; a region
+      # with no other node -- and a standby router counts its primary's
+      # directory, hence the `and`. The difference of fenec_router_tenants
+      # and fenec_router_replicas this read before counted a paired node's
+      # tenants, whose copy is the standby's, as missing theirs.
       - alert: FenecTenantsWithoutReplica
-        expr: (sum by (instance) (fenec_router_tenants) - (sum by (instance) (fenec_router_replicas) or sum by (instance) (fenec_router_tenants) * 0) > 0) and on (instance) fenec_router_following == 0
+        expr: fenec_router_tenants_unreplicated > 0 and on (instance) fenec_router_following == 0
         for: 15m
         labels:
           severity: warning
         annotations:
-          summary: "{{ $value }} tenants of {{ $labels.instance }} have no replica"
-          runbook: deploy/RUNBOOK.md#a-node-back
+          summary: "{{ $value }} tenants on {{ $labels.instance }}{{ if $labels.region }} in {{ $labels.region }}{{ end }} have no copy to fail over to"
+          runbook: deploy/RUNBOOK.md#tenants-without-a-replica
+      # A file the router may have left on a node -- a create or a move
+      # taken back whose DELETE the node refused, a copy that stayed -- is
+      # noted and counted, never taken off by the router: neither it nor the
+      # node can tell it from a later file at the same place. A repair's
+      # look forgets one it finds gone or placed; the rest are an
+      # operator's to look at.
+      - alert: FenecFilesLeftOnNodes
+        expr: fenec_router_files_left > 0 and on (instance) fenec_router_following == 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} files {{ $labels.instance }} may have left on nodes are placed by nothing"
+          runbook: deploy/RUNBOOK.md#files-left-on-nodes
       - alert: FenecSameZoneCopies
         expr: fenec_router_same_zone_copies > 0 and on (instance) fenec_router_following == 0
         for: 15m
