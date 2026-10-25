@@ -998,6 +998,32 @@ request by its context or token, never the HTTP client's timeout; a
 store checks its names against FenecQL's and passes values as
 parameters.
 
+**[The desktop app is a window on a studio a `fenec-server` serves, one server per
+file.](docs/design/integrations.md#studio-desktop)** `integrations/studio-desktop`
+(Electrobun, macOS, beta) starts a server in one place (`server.ts`), its
+token in the environment, never argv, the rest of the environment an
+allowlist, and a pipe on its stdin the app holds (`--exit-on-stdin-close`, so no
+server outlives the app, `kill -9` included); a token reaches a page in one
+(`session.ts`: a frozen `window.fenecHost`, defined only where
+`location.origin` is the server's, never stored). A studio window is `sandbox: true` (the
+event bridge only) and held to its origin, and every window with the RPC
+bridge is held to its own `views://` folder (`holdTo`): a navigation anywhere
+else is refused. A saved server's token is in the Keychain alone, with the
+address it was saved for (`token.ts`), is never sent to another address or
+along a redirect, and every failure is a notice window, never a native alert
+(that blocks the main process, and every server's supervision with it). A
+window's data store is its own, and Electrobun's `clearStorageData("all")` does
+nothing: a removed connection's is cleared with the explicit list of kinds
+(`STORE_KINDS`), after its window is closed, and `checks/storage.mjs` reads it
+back from outside. The shipped bundle holds none of the test hooks: a new
+environment read in the shipped app is a hook unless it is behind
+`__TESTABLE__` (`checks/release.mjs`). The toolchain is fetched into
+`.hutch-home/`, never `~/.hutch` or a shell file, and held to `hutch-pin.json`
+(`scripts/electrobun.mjs`): Hutch's archive and binaries, and a digest of the
+Electrobun runtime, Bun and Cottontail Hutch fetches, checked before a build;
+signing runs only by hand, from main, in an Environment made with its reviewer
+and `main` rule before its secrets are (`desktop.yml`, RELEASING.md).
+
 **[Grafana's data source binds a dashboard's values; it never splices
 them.](docs/design/integrations.md#grafana)** Names become `$n`s
 (`fenecql.go`); only `get`, `select` and `explain` go out.
