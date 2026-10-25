@@ -242,6 +242,20 @@ which ran on a busier or an idler machine than that: here at 4x, while
 another job ran, the product page's last two runs began at 1 740 and 1 710
 against 2 390-2 880 for the rest, and blocked for 84 and 85 ms.
 
+**Chrome is read in before its first launch.** `scripts/warm-chrome.mjs`,
+which `scripts/lighthouse.sh` runs first, reads Chrome's own files through
+once, a mebibyte at a time. On a fresh CI runner Chrome's first launch
+faults its binary in from a cold disk, and Lighthouse's chrome-launcher
+gives it 25 s (50 polls of 500 ms) to say where it listens; once it did not,
+and the job failed with `waiting for dynamic debugging port in
+chrome-err.log` after every test had passed. The same launch in a container
+with its page cache dropped and its reads of the disk held to 80 a second
+failed with that error after 27.8 s, twice; with Chromium read first (4.7
+s) it took 5.6 s, twice. The step prints what it read and how long that
+took (here, 1.5 GB of the whole app in 1.1 s the first time, 0.2 s after).
+`CHROME_PATH` names Chrome itself where `google-chrome` is a wrapper script
+in a directory that is not Chrome's.
+
 **On a low-tier phone the TBT budget is not met.** DevTools' "low-tier
 mobile", a benchmarkIndex of 264, is the Moto G Power whose screen the
 profile has. Slowed to it (`LHCI_CPU_TARGET=264 npm run lighthouse`: 11.52x
@@ -383,6 +397,6 @@ lib/
   db.ts, jwt.ts      connections, minted tokens, /batch
   generate.ts        the seeded catalog generator
 policy.txt           what a shopper's token may read and write
-scripts/             db.sh, seed.ts, ci.sh, lighthouse.sh, cpu-slowdown.mjs, timing.ts, load.ts
+scripts/             db.sh, seed.ts, ci.sh, lighthouse.sh, warm-chrome.mjs, cpu-slowdown.mjs, timing.ts, load.ts
 test/                checkout, security and SEO tests
 ```

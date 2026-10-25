@@ -1059,6 +1059,12 @@ promoted by `POST /_replication/promote` and the units switched at once;
   A failing mobile job also uploads `test-reports-android` (the JUnit
   reports) or `test-results-apple` (the simulator's `.xcresult`) for a
   week.
+- A step that launches Chrome reads Chrome's own files first. A fresh
+  runner's cold disk takes 5 to 20 s of the 25 to 30 a launcher waits for
+  Chrome's endpoint, and the shop's Lighthouse step once failed so after
+  all its tests passed (`waiting for dynamic debugging port`): the studio's
+  harness (`warm`) and `examples/{shop,analytics}/scripts/warm-chrome.mjs`
+  do it, and a longer wait would only move the bound.
 - A test reads the clock from below. A sleep never ends early, so `took >=
   wait` holds on any machine, while a bound from above measures the machine:
   macOS gives the timers of a job whose QoS it clamps hundreds of
