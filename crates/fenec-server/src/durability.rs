@@ -134,13 +134,38 @@ pub fn request_shutdown() {
 }
 
 /// [`request_shutdown`] for a failure: what runs beside the database -- the
-/// listener, `--follow`'s mirror -- stopped, and the server goes down the
-/// one shutdown and exits with `code`, the first given. Exiting where it
-/// failed would cut short a shutdown already under way, its sync among
-/// what was cut, and skip the sync of one that was not.
+/// listener, `--follow`'s mirror, a thread the start could not make --
+/// stopped, and the server goes down the one shutdown and exits with
+/// `code`, the first given. Exiting where it failed would cut short a
+/// shutdown already under way, its sync among what was cut, and skip the
+/// sync of one that was not.
 pub fn stop_with(code: i32) {
-    let _ = EXIT_CODE.compare_exchange(0, code, Ordering::SeqCst, Ordering::SeqCst);
+    exit_with(code);
     request_shutdown();
+}
+
+/// The exit code alone, for a thread a shutdown may already be waiting on:
+/// it stores the code before it lets the wait go, and only then asks for
+/// the shutdown, so the exit cannot come before the code (`mirror`).
+pub fn exit_with(code: i32) {
+    let _ = EXIT_CODE.compare_exchange(0, code, Ordering::SeqCst, Ordering::SeqCst);
+}
+
+/// Whether the server got as far as serving: its HTTP thread started.
+static SERVED: AtomicBool = AtomicBool::new(false);
+
+/// Marks the server as serving, once its HTTP thread is started. A shutdown
+/// before it writes no checkpoint: a checkpoint rewrites the whole file, and
+/// a start that failed after the open -- under a supervisor that restarts
+/// it, again and again -- rewrote a file of 100 000 vectors at each try,
+/// 26.4 MB growing to 29.3 over three, each graph a part of one.
+pub fn serving() {
+    SERVED.store(true, Ordering::SeqCst);
+}
+
+/// Whether [`serving`] was reached: a checkpoint is written only then.
+pub fn served() -> bool {
+    SERVED.load(Ordering::SeqCst)
 }
 
 /// The code the shutdown exits with: 0 unless [`stop_with`] gave another.
@@ -305,10 +330,15 @@ fn shutdown(db: &RwLock<Database>, checkpoint: bool) -> ! {
     // OOM) the data is already on disk and only the graph is lost, to be
     // rebuilt on open. Because `rewrite` writes to a side file and renames,
     // a half-written checkpoint cannot corrupt the file.
+    // A start that never served writes none ([`serving`]).
     if checkpoint && g.stats().iter().any(|s| !s.vector_indexes.is_empty()) {
-        match g.checkpoint() {
-            Ok(()) => fenec_http::log!("checkpoint written: the HNSW graph is persisted"),
-            Err(e) => fenec_http::log!("could not write the checkpoint: {e}"),
+        if !served() {
+            fenec_http::log!("no checkpoint: the server stopped before it served");
+        } else {
+            match g.checkpoint() {
+                Ok(()) => fenec_http::log!("checkpoint written: the HNSW graph is persisted"),
+                Err(e) => fenec_http::log!("could not write the checkpoint: {e}"),
+            }
         }
     }
     std::process::exit(exit_code());

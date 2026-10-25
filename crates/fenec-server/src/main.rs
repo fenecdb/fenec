@@ -292,27 +292,30 @@ fn is_stdin(path: &str) -> bool {
             Some("/dev/stdin" | "/dev/fd/0" | "/proc/self/fd/0")
         )
     };
-    if named(std::path::Path::new(path)) || std::fs::canonicalize(path).is_ok_and(|p| named(&p)) {
-        return true;
+    named(std::path::Path::new(path))
+        || std::fs::canonicalize(path).is_ok_and(|p| named(&p))
+        || same_file_as_stdin(path)
+}
+
+#[cfg(unix)]
+fn same_file_as_stdin(path: &str) -> bool {
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::MetadataExt;
+    let ours = std::io::stdin()
+        .as_fd()
+        .try_clone_to_owned()
+        .map(std::fs::File::from)
+        .and_then(|f| f.metadata());
+    match (ours, std::fs::metadata(path)) {
+        (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
+        _ => false,
     }
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsFd;
-        use std::os::unix::fs::MetadataExt;
-        let ours = std::io::stdin()
-            .as_fd()
-            .try_clone_to_owned()
-            .map(std::fs::File::from)
-            .and_then(|f| f.metadata());
-        match (ours, std::fs::metadata(path)) {
-            (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
-            _ => false,
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        path == "/dev/stdin"
-    }
+}
+
+/// Elsewhere a file has no device and inode to compare: the names alone.
+#[cfg(not(unix))]
+fn same_file_as_stdin(_: &str) -> bool {
+    false
 }
 
 /// Health check: `GET /_health` on the HTTP listener, which answers with no
@@ -895,6 +898,26 @@ fn main() {
     // both are the HTTP endpoint's to apply, as it takes every write.
     http_cfg.sync_on_write = sync == SyncPolicy::Always;
 
+    // An endpoint on an open network without a token is a question of the
+    // flags alone, refused with them (2) before anything is opened.
+    if let Some(refused) = fenec_http::exposed(&http_cfg, false) {
+        fail(&format!("could not open the HTTP endpoint: {refused}"));
+    }
+    let metrics_cfg = metrics.map(|addr| fenec_http::Config {
+        addr,
+        token: http_cfg.token.clone(),
+        admin_token: http_cfg.admin_token.clone(),
+        insecure: http_cfg.insecure,
+        idle_timeout: http_cfg.idle_timeout,
+        ..fenec_http::Config::default()
+    });
+    if let Some(refused) = metrics_cfg
+        .as_ref()
+        .and_then(|c| fenec_http::exposed(c, true))
+    {
+        fail(&format!("could not open the metrics endpoint: {refused}"));
+    }
+
     if let Some(dir) = dir {
         if promote {
             fail(
@@ -907,7 +930,7 @@ fn main() {
                 "--dir and --file are exclusive: one serves a file, the other a directory of them",
             );
         }
-        if metrics.is_some() {
+        if metrics_cfg.is_some() {
             fail("with --dir the HTTP listener serves /_metrics: --metrics is for a --file server");
         }
         let repl = replication_token.filter(|_| replicating).map(|token| {
@@ -998,14 +1021,32 @@ fn main() {
         }
     }
 
+    // Both listeners before anything runs beside the database: a port that
+    // cannot be had stops the start here, with nothing written to sync.
+    // Taken after it, it stopped a server whose mirror had made its slot
+    // and copied 200 000 rows, and whose shutdown rewrote a file of vectors
+    // at each try a supervisor's restarts made.
+    let metrics_listener = metrics_cfg.as_ref().map(|c| {
+        std::net::TcpListener::bind(&c.addr)
+            .unwrap_or_else(|e| fail(&format!("could not open the metrics endpoint: {e}")))
+    });
+    let listener = match std::net::TcpListener::bind(&http_cfg.addr) {
+        Ok(l) => l,
+        Err(e) => {
+            fenec_http::log!("could not open the HTTP endpoint: {e}");
+            std::process::exit(1);
+        }
+    };
+
     let shared = Arc::new(RwLock::new(db));
     // From here threads run beside the database -- the graph keeper, the
     // sweeper, a replica's follower, the mirror, the listener -- and every
-    // way down is the one shutdown: what fails to start below is logged and
-    // stops the server through it (`durability::stop_with`), never past its
-    // sync. Before the HTTP thread announces its listener, too: once the
-    // line is out a supervisor may send SIGTERM, and the flag it sets waits
-    // for the syncer below.
+    // way down is the one shutdown: a thread the start cannot make is logged
+    // and stops the server through it (`durability::stop_with`), never past
+    // its sync, and with no checkpoint, the server having served nothing
+    // (`durability::serving`). Before the HTTP thread announces its
+    // listener, too: once the line is out a supervisor may send SIGTERM, and
+    // the flag it sets waits for the syncer below.
     durability::install_signal_handlers();
     let started = (|| -> std::result::Result<(), String> {
         // What the open left out of the graphs is linked beside the queries:
@@ -1059,19 +1100,8 @@ fn main() {
 
         // `--metrics`: /_metrics alone on a listener of its own, readable
         // with the tokens the HTTP endpoint takes.
-        if let Some(addr) = metrics {
-            let mcfg = fenec_http::Config {
-                addr,
-                token: http_cfg.token.clone(),
-                admin_token: http_cfg.admin_token.clone(),
-                insecure: http_cfg.insecure,
-                idle_timeout: http_cfg.idle_timeout,
-                ..fenec_http::Config::default()
-            };
+        if let (Some(mcfg), Some(listener)) = (metrics_cfg, metrics_listener) {
             let server = fenec_http::Server::metrics_only(Arc::clone(&shared), repl.clone(), mcfg);
-            let listener = server
-                .bind()
-                .map_err(|e| format!("could not open the metrics endpoint: {e}"))?;
             std::thread::Builder::new()
                 .name("fenec-metrics".into())
                 .spawn(move || {
@@ -1086,9 +1116,6 @@ fn main() {
         if let Some(repl) = repl {
             http_server = http_server.with_replication(repl);
         }
-        let listener = http_server
-            .bind()
-            .map_err(|e| format!("could not open the HTTP endpoint: {e}"))?;
         fenec_http::log!(
             "fenec-server {}: {}  [sync={}]",
             fenec_core::VERSION,
@@ -1104,6 +1131,7 @@ fn main() {
                 }
             })
             .map_err(|e| format!("could not start the HTTP thread: {e}"))?;
+        durability::serving();
 
         // `--warm`: the derived indexes built beside the first queries,
         // which otherwise build each on its first read. Once the endpoint is
@@ -1115,9 +1143,10 @@ fn main() {
         }
         Ok(())
     })();
+    // 2, as these exited before they went through the shutdown.
     if let Err(e) = started {
         fenec_http::log!("{e}");
-        durability::stop_with(1);
+        durability::stop_with(2);
     }
 
     durability::run_syncer(shared, sync, checkpoint);
@@ -1181,13 +1210,12 @@ fn serve_dir(
             }
         );
     }
-    // From here tenants open and their followers write: every way down is
-    // the one shutdown, a failure to start below stopping the node through
-    // it (`durability::stop_with`), every open tenant synced. Before the
-    // thread that announces the listener, too: once the line is out, SIGTERM
-    // must sync, and so must the end of stdin, which sets the same flag this
-    // loop looks at.
-    durability::install_signal_handlers();
+    // The listener before any tenant opens: a port that cannot be had stops
+    // the start here, with nothing to sync. Taken after, a standby's failed
+    // starts opened its tenants and rewrote each one's file of vectors at
+    // every restart its unit made.
+    let listener = std::net::TcpListener::bind(&http_cfg.addr)
+        .unwrap_or_else(|e| fail(&format!("could not open the HTTP endpoint: {e}")));
     // A replica's tenants have to be open to follow: nothing else touches
     // them there, and a follower that is not running is a replica falling
     // behind. Opening one starts its follower -- every tenant on a standby,
@@ -1198,12 +1226,20 @@ fn serve_dir(
     for (name, Refused(status, msg)) in tenants.resume_following() {
         fenec_http::log!("tenant `{name}` did not open ({status}): {msg}");
     }
+    // After the tenants open, not before: a SIGTERM while they open stops
+    // the node at once, as the default action does -- nothing is written
+    // yet that a sync would keep -- rather than wait for every one of them
+    // past a supervisor's grace. From here every way down is the one
+    // shutdown, a thread the start cannot make stopping the node through it
+    // (`durability::stop_with`), every open tenant synced, none checkpointed
+    // before it served (`durability::serving`). Before the thread that
+    // announces the listener, too: once the line is out, SIGTERM must sync,
+    // and so must the end of stdin, which sets the same flag this loop
+    // looks at.
+    durability::install_signal_handlers();
 
     let started = (|| -> std::result::Result<(), String> {
         let http_server = fenec_http::Server::with_tenants(Arc::clone(&tenants), http_cfg);
-        let listener = http_server
-            .bind()
-            .map_err(|e| format!("could not open the HTTP endpoint: {e}"))?;
         if stdin_close {
             durability::exit_on_stdin_close()
                 .map_err(|e| format!("could not start the stdin thread: {e}"))?;
@@ -1217,11 +1253,13 @@ fn serve_dir(
                 }
             })
             .map_err(|e| format!("could not start the HTTP thread: {e}"))?;
+        durability::serving();
         Ok(())
     })();
+    // 2, as these exited before they went through the shutdown.
     if let Err(e) = started {
         fenec_http::log!("{e}");
-        durability::stop_with(1);
+        durability::stop_with(2);
     }
 
     let tick = sync.tick();
@@ -1231,7 +1269,7 @@ fn serve_dir(
             // The write locks come back held: nothing is accepted between
             // the last sync and exit.
             fenec_http::trace::flush(Duration::from_secs(2));
-            let open = tenants.shutdown();
+            let open = tenants.shutdown_with(durability::served());
             fenec_http::log!("\nshutting down: {open} open tenant(s) synced");
             std::process::exit(durability::exit_code());
         }

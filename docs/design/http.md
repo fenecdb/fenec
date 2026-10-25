@@ -121,7 +121,10 @@ that origin as `server`: a preload runs in every document the window
 loads, and a page of another origin -- a redirect's, a proxy's sign-in
 page -- would read the token from it, which no check of the studio's can
 stop. Keeping the token from other origins is the app's; the studio's own
-check refuses only a session naming a server other than the page's.
+check refuses only a session naming a server other than the page's. A
+preload in an isolated world -- Electron's under its default context
+isolation -- defines nothing the page sees: there it goes through
+`contextBridge.exposeInMainWorld`, whose copy must pass `Object.isFrozen`.
 `connect.js` reads it once as it loads, and only a plain object, since an
 element with the id `fenecHost` is `window.fenecHost` too by named access,
 its fields read once each, so a getter cannot answer one way to the check

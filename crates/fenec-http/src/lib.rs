@@ -340,21 +340,13 @@ impl Server {
     }
 
     /// Opens the listener. A non-loopback address is not accepted without a
-    /// token unless `--insecure` is given.
+    /// token unless `--insecure` is given ([`exposed`]).
     pub fn bind(&self) -> std::io::Result<TcpListener> {
-        let guarded = self.cfg.token.is_some()
-            || self.cfg.access.is_some()
-            || matches!(self.backend, Backend::Metrics { .. }) && self.cfg.admin_token.is_some();
-        if is_remote(&self.cfg.addr) && !guarded && !self.cfg.insecure {
+        let metrics = matches!(self.backend, Backend::Metrics { .. });
+        if let Some(refused) = exposed(&self.cfg, metrics) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
-                format!(
-                    "{} is not a loopback address and there is no token.\n\
-                     The HTTP endpoint does not speak TLS; listening without a\n\
-                     token on an open network exposes the whole database to\n\
-                     everyone. Pass `--http-token` (or --insecure if deliberate).",
-                    self.cfg.addr
-                ),
+                refused,
             ));
         }
         TcpListener::bind(&self.cfg.addr)
@@ -615,6 +607,25 @@ fn visible(who: &Who, resp: Response2) -> Response2 {
 }
 
 type Response2 = fenec_core::query::Response;
+
+/// Why an endpoint at `cfg.addr` is refused, or `None`: an address that is
+/// not loopback takes a token (`/_metrics` alone, `metrics`, the admin
+/// token too) unless `--insecure` is given. A question of the flags alone,
+/// which `fenec-server` asks with them, before it opens anything, and
+/// [`Server::bind`] again.
+pub fn exposed(cfg: &Config, metrics: bool) -> Option<String> {
+    let guarded =
+        cfg.token.is_some() || cfg.access.is_some() || metrics && cfg.admin_token.is_some();
+    (is_remote(&cfg.addr) && !guarded && !cfg.insecure).then(|| {
+        format!(
+            "{} is not a loopback address and there is no token.\n\
+             The HTTP endpoint does not speak TLS; listening without a\n\
+             token on an open network exposes the whole database to\n\
+             everyone. Pass `--http-token` (or --insecure if deliberate).",
+            cfg.addr
+        )
+    })
+}
 
 fn is_remote(addr: &str) -> bool {
     match addr.to_socket_addrs() {

@@ -1751,6 +1751,15 @@ impl Tenants {
     /// lock are **kept** -- the caller exits with them held, so no write is
     /// accepted between the last sync and exit. Returns how many were open.
     pub fn shutdown(&self) -> usize {
+        self.shutdown_with(true)
+    }
+
+    /// [`Tenants::shutdown`], checkpointing only where `checkpoint` and the
+    /// node's own setting both say so: a node that stops before it served
+    /// writes none, since a checkpoint rewrites a tenant's whole file, and
+    /// a node failing to start under a supervisor's restarts rewrote its
+    /// tenants' files at each one.
+    pub fn shutdown_with(&self, checkpoint: bool) -> usize {
         // The flag first, the snapshot after: an open that got past the flag
         // inserted its slot before the snapshot, and is waited for below.
         self.shutting_down.store(true, Ordering::SeqCst);
@@ -1765,7 +1774,8 @@ impl Tenants {
                         crate::log!("sync error ({}): {e}", t.name);
                     }
                 }
-                if self.checkpoint && g.stats().iter().any(|s| !s.vector_indexes.is_empty()) {
+                let graphs = g.stats().iter().any(|s| !s.vector_indexes.is_empty());
+                if checkpoint && self.checkpoint && graphs {
                     if let Err(e) = g.checkpoint() {
                         crate::log!("could not write the checkpoint ({}): {e}", t.name);
                     }

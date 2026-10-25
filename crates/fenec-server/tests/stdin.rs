@@ -8,9 +8,8 @@
 //! shell gave it goes on as it did.
 
 use crate::support::{count, start, start_piped, tmp, try_start_with};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Long enough for a loaded machine's shutdown; an exit is waited for, not
@@ -246,38 +245,8 @@ fn a_long_sync_interval_does_not_hold_the_shutdown_back() {
     assert_eq!(rows(&path, "t"), 1, "a write was lost\n{log}");
 }
 
-/// The exit code and stderr of a child that must end of its own accord,
-/// within [`EXIT`]; killed past it. Its stderr is read within the same
-/// bound: a server another test spawned meanwhile can hold the pipe open.
-fn ended(mut child: Child) -> (i32, String) {
-    let mut err = child.stderr.take().unwrap();
-    let log = Arc::new(Mutex::new(String::new()));
-    let sink = Arc::clone(&log);
-    let reader = std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        while let Ok(n @ 1..) = err.read(&mut buf) {
-            sink.lock()
-                .unwrap()
-                .push_str(&String::from_utf8_lossy(&buf[..n]));
-        }
-    });
-    let deadline = Instant::now() + EXIT;
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("the server did not end:\n{}", log.lock().unwrap());
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    while !reader.is_finished() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let log = log.lock().unwrap().clone();
-    (status.code().unwrap_or(-1), log)
+fn ended(child: Child) -> (i32, String) {
+    crate::support::ended(child, EXIT)
 }
 
 /// A pseudo-terminal: its master, and its slave to hand a child as stdin.

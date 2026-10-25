@@ -358,6 +358,53 @@ pub fn count(body: &str) -> i64 {
         .unwrap_or_else(|| panic!("no count in {body}"))
 }
 
+/// The exit code and stderr of a child that must end of its own accord,
+/// within `within`; killed past it. Its stderr is read within the same
+/// bound: a server another test spawned meanwhile can hold the pipe open.
+pub fn ended(mut child: Child, within: Duration) -> (i32, String) {
+    let mut err = child.stderr.take().unwrap();
+    let log = Arc::new(Mutex::new(String::new()));
+    let sink = Arc::clone(&log);
+    let reader = std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while let Ok(n @ 1..) = err.read(&mut buf) {
+            sink.lock()
+                .unwrap()
+                .push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+    });
+    let deadline = Instant::now() + within;
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the server did not end:\n{}", log.lock().unwrap());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    while !reader.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let log = log.lock().unwrap().clone();
+    (status.code().unwrap_or(-1), log)
+}
+
+/// `fenec-server` with `args` as given, no `--http` added, stdin
+/// `/dev/null` and stderr piped: for a start that must end of its own
+/// accord ([`ended`]).
+pub fn command(args: &[&str]) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_fenec-server"))
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("could not start fenec-server")
+}
+
 /// Documents in `collection` of the file at `path`, opened on its own as
 /// after a crash.
 pub fn documents(path: &std::path::Path, collection: &str) -> usize {

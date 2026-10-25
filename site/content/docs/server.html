@@ -90,6 +90,23 @@ front of it are on <a href="/docs/sharding">Tenants and sharding</a>.</p>
 
 <p><code>fenec-server --help</code> prints every flag with its default.</p>
 
+<p>Its exit code says how it ended:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Code</th><th>When</th></tr></thead>
+<tbody>
+<tr><td><code>0</code></td><td>It stopped as asked: a signal, or the end of stdin under <code>--exit-on-stdin-close</code>, after the final sync. <code>--ping</code>: a server answers.</td></tr>
+<tr><td><code>1</code></td><td>A file server could not open its file — another process holds it — or its HTTP port; or, once serving, its listener failed or <code>--follow</code>'s mirror stopped, after the final sync. <code>--ping</code>: none answers.</td></tr>
+<tr><td><code>2</code></td><td>A flag or its value was refused, before anything was opened: an open address with no token among them. Also a node's HTTP port or <code>--metrics</code>' that could not be had, and a thread the start could not make (after the final sync, with no checkpoint).</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>A start that fails writes nothing to its files: a port that cannot be had
+is found before anything runs beside the database, so a supervisor restarting
+it again and again rewrites nothing.</p>
+
 <h2 id="security">Security</h2>
 
 <p>Give the server a token, or give each user a JSON Web Token that names what
@@ -214,14 +231,15 @@ const server = spawn('fenec-server', ['--file', path, '--http', '127.0.0.1:0', '
 });
 
 // Read stderr for as long as the server runs: a pipe nobody reads fills,
-// and the server's next log line waits for room.
+// and the server's next log line waits for room. `onListening` is yours,
+// called once with the address the server took.
 let head = '';
 let url = null;
 server.stderr.setEncoding('utf8').on('data', (text) => {
   if (url) return;
   head += text;
   const at = /listening on: (http:\/\/\S+)\s/.exec(head);
-  if (at) ready((url = at[1]));
+  if (at) onListening((url = at[1]));
 });
 </pre>
 

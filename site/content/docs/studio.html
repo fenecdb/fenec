@@ -403,6 +403,21 @@ another origin that finds <code>window.fenecHost</code> reads the token; the
 studio cannot hide it from one. Compare the origin as above, and keep the
 window on the server's origin.</p>
 
+<p><b>The page's own world.</b> A preload that runs in an isolated world
+defines <code>fenecHost</code> where the page never sees it. Under
+Electron's default context isolation, expose it through the bridge, and check
+in the page that what arrives passes <code>Object.isFrozen</code>, which the
+studio asks of the session:</p>
+
+<pre data-lang="js">const { contextBridge } = require('electron');
+
+if (location.origin === ORIGIN) {
+  contextBridge.exposeInMainWorld('fenecHost', {
+    session: { server: ORIGIN, token, tenant: null },
+  });
+}
+</pre>
+
 <ul>
   <li><b>The page's own server.</b> The studio takes the session only when
     it is frozen and names the origin that served the page; otherwise it

@@ -148,6 +148,50 @@ fn a_followed_table_is_served_and_takes_no_other_write() {
     forget(&mut c, t);
 }
 
+/// A server that cannot have its port exits before its mirror starts: no
+/// slot, no publication, no copy -- each made at every restart its
+/// supervisor tried, when the listener was taken after the mirror started.
+#[test]
+#[ignore = "needs a PostgreSQL to follow: make import-test"]
+fn a_server_that_cannot_listen_starts_no_mirror() {
+    let t = "fenec_server_follow_unlistened";
+    let mut c = pg();
+    table(&mut c, t, 10);
+    let file = tmp("unlistened");
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = held.local_addr().unwrap().to_string();
+    let source = source_text();
+    let child = crate::support::command(&[
+        "--file",
+        file.to_str().unwrap(),
+        "--http",
+        &addr,
+        "--follow",
+        &source,
+        "--follow-table",
+        t,
+    ]);
+    let (code, log) = crate::support::ended(child, Duration::from_secs(30));
+    assert_eq!(code, 1, "{log}");
+    assert!(log.contains("could not open the HTTP endpoint"), "{log}");
+    for (what, q) in [
+        (
+            "slot",
+            format!("select 1 from pg_replication_slots where slot_name = 'fenec_{t}'"),
+        ),
+        (
+            "publication",
+            format!("select 1 from pg_publication where pubname = 'fenec_{t}'"),
+        ),
+    ] {
+        assert!(
+            c.query(&q).unwrap().rows.is_empty(),
+            "a {what} was made\n{log}"
+        );
+    }
+    forget(&mut c, t);
+}
+
 /// A follower that cannot go on stops the server through the one shutdown,
 /// exit code 1, rather than exiting from its own thread: what it applied
 /// is synced, not cut off with a shutdown it raced.
