@@ -734,7 +734,11 @@ impl Access {
     }
 
     /// The claims of a token one of `keys` signed.
-    fn check(&self, token: &str, keys: &[Jwk]) -> std::result::Result<Claims, &'static str> {
+    fn check(
+        &self,
+        token: &str,
+        keys: &Arc<Vec<Jwk>>,
+    ) -> std::result::Result<Claims, &'static str> {
         let mut parts = token.split('.');
         let (Some(head), Some(body), Some(sig), None) =
             (parts.next(), parts.next(), parts.next(), parts.next())
@@ -786,13 +790,29 @@ impl Access {
             });
         }
         let claims = Arc::new(object(body)?);
+        #[cfg(test)]
+        held::at(token);
         let mut kept = self.verified[shard(token)]
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if kept.len() >= KEPT {
-            kept.clear();
+        // Kept only if `keys` are still the keys. A reload writes the new
+        // keys and then empties every shard, so a token checked against
+        // the old ones and kept after its shard was emptied outlived the
+        // key it was signed with -- until its `exp`, its shard filling or
+        // the next change of keys (a review kept 3-5 of a removed key's
+        // tokens in 10 trials of 10). Under the shard's lock, keys still
+        // current mean a reload has yet to empty this shard, and will.
+        // `keys` holds the old list alive, so no new list shares its
+        // address. This request is answered under the keys it was checked
+        // against; the next one is held to the new keys.
+        let current = self.keys.read().unwrap_or_else(|e| e.into_inner());
+        if Arc::ptr_eq(keys, &current) {
+            drop(current);
+            if kept.len() >= KEPT {
+                kept.clear();
+            }
+            kept.insert(token.into(), claims.clone());
         }
-        kept.insert(token.into(), claims.clone());
         Ok(claims)
     }
 }
@@ -2415,6 +2435,70 @@ impl Plugin for CheckPlugin {
     }
 }
 
+/// A check held between its signature and keeping its token, for the
+/// test of a reload landing there: a token is held by its text, so no
+/// other test's checks meet the gate.
+#[cfg(test)]
+mod held {
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::Duration;
+
+    #[derive(Default)]
+    pub struct Gate {
+        /// Whether the check has arrived, and whether it may go on.
+        state: Mutex<(bool, bool)>,
+        changed: Condvar,
+    }
+
+    static HELD: Mutex<Vec<(String, Arc<Gate>)>> = Mutex::new(Vec::new());
+
+    /// Checks of `token` stop at the gate until it is released.
+    pub fn hold(token: &str) -> Arc<Gate> {
+        let gate = Arc::new(Gate::default());
+        HELD.lock()
+            .unwrap()
+            .push((token.to_string(), Arc::clone(&gate)));
+        gate
+    }
+
+    pub fn at(token: &str) {
+        let gate = HELD
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(t, _)| t == token)
+            .map(|(_, g)| Arc::clone(g));
+        if let Some(gate) = gate {
+            gate.state.lock().unwrap().0 = true;
+            gate.changed.notify_all();
+            gate.wait(|s| s.1);
+        }
+    }
+
+    impl Gate {
+        /// Waits for what must happen, bounded only so a broken test fails
+        /// rather than hangs.
+        fn wait(&self, until: impl Fn(&(bool, bool)) -> bool) {
+            let state = self.state.lock().unwrap();
+            let (state, timeout) = self
+                .changed
+                .wait_timeout_while(state, Duration::from_secs(60), |s| !until(s))
+                .unwrap();
+            drop(state);
+            assert!(!timeout.timed_out(), "the held check never moved");
+        }
+
+        pub fn arrived(&self) {
+            self.wait(|s| s.0);
+        }
+
+        pub fn release(&self) {
+            self.state.lock().unwrap().1 = true;
+            self.changed.notify_all();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2589,6 +2673,51 @@ mod tests {
         ] {
             assert!(read_jwks(bad).is_err(), "{bad}");
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A reload landing between a check's signature and its keeping the
+    /// token: the token was kept after the reload emptied its shard, and a
+    /// key taken out went on verifying it from there.
+    #[test]
+    fn a_token_checked_across_a_reload_is_not_kept_past_it() {
+        let dir = std::env::temp_dir().join(format!("fenec-jwks-race-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("keys.json");
+        let oct = |kid: &str, byte: u8| {
+            let k = b64url_encode(&[byte; 32]);
+            format!(r#"{{"keys":[{{"kty":"oct","kid":"{kid}","k":"{k}"}}]}}"#)
+        };
+        std::fs::write(&path, oct("old", 1)).unwrap();
+        let a = Arc::new(Access::from_jwks(&path, "").unwrap());
+        let token = a.mint(r#"{"sub":"alice"}"#).unwrap();
+        let now = unix_now();
+
+        let gate = held::hold(&token);
+        let checking = {
+            let (a, token) = (Arc::clone(&a), token.clone());
+            std::thread::spawn(move || a.scope(&token, now).map(|_| ()))
+        };
+        // Its signature checked against the old key, the check waits to
+        // keep the token; the old key goes meanwhile.
+        gate.arrived();
+        std::fs::write(&path, oct("new", 2)).unwrap();
+        let later = SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert_eq!(a.keys(now + 1)[0].kid.as_deref(), Some("new"));
+        gate.release();
+        // Answered under the keys it was checked against, and kept by
+        // none: the next use meets the new keys.
+        assert!(checking.join().unwrap().is_ok());
+        assert_eq!(
+            a.scope(&token, now + 1).err(),
+            Some("no key has the token's kid")
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

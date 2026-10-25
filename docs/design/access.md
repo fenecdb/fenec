@@ -123,7 +123,9 @@ first whether its two points share an x -- a doubling or infinity, which
 the formulas get wrong and the trick meets (`G + Q` is `2G` for Q = G and
 infinity for Q = -G, both tried by signing in the module's tests). A key's
 coordinates are 32 bytes each, below p and on the curve, or the file is
-refused; r and s lie in [1, n), and R's x is reduced mod n before it is
+refused, as a short RSA key refuses it (a file whose malformed EC key
+was passed over before no longer loads, and a reload keeps the keys read
+last); r and s lie in [1, n), and R's x is reduced mod n before it is
 compared. Nothing runs in constant time: a public key and a signature are
 public. It is held to every case of Project Wycheproof's
 `ecdsa_secp256r1_sha256_p1363_test.json` (262: 173 valid, 89 invalid, none

@@ -569,6 +569,30 @@ mod tests {
         let p: Vec<u8> = (0..4).rev().flat_map(|i| P.m[i].to_be_bytes()).collect();
         assert!(P256Key::new(&p, &gy).is_none(), "x = p");
         assert!(P256Key::new(&[0xff; 32], &gy).is_none(), "x past p");
+        // A coordinate's second spelling, itself plus p, which fits in 256
+        // bits where the coordinate is below 2^224 - 2^192 - 2^96 + 1: the
+        // arithmetic would take it for the coordinate, so only the range
+        // check refuses it. (5, y) and (x, 5) are points of the curve.
+        let small_x = (
+            hex("0000000000000000000000000000000000000000000000000000000000000005"),
+            hex("459243b9aa581806fe913bce99817ade11ca503c64d9a3c533415c083248fbcc"),
+        );
+        let small_y = (
+            hex("d7325d7646cd60d80a92738ceb345f844cffaf35841022cab176f692de8de1d7"),
+            hex("0000000000000000000000000000000000000000000000000000000000000005"),
+        );
+        let plus_p = |a: &Limbs| {
+            let (sum, carry) = add_carry(a, &P.m);
+            assert!(!carry);
+            be(&sum)
+        };
+        for (x, y) in [small_x, small_y] {
+            assert!(P256Key::new(&be(&x), &be(&y)).is_some(), "on the curve");
+        }
+        let (x, y) = small_x;
+        assert!(P256Key::new(&plus_p(&x), &be(&y)).is_none(), "x + p");
+        let (x, y) = small_y;
+        assert!(P256Key::new(&be(&x), &plus_p(&y)).is_none(), "y + p");
     }
 
     fn be(a: &Limbs) -> Vec<u8> {
