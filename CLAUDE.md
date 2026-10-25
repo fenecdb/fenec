@@ -488,6 +488,13 @@ documents.](docs/design/http.md#json-from-stored-rows)**
 `Database::query_json` must match `query` through `json::rows_array_into`
 byte for byte (`tests/query_json.rs`).
 
+**[A connection no thread can be made for is answered 503, as one past the
+ceiling is.](docs/design/http.md#connections-without-a-thread)** Both accept
+loops spawn through `accept::spawn`, which hands back the stream of a thread
+the system refused, and `accept::refuse` answers it on the accepting thread,
+non-blocking, then reads off what arrived so the close is no reset, counted
+by `reason`.
+
 ### The HNSW graph
 
 **[The HNSW graph is derived data, not a
@@ -1035,8 +1042,8 @@ promoted by `POST /_replication/promote` and the units switched at once;
   counts, `/_metrics` or the statements', is a `[[test]]` of its own:
   beside the others it would count theirs. So is one whose servers hold
   many threads: a test's servers serve on until its process ends, and past
-  macOS's 2 048 threads a process a server drops the connection it can
-  make no thread for, a reset to whichever test asked (fenec-shard's `all`
+  macOS's 2 048 threads a process a server refuses the connection it can
+  make no thread for, a 503 to whichever test asked (fenec-shard's `all`
   stood at 2 047 with `read_replicas` in it). Measurement programs are
   each crate's `examples/` (most of them `fenec-core`'s) and `fenec-bench`'s
   binaries, and are wired to `make` targets, not to CI.

@@ -250,6 +250,35 @@ tests:
               summary: "r1:8090 holds 900 connections, near its --max-connections"
               runbook: deploy/RUNBOOK.md#adding-a-node
 
+  # A connection with no thread, a node's and a router's: paged while one
+  # is in the last five minutes, and not for the ceiling's refusals nor for
+  # a count that stands still, refused long before.
+  - interval: 1m
+    input_series:
+      - series: 'fenec_connections_refused_total{job="fenecdb-node",instance="n1:8081",reason="no_thread"}'
+        values: '0 0 1x10'
+      - series: 'fenec_connections_refused_total{job="fenecdb-node",instance="n1:8081",reason="ceiling"}'
+        values: '0+5x12'
+      - series: 'fenec_connections_refused_total{job="fenecdb-node",instance="n2:8081",reason="no_thread"}'
+        values: '3x12'
+      - series: 'fenec_router_connections_refused_total{job="fenecdb-router",instance="r1:8090",reason="no_thread"}'
+        values: '0 0 0 2x10'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: FenecNoThreadForConnection
+        exp_alerts:
+          - exp_labels: {severity: critical, instance: "n1:8081"}
+            exp_annotations:
+              summary: "n1:8081 could make no thread for a connection and refused it 503: it is at its thread limit"
+              runbook: deploy/RUNBOOK.md#installing-a-machine
+          - exp_labels: {severity: critical, instance: "r1:8090"}
+            exp_annotations:
+              summary: "r1:8090 could make no thread for a connection and refused it 503: it is at its thread limit"
+              runbook: deploy/RUNBOOK.md#installing-a-machine
+      - eval_time: 11m
+        alertname: FenecNoThreadForConnection
+        exp_alerts: []
+
   # A failover that left a tenant on its node: the review's sequence.
   # eu-a's failover fails at 2m, one tenant left on it, and eu-a answers
   # again at 20m; eu-c is failed over at 30m with a tenant left, failed over

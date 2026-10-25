@@ -519,6 +519,8 @@ fn the_alert_rules_read_only_what_the_servers_expose() {
         "fenec_statement_errors_total",
         "fenec_node_streams",
         "fenec_connections",
+        "fenec_connections_refused_total",
+        "fenec_router_connections_refused_total",
         "fenec_archive_sync_last_success_timestamp_seconds",
     ] {
         assert!(read.contains(want), "no alert reads {want}");

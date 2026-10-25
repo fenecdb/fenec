@@ -144,7 +144,9 @@ write to a frozen tenant or one the lease does not let this node take
 here, a standby router without its directory, the ceilings of connections
 (node and router) and subscriptions (JSON now, plain text before), a node
 going down (`Refused::response`, the 503 of a tenant opened during the
-shutdown), `/_changes` over a database going. Both runners already waited
+shutdown), `/_changes` over a database going, and a connection no thread
+could be made for (node and router, [http.md](http.md#connections-without-a-thread)).
+Both runners already waited
 a 5xx's `retry_after`; two scenarios hold them to a write's 503s of a move
 and a lapsed lease, waited a second and not cut short by `online`, and a
 stream's 503 from a standby router. Every SDK's error carried a body's

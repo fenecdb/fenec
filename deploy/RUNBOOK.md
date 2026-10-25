@@ -182,6 +182,13 @@ replicas, the clients' peak and a quarter more, and raise `LimitNOFILE`
 and `TasksMax` with it (65 536 and 16 384 leave room for 4 000).
 `FenecConnectionsNearCeiling` fires at four fifths. A router's ceiling (its
 default, 1 000) is its clients' and the regions' relays.
+`FenecNoThreadForConnection` fires once a process could make no thread for
+a connection and refused it 503 (`reason="no_thread"`): it reached
+`TasksMax` (or its cgroup's `pids.max`) before `--max-connections`, so its
+other threads -- a router's lease grants and failovers, a node's
+followers -- may be refused too. Raise `TasksMax`, or lower
+`--max-connections` well below it; `systemctl status` shows the unit's
+tasks against its limit.
 
 `TimeoutStopSec` leaves a node 120 s to sync every open tenant and
 checkpoint their graphs on SIGTERM; a kill past it loses no write under
@@ -899,6 +906,7 @@ textfile collector).
 | `FenecRouterDown` | critical | a router never seen up in the hour does not answer | A router lost |
 | `FenecScrapeMissing` | warning | a job has no target at all, node_exporter's among them: every rule over it is blind | Alerts |
 | `FenecConnectionsNearCeiling` | warning | a process at four fifths of its `--max-connections` | Installing a machine |
+| `FenecNoThreadForConnection` | critical | a process at its thread limit refused a connection 503 | Installing a machine |
 | `FenecNodeFailedOver` | critical | a node was failed over and has not answered since | A node lost |
 | `FenecAutoFailoverIncomplete` | critical | a node failed over still has tenants placed on it: they take no writes | A node lost, step 1 |
 | `FenecAutoFailover` | warning | a node was failed over | A node lost |

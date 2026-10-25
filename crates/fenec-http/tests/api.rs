@@ -1098,6 +1098,51 @@ fn the_connection_ceiling_refuses_with_the_cors_headers() {
     drop(held);
 }
 
+/// A connection the server can make no thread for -- the process at its
+/// thread limit, macOS's 2 048 or a cgroup's `pids.max` -- is answered as
+/// the ceiling answers one: 503, `Retry-After`, the seconds in the body
+/// and the CORS headers. It was closed with nothing said, and its client,
+/// its request sent, read a reset. The next connection, its thread made,
+/// is served, and counts the refusal.
+#[test]
+fn a_connection_with_no_thread_is_answered_503_and_told_when_to_come_back() {
+    fenec_http::audit::set_delay(0);
+    let cfg = Config {
+        addr: "127.0.0.1:0".into(),
+        cors: Some("https://app.example".into()),
+        ..Config::default()
+    };
+    let server = Server::new(Arc::new(RwLock::new(seeded())), cfg);
+    let fail = server.fail_spawns();
+    let listener = server.bind().expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let _ = server.serve_on(listener);
+    });
+    fail.next(1);
+    let out = raw(port, "GET /articles?count HTTP/1.1\r\nHost: t\r\n\r\n");
+    let r = parse_res(&out);
+    assert_eq!(r.status, 503, "{out:?}");
+    assert_eq!(r.header("Retry-After"), Some("1"), "{out}");
+    assert!(r.body.contains("no thread"), "{}", r.body);
+    assert!(r.body.ends_with(r#""retry_after":1}"#), "{}", r.body);
+    assert_eq!(
+        r.header("Access-Control-Allow-Origin"),
+        Some("https://app.example")
+    );
+    let r = call_with(port, "GET", "/articles?count", None, &[]);
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = call_with(port, "GET", "/_metrics", None, &[]);
+    let refused = r
+        .body
+        .lines()
+        .find_map(|l| l.strip_prefix(r#"fenec_connections_refused_total{reason="no_thread"} "#))
+        .and_then(|n| n.parse::<u64>().ok());
+    // At least this one: the count is the process's, and others' tests add
+    // to it, never take from it.
+    assert!(refused >= Some(1), "{}", r.body);
+}
+
 #[test]
 fn keep_alive_serves_two_requests_on_one_connection() {
     let h = start(Config::default());

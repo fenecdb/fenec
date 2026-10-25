@@ -426,6 +426,7 @@ fn render(source: Source) -> String {
         &[],
         CONNECTIONS.load(Ordering::Relaxed),
     );
+    connections_refused(&mut out, "fenec_connections_refused_total");
     let held = crate::waits::totals();
     out.family(
         "fenec_held_requests",
@@ -567,6 +568,24 @@ fn render(source: Source) -> String {
         }
     }
     out.0
+}
+
+/// The connections answered 503 on the accepting thread and closed, by
+/// why ([`crate::accept::Refusal`]), as `name`: a node's family, and the
+/// router's under its own.
+pub fn connections_refused(out: &mut Text, name: &str) {
+    use crate::accept::{refused, Refusal, REFUSALS};
+    out.family(
+        name,
+        "counter",
+        "Connections answered 503 with Retry-After as they were taken, unserved, by reason: ceiling (past --max-connections), no_thread (the process could make no thread for it: at its thread limit -- a cgroup's pids.max, systemd's TasksMax=, ulimit -u).",
+    );
+    for (r, reason) in [Refusal::Ceiling, Refusal::NoThread]
+        .into_iter()
+        .zip(REFUSALS)
+    {
+        out.sample(name, &[("reason", reason)], refused(r));
+    }
 }
 
 /// How far linking the vectors an open left out of the graph has to go
