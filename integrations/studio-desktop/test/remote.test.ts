@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, test } from "node:test";
-import { describeNetworkError, originOf, probeRemote, sendsTokenInTheClear } from "../src/bun/remote.ts";
+import { describeNetworkError, originOf, probeRemote, sendsTokenInTheClear, tokenMayStay } from "../src/bun/remote.ts";
 
 // A stand-in for what a fenec-server answers: the studio's page before any
 // token, /_whoami with one. `studio: false` is a server started without
@@ -44,6 +44,71 @@ test("a server with a studio and the right token is fine", async () => {
 	assert.deepEqual(await probeRemote(origin, "secret", null), { kind: "ok" });
 	// The token travels in a header, never in a URL.
 	assert.ok(seen.every((line) => !line.split(" ")[1]!.includes("secret")), seen.join("\n"));
+});
+
+// A server of whatever kind: `route` answers each request, and what was asked of it is kept.
+function stand(route: (url: string, authorization: string | undefined, res: import("node:http").ServerResponse) => void): Promise<{ origin: string; seen: string[] }> {
+	const seen: string[] = [];
+	const server = createServer((req, res) => {
+		seen.push(`${req.url} ${req.headers.authorization ?? ""}`.trim());
+		route(req.url ?? "", req.headers.authorization, res);
+	});
+	servers.push(server);
+	return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve({ origin: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, seen })));
+}
+const studioPage = (res: import("node:http").ServerResponse) => {
+	res.writeHead(200, { "content-type": "text/html" });
+	res.end("<!doctype html>");
+};
+
+test("a redirect is not followed, and the token is not sent where it points", async () => {
+	const elsewhere = await stand((_, __, res) => res.writeHead(200).end("{}"));
+	const server = await stand((url, _, res) => {
+		if (url === "/_studio/") return studioPage(res);
+		res.writeHead(302, { location: `${elsewhere.origin}/_whoami?next=1` }).end();
+	});
+	const p = await probeRemote(server.origin, "secret-token", null);
+	assert.deepEqual(p, { kind: "redirected", status: 302, to: elsewhere.origin });
+	assert.deepEqual(elsewhere.seen, [], "nothing reached the address the redirect named");
+	assert.ok(server.seen.every((line) => !line.includes("secret-token")), `the token was not even sent to the server that redirected: ${server.seen.join(" | ")}`);
+});
+
+test("a redirect on the studio's own page is a message too", async () => {
+	const elsewhere = await stand((_, __, res) => studioPage(res));
+	const server = await stand((_, __, res) => res.writeHead(301, { location: `${elsewhere.origin}/_studio/` }).end());
+	assert.deepEqual(await probeRemote(server.origin, "t", null), { kind: "redirected", status: 301, to: elsewhere.origin });
+	assert.deepEqual(elsewhere.seen, []);
+});
+
+test("the token goes only to a server that has said it is fenecdb: its own 401, a JSON body naming an error", async () => {
+	// A sign-in page in front, whatever it is: a 401 that is not fenecdb's.
+	const proxy = await stand((url, _, res) => (url === "/_studio/" ? studioPage(res) : res.writeHead(401, { "content-type": "text/html" }).end("<h1>sign in</h1>")));
+	assert.deepEqual(await probeRemote(proxy.origin, "secret-token", null), { kind: "ok" });
+	assert.ok(proxy.seen.every((line) => !line.includes("secret-token")), `never sent: ${proxy.seen.join(" | ")}`);
+	// fenecdb's own: asked without, then with.
+	const fenec = await start({ studio: true, token: "secret-token" });
+	assert.deepEqual(await probeRemote(fenec.origin, "secret-token", null), { kind: "ok" });
+	assert.ok(fenec.seen.some((l) => l.includes("/_whoami") && !l.includes("secret-token")), "asked without the token first");
+	assert.ok(fenec.seen.some((l) => l.includes("/_whoami") && l.includes("Bearer secret-token")), "and with it after");
+});
+
+test("a server that takes no token is not given one", async () => {
+	const open = await start({ studio: true });
+	assert.deepEqual(await probeRemote(open.origin, "saved-token", null), { kind: "ok" });
+	assert.ok(open.seen.every((l) => !l.includes("saved-token")), open.seen.join(" | "));
+});
+
+test("a token stays with the address it was saved for", () => {
+	assert.equal(tokenMayStay("https://prod.example.com", "https://prod.example.com", ""), true, "the same address, no new token: it stays");
+	assert.equal(tokenMayStay("https://prod.example.com", "https://staging.example.com", ""), false, "another address and none typed: it must not");
+	assert.equal(tokenMayStay("https://prod.example.com", "https://staging.example.com", "typed"), true, "another address with its own token");
+	assert.equal(tokenMayStay("https://prod.example.com", "http://prod.example.com", ""), false, "the scheme is part of it");
+	assert.equal(tokenMayStay("https://prod.example.com", "https://prod.example.com:8443", ""), false, "so is the port");
+});
+
+test("a host that is a glob is not an address: it would widen the window's navigation rules", () => {
+	assert.throws(() => originOf("https://*.example.com"), /cannot hold a \*/);
+	assert.throws(() => originOf("http://127.0.0.*:8080"), /cannot hold a \*/);
 });
 
 test("a server that does not serve the studio is told apart from one that is down", async () => {

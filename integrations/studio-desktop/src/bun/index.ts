@@ -12,10 +12,10 @@
 // failure in words. README.md has the picture.
 
 import Electrobun, { Utils } from "electrobun/main";
-import { anyServerRunning, anythingOpen, isQuitting, openFile, stopAll } from "./app.ts";
+import { anythingOpen, isQuitting, openFile, serversBusy, stopAll } from "./app.ts";
 import { startMenu } from "./menu.ts";
 import { showLauncher } from "./pages.ts";
-import { reapStrays } from "./strays.ts";
+import { strays } from "./registry.ts";
 
 // Finder: a .fenec file double-clicked (macOS; Info.plist from app.fileAssociations).
 Electrobun.events.on("open-url", (event: any) => {
@@ -32,7 +32,7 @@ Electrobun.events.on("reopen", () => {
 // Stop every server before the process goes: the quit is held, the servers
 // are asked to checkpoint, then the quit is asked for again.
 Electrobun.events.on("before-quit", (event: any) => {
-	if (isQuitting() || !anyServerRunning()) return;
+	if (isQuitting() || !serversBusy()) return;
 	event.response = { allow: false };
 	void stopAll().finally(() => Utils.quit());
 });
@@ -43,14 +43,16 @@ for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
 	});
 }
 
-// Servers an earlier run left behind (strays.ts) go before anything opens a file.
-const strays = await reapStrays();
+// Servers an earlier run left behind (strays.ts) go before anything opens a
+// file, and this waits until each is gone: the file's lock is theirs till then.
+const stray = await strays.reap();
+if (stray.left.length) console.error("a server of an earlier run would not stop:", JSON.stringify(stray.left));
 startMenu();
 
 let opened = false;
 if (__TESTABLE__) {
 	const hooks = await import("./testhooks.ts");
-	if (strays.length) hooks.report("reaped-strays", { strays });
+	if (stray.reaped.length || stray.left.length) hooks.report("reaped-strays", { strays: stray.reaped, left: stray.left });
 	opened = await hooks.boot();
 }
 // A launch from Finder with a file arrives as `open-url` a moment after the

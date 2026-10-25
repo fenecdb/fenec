@@ -15,10 +15,11 @@
 // the main process by.
 
 import { appendFileSync, readFileSync } from "node:fs";
-import { Utils, type BrowserWindow } from "electrobun/main";
+import { Utils, type BrowserWindow, type BrowserView } from "electrobun/main";
 import type { Notice } from "../shared/rpc.ts";
 import { createDatabase, onFact, openConnection, openFile, removeConnection, saveConnection, windows } from "./app.ts";
 import { showLauncher, showNewDatabase } from "./pages.ts";
+import type { StudioWindow } from "./windows.ts";
 import { secrets } from "./secrets.ts";
 
 const T0 = Date.now();
@@ -34,7 +35,7 @@ export function report(what: string, extra: Record<string, unknown> = {}) {
 const detailOf = (e: any): any => e?.data?.detail ?? e?.data;
 
 /** Windows by the name a check addresses them: a studio window's key, `launcher`, `newdb`, `notice:<n>`. */
-const pages = new Map<string, BrowserWindow>();
+const pages = new Map<string, { win: BrowserWindow; view: BrowserView }>();
 let notices = 0;
 
 /** A link out, which a check must not send the machine's browser to. */
@@ -63,12 +64,17 @@ export function pagePreload(origin: string): string {
 	].join("");
 }
 
-export function watchStudio(win: BrowserWindow, key: string) {
-	pages.set(key, win);
-	(win.webview as any).on("host-message", (e: any) => report("page", { key, detail: detailOf(e) }));
+/** Every navigation a window is asked to make, and what was decided: the rules a window is held to are checked by these. */
+function watchNavigation(view: BrowserView, key: string) {
 	for (const name of ["will-navigate", "did-navigate", "new-window-open"]) {
-		(win.webview as any).on(name, (e: any) => report(name, { key, data: JSON.stringify(e?.data ?? e).slice(0, 200) }));
+		(view as any).on(name, (e: any) => report(name, { key, data: JSON.stringify(e?.data ?? e).slice(0, 200) }));
 	}
+}
+
+export function watchStudio({ win, view }: StudioWindow, key: string) {
+	pages.set(key, { win, view });
+	(view as any).on("host-message", (e: any) => report("page", { key, detail: detailOf(e) }));
+	watchNavigation(view, key);
 	win.on("close", () => {
 		report("window-close", { key });
 		pages.delete(key);
@@ -77,8 +83,9 @@ export function watchStudio(win: BrowserWindow, key: string) {
 
 export function noticeShown(win: BrowserWindow, n: Notice) {
 	const key = `notice:${++notices}`;
-	pages.set(key, win);
+	pages.set(key, { win, view: win.webview });
 	report("notice", { key, title: n.title, message: n.message, hint: n.hint, detail: n.detail, actions: (n.actions ?? []).map((a) => a.id) });
+	watchNavigation(win.webview, key);
 	// A check presses the notice's buttons by running script in it, and hears back here.
 	(win.webview as any).on("host-message", (e: any) => {
 		const d = detailOf(e);
@@ -97,7 +104,8 @@ export function pagePreloadFor(name: string): string {
 }
 
 export function watchPage(win: BrowserWindow, name: string) {
-	pages.set(name, win);
+	pages.set(name, { win, view: win.webview });
+	watchNavigation(win.webview, name);
 	(win.webview as any).on("host-message", (e: any) => {
 		const d = detailOf(e);
 		report(d?.type === "page-text" ? "page-text" : "page", { key: name, detail: d, text: d?.text });
@@ -123,12 +131,12 @@ async function run(c: any) {
 	switch (c.cmd) {
 		case "open": report("open-result", { ...(await openFile(c.path)), path: c.path }); break;
 		case "create": report("create-result", { ...(await createDatabase(c.folder, c.name)), name: c.name }); break;
-		case "close": win(c.key)?.requestClose(); break; // the path the red button takes
-		case "close-direct": win(c.key)?.close(); break;
+		case "close": win(c.key)?.win.requestClose(); break; // the path the red button takes
+		case "close-direct": win(c.key)?.win.close(); break;
 		// executeJavascript is not the page's own eval(): the studio's CSP
 		// (script-src 'self') does not apply to it. The code reports its
 		// result itself, through the event-only bridge.
-		case "eval": win(c.key)?.webview.executeJavascript(c.js); break;
+		case "eval": win(c.key)?.view.executeJavascript(c.js); break;
 		case "sessions": report("sessions", { keys: [...windows.keys()], pids: [...windows.values()].map((s) => s.server?.pid), pages: [...pages.keys()] }); break;
 		case "answer": answers[c.kind as "file" | "folder"].push(c.path ?? null); break;
 		case "launcher": await showLauncher(); break;
@@ -142,6 +150,12 @@ async function run(c: any) {
 			break;
 		}
 		case "openconn": report("openconn-result", { ...(await openConnection(c.id)), id: c.id }); break;
+		// Two opens of one saved server at once, as two clicks while the first is still looking at it.
+		case "openconn-twice": {
+			const both = await Promise.all([openConnection(c.id), openConnection(c.id)]);
+			report("openconn-twice-result", { id: c.id, results: both });
+			break;
+		}
 		case "rmconn": await removeConnection(c.id); report("conn-removed", { id: c.id }); break;
 		case "secret": report("secret", { name: c.name, value: await secrets.get(c.name) }); break;
 		case "quit": Utils.quit(); break;

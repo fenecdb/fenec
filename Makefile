@@ -15,7 +15,10 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 FEATURES ?=
 SCHEMA ?= 1
 # `make studio-desktop STUDIO_SERVER=0.1.11`: the server the desktop app bundles
-# is that release's, not built from this checkout.
+# is that release's, not built from this checkout. A release's version, and
+# nothing else: make expands `$(shell ...)` in a value given on its command line,
+# so whatever passes one on (desktop.yml's signing job) checks it first, and
+# get-server.sh refuses what is not a version once it has it.
 STUDIO_SERVER ?=
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
@@ -115,19 +118,24 @@ studio-test: wasm
 ## notarization secrets the README lists) it signs and notarizes too.
 studio-desktop:
 	cd integrations/studio-desktop && npm ci --ignore-scripts --no-audit --no-fund --loglevel=error
-	CARGO=$(CARGO) integrations/studio-desktop/scripts/get-server.sh $(STUDIO_SERVER)
+	CARGO=$(CARGO) integrations/studio-desktop/scripts/get-server.sh '$(STUDIO_SERVER)'
 	cd integrations/studio-desktop && npm run icon && npm run build
 
 ## The desktop app's checks: the release build (above) is held to carrying
 ## none of the test hooks, the sources type-checked and the unit tests run
-## (names, remote probe, wording, the token hand-off script, get-server.sh,
-## the signing switches), then the test variant, the same app with the hooks
-## and an identifier of its own, is built and driven through every scripted
-## check (integrations/studio-desktop/scripts/checks): open, edit, close and
-## reopen a file, a file another program holds, a server that dies, the app
-## killed, the sandbox, saved servers and the Keychain, a new database, a file
-## from Finder. Needs a window server (a logged-in Mac); logs of a failure are
-## in $$SD_DIR (default: fenec-desktop-checks under the temp directory).
+## (names, the remote probe, wording, the token hand-off script, the server's
+## environment, the reaper against real processes, get-server.sh, the signing
+## switches, the Hutch pin), then the test variant, the same app with the
+## hooks and an identifier of its own, is built and driven through every
+## scripted check (integrations/studio-desktop/scripts/checks): open, edit,
+## close and reopen a file, a file another program holds, a server that dies,
+## the app killed, the sandbox, every window held to where it is, what a window
+## keeps, saved servers and the Keychain, a new database, a file from Finder.
+## Needs a window server (a logged-in Mac); logs of a failure are in $$SD_DIR
+## (default: fenec-desktop-checks under the temp directory). It leaves the
+## test variant (build-test/) a program LaunchServices may offer for a .fenec
+## file, and deletes ~/Library/Application Support/dev.fenecdb.studio.test, its
+## own folder, before it starts; a real install's is never read or written.
 studio-desktop-test: studio-desktop
 	cd integrations/studio-desktop && npm run typecheck && npm run test:unit
 	cd integrations/studio-desktop && FENEC_DESKTOP_TEST_BUILD=1 npm run build

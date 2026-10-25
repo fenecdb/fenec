@@ -397,22 +397,27 @@ open "integrations/studio-desktop/build/stable-macos-arm64/fenec studio.app"
     stops the server once it has written its checkpoint.</li>
   <li><b>A saved server.</b> A name, an address, a token and, for a tenant
     node, a tenant. The token is kept in the Keychain, never in the app's own
-    files, and the window is on that server's studio, so there is no CORS to
-    set up. The server must run with <code>--studio</code>.</li>
+    files, and is sent only to the address it was saved for. The window is on
+    that server's studio, so there is no CORS to set up. The server must run
+    with <code>--studio</code>.</li>
   <li><b>A message, not a blank window.</b> A file another program has open, a
     server that stopped, one that cannot be reached, one with no studio and a
     token it refuses each say so in a window of the app's own, with the way
     forward.</li>
-  <li><b>macOS only for now,</b> Apple silicon, and not yet signed: an
-    unsigned build opens after <code>xattr -cr "fenec studio.app"</code>.</li>
+  <li><b>macOS only for now,</b> Apple silicon, and not yet signed. An app
+    you build opens as it is; an unsigned one you downloaded needs
+    <code>xattr -cr "fenec studio.app"</code> first.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
 <p>A token is never in a URL or on a command line: a file's server is given
 a random one in its environment, and the window hands it to the studio's own
 session storage only on that server's origin, before any of the page's code
-runs. A studio window has no bridge to the app and cannot leave its server's
-origin: a link to another site opens in your browser.</p>
+runs. A studio window cannot call into the app (it has an event bridge that
+carries a message one way, and nothing else) and cannot leave its server's
+origin: a link to another site opens in your browser. The Keychain keeps the
+token from other users and from the pages, not from another program of yours:
+that runs as you, as the app does.</p>
 <p>The build needs Node, npm and Rust, and fetches its build tool into the
 project's own directory: nothing is installed globally. The directory's
 <a href="https://github.com/fenecdb/fenec/tree/main/integrations/studio-desktop">README</a>

@@ -33,10 +33,13 @@ await assert.rejects(startServer(['--file', SMALL, '--http', '127.0.0.1:0'], { F
 step('the next launch stops it');
 const second = startApp('orphan-2', { FENEC_DESKTOP_LAUNCHER: '1' });
 await waitFor((l) => l.what === 'ready', 60000, 'ready');
-const reaped = lines().find((l) => l.what === 'reaped-strays');
-assert.ok(reaped, 'reaped-strays reported');
+// Reported once the reaper has waited for it to be gone, and the app does not
+// open anything before: the event, then the process.
+const reaped = await waitFor((l) => l.what === 'reaped-strays', 30000, 'reaped-strays');
 assert.deepEqual(reaped.strays, [SMALL]);
-assert.ok(!procs().some((p) => p.pid === started.pid), 'the orphan is gone');
+assert.deepEqual(reaped.left, [], 'nothing survived');
+await until(() => !procs().some((p) => p.pid === started.pid), 10000, 'the orphan gone');
+assert.deepEqual(JSON.parse(readFileSync(`${USER_DATA}/servers.json`, 'utf8')), [], 'and no longer noted');
 log('reaped', reaped.strays);
 
 step('and the file opens');

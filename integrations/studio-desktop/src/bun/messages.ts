@@ -38,6 +38,28 @@ export function notAFile(path: string): Notice {
 	return { title: "That is not a database file", message: `${path} is not a file.` };
 }
 
+/**
+ * An empty file is made a database by the first server that opens it, which is
+ * what New Database does on purpose and Open must not do to a file someone
+ * picked by mistake.
+ */
+export function emptyFile(name: string): Notice {
+	return {
+		title: "That file is empty",
+		message: `${name} has nothing in it, so it is not a database.`,
+		hint: "Nothing was changed in it. To make a new database, choose File, New Database.",
+	};
+}
+
+/** A file whose first bytes are not a fenecdb signature, found before any server was started on it. */
+export function notADatabase(name: string): Notice {
+	return {
+		title: "That is not a fenecdb database",
+		message: `${name} does not start with a fenecdb signature, so it is some other kind of file.`,
+		hint: "Nothing was changed in it and nothing was written beside it. Pick a .fenec file, or make a new database.",
+	};
+}
+
 /** The server could not start, for a reason other than a lock. */
 export function startFailedNotice(name: string, serverSaid: string): Notice {
 	// A file picked by mistake: the server reads its signature first and
@@ -78,6 +100,13 @@ export function remoteNotice(name: string, origin: string, probe: Exclude<Probe,
 				title: "Could not reach the server",
 				message: `${name} (${origin}): ${probe.reason}.`,
 				hint: "Check that the server is running and that the address is right.",
+				actions: [{ id: "edit", label: "Edit connection" }],
+			};
+		case "redirected":
+			return {
+				title: "The server sent us somewhere else",
+				message: `${name} (${origin}) answers with a redirect (HTTP ${probe.status}) to ${probe.to}.`,
+				hint: "The token is sent only to the address it was saved for. If that other address is the server, edit the connection to it.",
 				actions: [{ id: "edit", label: "Edit connection" }],
 			};
 		case "no-studio":

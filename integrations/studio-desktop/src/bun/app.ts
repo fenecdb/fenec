@@ -7,20 +7,33 @@
 
 import { accessSync, closeSync, constants, existsSync, openSync, realpathSync, statSync, unlinkSync } from "node:fs";
 import { basename, join } from "node:path";
-import type { BrowserWindow } from "electrobun/main";
+import { Session, type BrowserWindow } from "electrobun/main";
 import type { ConnectionForm, Notice, Overview, Result } from "../shared/rpc.ts";
-import { alreadyHereMessage, diedNotice, heldNotice, internalError, missingFile, notAFile, remoteNotice, startFailedNotice } from "./messages.ts";
+import { kindOfFile } from "./dbfile.ts";
+import {
+	alreadyHereMessage,
+	diedNotice,
+	emptyFile,
+	heldNotice,
+	internalError,
+	missingFile,
+	notADatabase,
+	notAFile,
+	remoteNotice,
+	startFailedNotice,
+} from "./messages.ts";
 import { databaseFileName } from "./names.ts";
-import { originOf, probeRemote } from "./remote.ts";
+import { originOf, probeRemote, tokenMayStay } from "./remote.ts";
 import { secrets } from "./secrets.ts";
 import { AlreadyOpen, startFileServer, type FileServer } from "./server.ts";
-import { store } from "./store.ts";
-import { openStudioWindow, showNotice } from "./windows.ts";
+import { store, type StoredConnection } from "./store.ts";
+import { openStudioWindow, showNotice, type StudioWindow } from "./windows.ts";
 
-type Open = { key: string; title: string; win: BrowserWindow; server?: FileServer };
+type Open = { key: string; title: string; win: BrowserWindow; view: StudioWindow["view"]; server?: FileServer; released?: Promise<unknown> };
 
 /** The open windows. Read by the pages (what is open), the menu and the test hooks. */
 export const windows = new Map<string, Open>();
+/** Opens under way, a file's server being started or a saved server being looked at: a second open of the same thing waits for it. */
 const starting = new Map<string, Promise<Result>>();
 /** Servers being stopped after their window closed; a quit waits for them, and so does an open of the same file. */
 const closing = new Map<string, Promise<unknown>>();
@@ -43,17 +56,34 @@ export const isQuitting = () => quitting;
 /** Is anything open, or opening? A file's window exists only once its server is listening. */
 export const anythingOpen = () => windows.size > 0 || starting.size > 0;
 
+/**
+ * Is there a server a quit must wait for: one running, one being started (it
+ * will be running by the time the quit looks), or one whose window closed a
+ * moment ago and which is still writing its checkpoint?
+ */
+export const serversBusy = () => startingFiles().length > 0 || closing.size > 0 || [...windows.values()].some((w) => w.server);
+
+/** The opens under way that start a server (a saved server has none to wait for). */
+const startingFiles = () => [...starting].filter(([key]) => key.startsWith("file:")).map(([, run]) => run);
+
 /** A message window; a button besides OK calls `onAction` with its id. */
 export function notify(n: Notice, onAction?: (id: string) => void) {
 	void showNotice(n, onAction);
 }
 
 const failed = (message: string): Result => ({ ok: false, message, shown: true });
+/** Nothing new opens once a quit has begun: it would be a server the quit has already counted. */
+const goingAway = (): Result => ({ ok: false, message: "The app is quitting.", shown: true });
 
 // ------------------------------------------------------------------ files
 
-/** Opens `raw` in a window of its own, unless it is open already (then that window is shown). */
-export function openFile(raw: string): Promise<Result> {
+/**
+ * Opens `raw` in a window of its own, unless it is open already (then that
+ * window is shown). `created`: a file this app has just made empty, which is
+ * what a database is before its first server; any other empty file is not one.
+ */
+export function openFile(raw: string, { created = false }: { created?: boolean } = {}): Promise<Result> {
+	if (quitting) return Promise.resolve(goingAway());
 	let path: string;
 	try {
 		path = realpathSync(raw);
@@ -76,6 +106,21 @@ export function openFile(raw: string): Promise<Result> {
 	// and tell the user, wrongly, that another program has the file.
 	const pending = starting.get(key);
 	if (pending) return pending;
+	// Look before a server is started on it: a server makes an empty file a
+	// database and leaves `<file>.lock` beside any file it opens, which a file
+	// picked by mistake should not get.
+	if (!created) {
+		try {
+			const kind = kindOfFile(path);
+			if (kind !== "database") {
+				notify(kind === "empty" ? emptyFile(basename(path)) : notADatabase(basename(path)));
+				return Promise.resolve(failed(kind === "empty" ? `${basename(path)} is empty.` : `${basename(path)} is not a database.`));
+			}
+		} catch (err) {
+			notify(internalError(`${basename(path)} could not be read.`, err));
+			return Promise.resolve(failed(`${basename(path)} could not be read.`));
+		}
+	}
 	// The window of this file was closed a moment ago and its server is still
 	// writing its checkpoint, holding the file's lock: a server started now
 	// would be refused, and the user told the file is open elsewhere.
@@ -101,12 +146,14 @@ async function startFile(path: string, key: string): Promise<Result> {
 		return failed(`Could not open ${name}.`);
 	}
 	try {
-		const win = await openStudioWindow({
+		const studio = await openStudioWindow({
 			key,
 			title: `${name} — fenec studio`,
 			session: { origin: server.origin, token: server.token, tenant: null },
+			// Not `persist:`: a store that is this window's alone and goes with it.
+			partition: `file-${crypto.randomUUID()}`,
 		});
-		track({ key, title: name, win, server }, path);
+		track({ key, title: name, ...studio, server }, path);
 	} catch (err) {
 		await server.stop();
 		notify(internalError(`The window for ${name} could not be opened.`, err));
@@ -118,20 +165,34 @@ async function startFile(path: string, key: string): Promise<Result> {
 	return { ok: true };
 }
 
+/**
+ * Stops an entry's server once, however many times it is asked (its window
+ * closing and a quit both do): the promise is the entry's, and in `closing`
+ * until it is done.
+ */
+function release(entry: Open): Promise<unknown> {
+	const server = entry.server;
+	if (!server) return Promise.resolve();
+	if (!entry.released) {
+		entry.released = server
+			.stop()
+			.then((code) => fact("server-stopped", { key: entry.key, code }))
+			.catch((e) => console.error("could not stop the server", e))
+			.finally(() => closing.delete(entry.key));
+		closing.set(entry.key, entry.released);
+	}
+	return entry.released;
+}
+
 /** Wires a window to what must follow its closing, and the server's dying. */
 function track(entry: Open, path: string) {
 	windows.set(entry.key, entry);
+	fact("window-opened", { key: entry.key });
 	entry.win.on("close", () => {
-		windows.delete(entry.key);
-		// Not awaited by the window, which is gone; awaited by a quit (stopAll).
-		if (entry.server) {
-			const stopped = entry.server
-				.stop()
-				.then((code) => fact("server-stopped", { key: entry.key, code }))
-				.catch((e) => console.error("could not stop the server", e))
-				.finally(() => closing.delete(entry.key));
-			closing.set(entry.key, stopped);
-		}
+		// Only its own entry: a window opened since for the same key is not this one.
+		if (windows.get(entry.key) === entry) windows.delete(entry.key);
+		// Not awaited by the window, which is gone; awaited by a quit and by an open of the same file.
+		void release(entry);
 		changed();
 	});
 	// A server that dies under an open window (killed, crashed, out of disk).
@@ -145,14 +206,15 @@ function track(entry: Open, path: string) {
 	});
 }
 
-/** Stops every server and waits for them: a quit does this before the process goes. */
+/**
+ * Stops every server and waits for them: a quit does this before the process
+ * goes. A server being started is one to stop as well, so the opens under way
+ * come first, and then those that are closing.
+ */
 export async function stopAll(): Promise<void> {
 	quitting = true;
-	await Promise.all([...[...windows.values()].map((w) => w.server?.stop()), ...closing.values()]);
-}
-
-export function anyServerRunning(): boolean {
-	return [...windows.values()].some((w) => w.server);
+	await Promise.allSettled(startingFiles());
+	await Promise.all([...[...windows.values()].map(release), ...closing.values()]);
 }
 
 // ------------------------------------------------------------------ a new database
@@ -163,7 +225,7 @@ export type Created = Result & { path?: string };
  * A database that does not exist yet: `name` in `folder`. The name is refused
  * if the folder already holds a file by it, atomically (`wx`), so a file is
  * never made over. The file is begun empty, which fenec-server takes as a new
- * database, and opened as any other.
+ * database, and opened as any other (the one empty file `openFile` takes).
  */
 export async function createDatabase(folder: string, typed: string): Promise<Created> {
 	const named = databaseFileName(typed);
@@ -185,7 +247,7 @@ export async function createDatabase(folder: string, typed: string): Promise<Cre
 		}
 		return { ok: false, message: `Could not create ${named.fileName}: ${(err as Error).message}` };
 	}
-	const result = await openFile(path);
+	const result = await openFile(path, { created: true });
 	if (!result.ok) {
 		// The server never took it: do not leave an empty file the user did not ask to keep.
 		if (statSync(path, { throwIfNoEntry: false })?.size === 0) unlinkSync(path);
@@ -196,18 +258,30 @@ export async function createDatabase(folder: string, typed: string): Promise<Cre
 
 // ------------------------------------------------------------------ saved servers
 
-export async function openConnection(id: string): Promise<Result> {
+/** Opens a saved server in a window of its own; a second open while the first looks at it waits for it. */
+export function openConnection(id: string): Promise<Result> {
+	if (quitting) return Promise.resolve(goingAway());
 	const c = store.connections().find((x) => x.id === id);
 	if (!c) {
 		notify({ title: "That connection is gone", message: "It was removed." });
-		return failed("That connection is gone.");
+		return Promise.resolve(failed("That connection is gone."));
 	}
 	const key = `remote:${c.id}`;
 	const here = windows.get(key);
 	if (here) {
 		here.win.activate();
-		return { ok: true };
+		return Promise.resolve({ ok: true });
 	}
+	// The look at a server takes up to a few seconds, and gives the user
+	// nothing to see: a second click must not open a second window.
+	const pending = starting.get(key);
+	if (pending) return pending;
+	const run = startRemote(c, key).finally(() => starting.delete(key));
+	starting.set(key, run);
+	return run;
+}
+
+async function startRemote(c: StoredConnection, key: string): Promise<Result> {
 	let origin: string;
 	try {
 		origin = originOf(c.url);
@@ -229,8 +303,13 @@ export async function openConnection(id: string): Promise<Result> {
 		return failed(`Could not open ${c.name}.`);
 	}
 	try {
-		const win = await openStudioWindow({ key, title: `${c.name} — fenec studio`, session: { origin, token, tenant: c.tenant } });
-		track({ key, title: c.name, win }, "");
+		const studio = await openStudioWindow({
+			key,
+			title: `${c.name} — fenec studio`,
+			session: { origin, token, tenant: c.tenant },
+			partition: remotePartition(c.id),
+		});
+		track({ key, title: c.name, ...studio }, "");
 	} catch (err) {
 		notify(internalError(`The window for ${c.name} could not be opened.`, err));
 		return failed(`Could not open ${c.name}.`);
@@ -249,6 +328,14 @@ export async function saveConnection(form: ConnectionForm): Promise<string> {
 	const id = form.id ?? crypto.randomUUID();
 	const previous = store.connections().find((c) => c.id === id);
 	if (form.id && !previous) throw new Error("That connection is gone.");
+	// A token is for the address it was saved with: pointing the connection
+	// somewhere else and leaving the token blank would send the old server's
+	// token to the new one, which may be anyone's.
+	if (previous && !tokenMayStay(previous.url, origin, form.token)) {
+		throw new Error(
+			`The address changed from ${previous.url} to ${origin}. The token saved for ${previous.url} is not sent to another address: type the token for ${origin}.`,
+		);
+	}
 	// The token goes to the keychain first and nowhere else on disk; a
 	// failure there leaves the list as it was.
 	if (form.token) await secrets.set(`connection:${id}`, form.token);
@@ -257,9 +344,14 @@ export async function saveConnection(form: ConnectionForm): Promise<string> {
 	return id;
 }
 
+/** What a saved server's windows keep (the studio's history, saved queries and theme): a store of its own, kept between runs. */
+const remotePartition = (id: string) => `persist:remote-${id}`;
+
 export async function removeConnection(id: string) {
 	store.removeConnection(id);
 	await secrets.delete(`connection:${id}`);
+	// What its windows kept goes with it.
+	Session.fromPartition(remotePartition(id)).clearStorageData("all");
 	changed();
 }
 

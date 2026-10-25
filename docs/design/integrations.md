@@ -137,26 +137,85 @@ its stdin close, and `strays.ts`, which stops what an earlier run left by the
 arguments of the pid it noted, goes) and a frozen `window.fenecHost.session`
 the studio reads before storage.
 
-Windows. A studio window is `sandbox: true` (no bridge to Bun, only the
+The server's environment is an allowlist (`HOME`, `PATH`, `TMPDIR`, `LANG`,
+`LC_*`, `USER`, `LOGNAME`, `TZ`, and the token), not "everything but ours": the
+server reads `OTEL_EXPORTER_OTLP_*` (which turns trace export on) and
+`FENEC_JWT_SECRET`, and an app started from a shell must not hand a database it
+opens whatever that shell exported (`env.ts`; `checks/environment.mjs` starts
+the app with such variables and reads the server's own environment back through
+a wrapper script). A server is noted in `servers.json` the moment it is
+spawned, not when it listens, and a launch stops what an earlier run left by
+SIGTERM, a wait for each to be gone (the event: the file's lock is free),
+SIGKILL after ten seconds, and what survives even that stays noted. A quit waits
+for every server, one being started and one whose window closed a moment ago
+included (`serversBusy`, `stopAll`), and an open of a file waits for that file's
+server to finish stopping: a second server started over the first's checkpoint
+would be refused, and the user told the file is open elsewhere.
+
+Windows. A studio window is `sandbox: true` (no call into Bun, only the
 event-only `__electrobunSendToHost`, which `checks/sandbox.mjs` holds to the
 six globals Electrobun's sandboxed preload defines) with navigation rules for
-the server's origin (the constructor's `navigationRules` option did not take in
-2.0.4: a navigation to another origin reported `allowed: true`; the setter does)
-and links out as web addresses to the browser. The preload writes
-`sessionStorage["fenec-studio"]` only where `location.origin` is the
-server's; `test/session.test.ts` runs it as a page would, including a token
-that tries to leave its string. Failures are windows of the app's own
-(`messages.ts`, a bundled sandboxed page that draws with `textContent`),
-never `Utils.showMessageBox`: that is a synchronous native call in an `async`
-function, so the main process's JavaScript, every server's supervision and the
-quit handler stood still until someone clicked (a check that never clicked held
-the app for good). `exitOnLastWindowClosed` is false: the default quits as the
-last window's close handlers return, too soon for a server's SIGTERM to finish
-while the app still holds its lock; the app stays in the Dock, as a document
-app does, and stops its servers itself on quit (`before-quit` held until they
-have). A second open of a file the app is still starting a server for waits for
-that one: a second server would find the first's lock and tell the user,
-wrongly, that another program has the file.
+the server's origin and links out as web addresses to the browser, at most one
+in three seconds from a window (2.0.4 does not say whether a click asked for a
+`new-window-open`, and a page could otherwise open tabs without end). It does
+not answer for `views://`, whose handler sends `Access-Control-Allow-Origin: *`.
+**Every window of the app is held**, not only a studio window: the launcher and
+the new-database window have the RPC bridge, and Electrobun's full preload is
+added to every document a window loads (not the main frame alone), so a link or
+a file dropped on one is a navigation, and what it loads is handed `openPath`,
+`openConnection` and the saved servers. Each is held to its own `views://`
+folder (`holdTo`; the constructor's `navigationRules` option did not take in
+2.0.4, a navigation to another origin reported `allowed: true`, the setter does)
+and `checks/pages.mjs` fails, as the launcher goes to example.com, if the rule is
+taken away. A `file:` address is not even asked about: WebKit refuses it from a
+page of another scheme. An origin that holds a `*` or a `?` is refused: it is
+the rule's glob. The preload writes `sessionStorage["fenec-studio"]` only where
+`location.origin` is the server's; `test/session.test.ts` runs it as a page
+would, including a token that tries to leave its string. Failures are windows of
+the app's own (`messages.ts`, a bundled sandboxed page that draws with
+`textContent`), never `Utils.showMessageBox`: that is a synchronous native call
+in an `async` function, so the main process's JavaScript, every server's
+supervision and the quit handler stood still until someone clicked (a check that
+never clicked held the app for good). `exitOnLastWindowClosed` is false: the
+default quits as the last window's close handlers return, too soon for a
+server's SIGTERM to finish while the app still holds its lock; the app stays in
+the Dock, as a document app does, and stops its servers itself on quit
+(`before-quit` held until they have). A second open of a file the app is still
+starting a server for waits for that one, and so does a second click on a saved
+server while it is being looked at (a few seconds, up to the probe's timeout):
+both are in `starting`, one open of a thing at a time.
+
+The data store. What a page keeps (`localStorage`: the studio's query history,
+saved queries and theme) lives in a WebKit data store, and `BrowserWindow`
+makes its page's view in the one default store, told apart by origin alone: a
+file's server listens on a port the system picks, so a window on a port used
+before would show the earlier file's history. `BrowserWindow` has no `partition`
+option, so the window is made with no page and the view made in it with one
+(`BrowserView`'s `partition`, `autoResize`, `windowId`): a name without
+`persist:` is `nonPersistentDataStore`, one store for that window, which a file
+gets; `persist:remote-<id>` is `dataStoreForIdentifier`, kept between runs and
+apart from every other saved server's, cleared with `Session.clearStorageData`
+when the connection is removed. The window keeps the blank view Electrobun made
+for it, under the page's. `checks/storage.mjs` holds it: two saved servers on one
+address do not share, a saved server's survives its window, a file's does not,
+the page is the window's size and has focus.
+
+The saved server. The probe asks `/_studio/` (served before any token), then
+`/_whoami` **without** the token and sends it only if fenecdb's own 401 (a JSON
+body naming an error) comes back, and follows no redirect (`redirect: "manual"`,
+a message that says where, as an origin): an `Authorization` header goes wherever
+a redirect says, and a proxy's sign-in page or a moved address would be told the
+token. A token is for the address it was saved with: a connection pointed at
+another origin with no token typed is refused (`tokenMayStay`), since keeping it
+would send the old server's token to the new one. The Keychain keeps it from
+other users and from pages, **not from other programs of the same user**: the
+client is the bundled `bun`, a general-purpose runtime that any such program can
+run with a script of its own (`Bun.secrets.get` with the service and the id that
+`state.json` names), and nothing here makes the Keychain ask first. Whether a
+signed build's items are bound to its identity, so that the system asks, is a
+thing to look at with the first signed build. There is no fallback to the
+`security` command-line tool, whose `add-generic-password -w` puts the secret in
+argv.
 
 New database. Electrobun 2.0.4 has no save dialog, so the window takes a folder
 from the folder dialog and a name, and `createDatabase` makes the file with
@@ -165,7 +224,11 @@ and then starts a server on it: `fenec-server` takes a zero-length file as a
 new database (an 8-byte head). It does not truncate or otherwise write to a file
 that is not one: the signature is read first and refused (`invalid fenecdb
 signature`), and the app says so and nothing changed (a check holds it). A server
-that then fails to start does not leave the empty file behind.
+that then fails to start does not leave the empty file behind. Open looks first
+(`dbfile.ts`): `fenec-server` makes an empty file into a database and leaves
+`<file>.lock` beside any file it opens, so a file that is empty (and not one New
+database just made) or does not start with `FENECDB` is a message and a server
+is never started on it; the panel is limited to `.fenec`.
 
 The test variant. The checks drive the app through a control file and read its
 reports, which a shipped app must not read: `build.bun.define` makes
@@ -188,7 +251,12 @@ ignored) and an `installHutch` that refuses; the archive is checked against
 Electrobun's release index by the resolver, and `electrobun` is an exact
 version in a lock file, so nothing is fetched that is not named by a hash or a
 version. The npm package's `exports` map every subpath to a stub, so the
-resolver is required by path.
+resolver is required by path. The index the resolver checks the archive against
+is fetched from the same release as the archive, so `hutch-pin.json` holds, in
+the repository, the SHA-256 of the archive as downloaded (checked through the
+resolver's `download` hook) and of the two binaries in it (checked on every run,
+cached or fresh: a CI cache of `.hutch-home/` is not trusted for being one);
+`ELECTROBUN_HUTCH_BINARY`, which the resolver takes unchecked, is ignored.
 
 The first launch. A stable Electrobun build is a self-extractor: the first run
 unpacks the app in place with an installer window and starts it as a process of
@@ -199,6 +267,23 @@ Developer ID certificate: that an in-place unpacking leaves a signed and
 notarized bundle's seal whole, and that Hutch gives the bundled `fenec-server`
 the hardened runtime (`desktop.yml`'s signing job fails if `codesign` says
 otherwise).
+
+Signing. `desktop.yml` builds and checks on every pull request and push to the
+paths the app is made from (the studio, `fenec-server`, `fenec-http`,
+`fenec-core`, the app), and signs only when a maintainer starts it by hand from
+`main`, in the Environment `desktop-signing` that holds the six secrets (the
+Developer ID's name, the `.p12` and its password, the App Store Connect key's id,
+issuer and `.p8`): a pull request's or another branch's code never meets one, and
+a dispatch from another branch is skipped. The signing job has read access only,
+restores no cache (what a cache holds was written by runs without the secrets),
+checks out without persisting the token, imports the certificate into a
+keychain of its own with `-T /usr/bin/codesign -T /usr/bin/security` and not
+`-A`, validates the release it is given before it reaches `make` (which
+expands `$(shell ...)` in a value on its command line), runs `release.mjs` on the
+signed bundle, and greps the bundled server's signature for the hardened runtime
+and for the Developer ID separately (one `grep -E` with an alternation passes if
+either is there). A second job, with the workflow's only write permission and no
+secret, attaches the DMG the first uploaded; nothing unsigned is ever attached.
 
 Rejected. webview-bun with `bun build --compile` (an 89.8 MB binary, studio
 visible in 0.87 s): `Webview.run()` blocks the JavaScript thread in the native

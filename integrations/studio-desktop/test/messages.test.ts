@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { alreadyHereMessage, diedNotice, heldNotice, missingFile, remoteNotice, startFailedNotice } from "../src/bun/messages.ts";
+import { alreadyHereMessage, diedNotice, emptyFile, heldNotice, missingFile, notADatabase, remoteNotice, startFailedNotice } from "../src/bun/messages.ts";
 import type { Probe } from "../src/bun/remote.ts";
 
 const origin = "https://db.example.com";
@@ -9,6 +9,7 @@ const failures: Exclude<Probe, { kind: "ok" }>[] = [
 	{ kind: "no-studio", status: 404 },
 	{ kind: "token-refused", detail: "invalid token", hadToken: true },
 	{ kind: "token-refused", detail: "invalid token", hadToken: false },
+	{ kind: "redirected", status: 302, to: "https://login.example.com" },
 ];
 
 test("a file another program holds says whose it is and what to do", () => {
@@ -38,6 +39,22 @@ test("each way a saved server can fail has its own words and a way forward", () 
 	}
 	assert.match(remoteNotice("prod", origin, failures[1]!).hint!, /--studio/);
 	assert.match(remoteNotice("prod", origin, failures[0]!).message, /nothing is listening/);
+});
+
+test("a redirect names where it points and says the token is not sent there", () => {
+	const n = remoteNotice("prod", origin, failures[4]!);
+	assert.match(n.message, /redirect \(HTTP 302\) to https:\/\/login\.example\.com/);
+	assert.match(n.hint ?? "", /only to the address it was saved for/);
+	assert.deepEqual(n.actions?.map((a) => a.id), ["edit"]);
+});
+
+test("a file picked by mistake is told what it is, before any server is started on it", () => {
+	assert.match(emptyFile("a.fenec").message, /nothing in it/);
+	assert.match(emptyFile("a.fenec").hint ?? "", /New Database/);
+	const other = notADatabase("notes.txt");
+	assert.match(other.title, /not a fenecdb database/);
+	assert.match(other.hint ?? "", /nothing was written beside it/i);
+	assert.equal(other.actions, undefined);
 });
 
 test("a refused token and a missing one are not the same message, and both offer the form", () => {

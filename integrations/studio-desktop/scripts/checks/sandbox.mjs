@@ -41,6 +41,11 @@ const ext = await waitFor((l, i) => i >= m2 && l.what === 'external', 10000, 'th
 assert.equal(ext.url, 'https://example.com/');
 assert.ok((await evalIn(KEY, `return location.href`)).value.startsWith(started.origin), 'the window stayed');
 
+step('a page cannot ask for links without end: a window is given one in three seconds');
+const mRepeat = lines().length;
+await evalIn(KEY, `window.open("https://example.com/a"); window.open("https://example.com/b"); return 1`);
+await waitNone((l, i) => i >= mRepeat && l.what === 'external', 1500, 'a second link within the gap was handed to the browser');
+
 step('an address that is not http(s) is not handed to the system at all');
 const m3 = lines().length;
 await evalIn(KEY, `window.open("file:///etc/passwd"); window.open("javascript:alert(1)"); return 1`);

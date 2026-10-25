@@ -43,7 +43,7 @@ function render(o: Overview) {
 				{ class: r.exists ? "" : "missing" },
 				el(
 					"div",
-					{ class: "main", title: r.path, onclick: () => r.exists && run(ask.openPath({ path: r.path })) },
+					{ class: "main", title: r.path, onclick: () => r.exists && run(ask.openPath({ path: r.path }), `Opening ${r.name}…`) },
 					el("div", { class: "name" }, r.name),
 					el("div", { class: "path" }, r.path),
 				),
@@ -61,7 +61,7 @@ function render(o: Overview) {
 				{},
 				el(
 					"div",
-					{ class: "main", onclick: () => run(ask.openConnection({ id: c.id })) },
+					{ class: "main", onclick: () => run(ask.openConnection({ id: c.id }), `Connecting to ${c.name}…`) },
 					el("div", { class: "name" }, c.name),
 					el("div", { class: "path" }, c.url + (c.tenant ? ` · ${c.tenant}` : "")),
 				),
@@ -118,11 +118,12 @@ async function refresh() {
 	if (wanted) edit(wanted);
 }
 
-async function run(p: Promise<Result>) {
-	say("");
+/** `doing` is what is said while it takes its time: a saved server is looked at for up to a few seconds first. */
+async function run(p: Promise<Result>, doing = "") {
+	say(doing);
 	const r = await p;
 	// Said already by a window of the app's own: not twice.
-	if (r.message && !r.shown) say(r.message, !r.ok);
+	say(r.message && !r.shown ? r.message : "", r.message !== undefined && !r.ok);
 	await refresh();
 }
 

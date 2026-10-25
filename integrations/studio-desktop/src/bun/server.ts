@@ -15,15 +15,24 @@
 
 import { PATHS } from "electrobun/main";
 import { join } from "node:path";
-import { forget, remember } from "./strays.ts";
+import { serverEnvironment } from "./env.ts";
+import { strays } from "./registry.ts";
 
 /** The file is open in another process: the server refused its `<file>.lock`. */
 export class AlreadyOpen extends Error {}
 /** The server never said where it listens. */
 export class StartFailed extends Error {}
 
+/**
+ * The bundled server. Only the test variant lets the environment name another
+ * (the checks run the one they built): a shipped app that read it would start
+ * whatever program a launching shell named, with the database file and the
+ * token. Every environment variable the shipped app reads for itself would be
+ * a hook; this is not one there (`checks/release.mjs`).
+ */
 export function serverBinary(): string {
-	return process.env["FENEC_SERVER_BIN"] || join(PATHS.RESOURCES_FOLDER, "app", "bin", "fenec-server");
+	const named = __TESTABLE__ ? process.env["FENEC_SERVER_BIN"] : undefined;
+	return named || join(PATHS.RESOURCES_FOLDER, "app", "bin", "fenec-server");
 }
 
 function randomToken(): string {
@@ -47,17 +56,9 @@ export type FileServer = {
 const LISTENING = /listening on: (http:\/\/\S+)/;
 const START_TIMEOUT_MS = 30_000;
 
-/** The server's environment: ours without any FENEC_* of the user's (a stray FENEC_JWT_SECRET would change what the server accepts), and the token. */
-function serverEnv(token: string): Record<string, string> {
-	const env: Record<string, string> = {};
-	for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("FENEC_")) env[k] = v;
-	env["FENEC_HTTP_TOKEN"] = token;
-	return env;
-}
-
 function spawnServer(file: string, token: string) {
 	return Bun.spawn([serverBinary(), "--file", file, "--studio", "--http", "127.0.0.1:0"], {
-		env: serverEnv(token),
+		env: serverEnvironment(process.env, token),
 		stdin: "ignore",
 		stdout: "ignore",
 		stderr: "pipe",
@@ -67,6 +68,9 @@ function spawnServer(file: string, token: string) {
 export async function startFileServer(file: string): Promise<FileServer> {
 	const token = randomToken();
 	const proc = spawnServer(file, token);
+	// Noted at once, not once it listens: an app killed while a server is
+	// still starting leaves one the next launch has to know of.
+	strays.remember(proc.pid, file);
 	const tail: string[] = [];
 	const note = (line: string) => {
 		tail.push(line);
@@ -76,8 +80,8 @@ export async function startFileServer(file: string): Promise<FileServer> {
 	let announce!: (origin: string) => void;
 	const listening = new Promise<string>((resolve) => (announce = resolve));
 	// Drain stderr for the life of the process: a pipe nobody reads fills up
-	// and blocks the server's log writes.
-	(async () => {
+	// and blocks the server's log writes. Its promise ends with the stream.
+	const reading = (async () => {
 		const decoder = new TextDecoder();
 		let pending = "";
 		for await (const chunk of proc.stderr as unknown as AsyncIterable<Uint8Array>) {
@@ -95,20 +99,19 @@ export async function startFileServer(file: string): Promise<FileServer> {
 	})();
 
 	const exited = proc.exited.then((code) => code as number | null);
+	void exited.then(() => strays.forget(proc.pid));
 	const timeout = new Promise<"timeout">((r) => setTimeout(() => r("timeout"), START_TIMEOUT_MS));
 	const first = await Promise.race([listening, exited.then(() => "exited" as const), timeout]);
 	if (first === "exited" || first === "timeout") {
 		if (first === "timeout") proc.kill("SIGKILL");
 		await exited;
-		// Let the stderr reader see the last line before judging it.
-		await Bun.sleep(30);
+		// The last line it wrote is the reason: the stream's end says it is all here.
+		await reading;
 		const text = tail.join("\n");
 		if (text.includes("it is open already")) throw new AlreadyOpen(text);
 		throw new StartFailed(text || `fenec-server ${first === "timeout" ? "did not start in time" : "exited"}`);
 	}
 
-	remember(proc.pid, file);
-	void exited.then(() => forget(proc.pid));
 	let stopping: Promise<number | null> | null = null;
 	return {
 		file,
@@ -128,7 +131,6 @@ export async function startFileServer(file: string): Promise<FileServer> {
 					proc.kill("SIGKILL");
 					await exited;
 				}
-				forget(proc.pid);
 				return proc.exitCode;
 			})();
 			return stopping;

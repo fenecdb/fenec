@@ -1,12 +1,19 @@
-// Saved servers: the token in the Keychain and nowhere else, the server's own
-// studio in a window, and every way it can fail said in words before a window
-// opens on nothing.
+// Saved servers: the token in the Keychain and in no file of the app's, no
+// process's arguments and no URL; the server's own studio in a window; and
+// every way it can fail said in words before a window opens on nothing.
 //
-// The Keychain item can be read back only by the app (its access list names
-// the app), so this reads the secret through the app, and from here only asks
-// that the item exists (attributes, no `-w`).
+// The token is out of the app's own files and out of reach of the pages it
+// shows and of other users. It is not out of reach of another program of the
+// same user: the Keychain's client here is the bundled `bun`, a general-purpose
+// runtime that any program running as that user can run with a script of its
+// own (`Bun.secrets.get`, with the service and the id that state.json names),
+// and nothing in this app makes the Keychain ask first. What a signed build
+// asks, if anything, is for the README's list to look at. So this reads the
+// secret back through the app, and from here only asks that the item exists
+// (attributes, no `-w`).
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import {
@@ -90,6 +97,63 @@ n = lines().length;
 assert.equal((await open(bad)).ok, true, 'opens with the new token');
 await waitStudio(`remote:${bad}`, n);
 
+step('a saved server pointed at another address, with no token typed, is refused: its token is not sent to a new place');
+const THIRD = data('third', 10);
+const third = await startServer(['--file', THIRD, '--studio', '--http', '127.0.0.1:0'], { FENEC_HTTP_TOKEN: 'third-token' });
+const mover = await save('mover', remote.origin, TOKEN);
+n = lines().length;
+cmd({ cmd: 'addconn', id: mover, name: 'mover', url: third.origin, token: '', tenant: '' });
+const noMove = await waitFor((l, i) => i >= n && l.what === 'conn-refused', 10000, 'the change refused');
+assert.match(noMove.message, /not sent to another address/);
+assert.equal(state().connections.find((c) => c.id === mover).url, remote.origin, 'the connection is as it was');
+assert.ok(keychainHas(mover), 'and so is its token');
+n = lines().length;
+cmd({ cmd: 'secret', name: `connection:${mover}` });
+assert.equal((await waitFor((l, i) => i >= n && l.what === 'secret', 10000, 'secret')).value, TOKEN, 'unchanged');
+// With a token typed for the new address, it goes.
+n = lines().length;
+cmd({ cmd: 'addconn', id: mover, name: 'mover', url: third.origin, token: 'third-token', tenant: '' });
+await waitFor((l, i) => i >= n && l.what === 'conn-added' && l.name === 'mover', 10000, 'the change taken');
+assert.equal(state().connections.find((c) => c.id === mover).url, third.origin);
+n = lines().length;
+cmd({ cmd: 'secret', name: `connection:${mover}` });
+assert.equal((await waitFor((l, i) => i >= n && l.what === 'secret', 10000, 'secret')).value, 'third-token', 'the new address has its own');
+// The same address with the token left blank is an edit of the name: the token stays.
+n = lines().length;
+cmd({ cmd: 'addconn', id: mover, name: 'mover renamed', url: third.origin, token: '', tenant: '' });
+await waitFor((l, i) => i >= n && l.what === 'conn-added' && l.name === 'mover renamed', 10000, 'the rename taken');
+assert.ok(keychainHas(mover));
+await third.stop();
+
+step('two clicks on one saved server while it is being looked at: one window');
+const twice = await save('twice', remote.origin, TOKEN);
+n = lines().length;
+cmd({ cmd: 'openconn-twice', id: twice });
+const both = await waitFor((l, i) => i >= n && l.what === 'openconn-twice-result', 30000, 'both opens answered');
+assert.deepEqual(both.results.map((r) => r.ok), [true, true]);
+assert.equal(lines().slice(n).filter((l) => l.what === 'window-opened' && l.key === `remote:${twice}`).length, 1, 'one window, not two');
+
+step('a server that sends the browser elsewhere: said, and the token is not sent on');
+let sawAuthorization = false;
+const redirecting = createServer((req, res) => {
+  if (req.headers.authorization) sawAuthorization = true;
+  if (req.url === '/_studio/') {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    return void res.end('<!doctype html>');
+  }
+  res.writeHead(302, { location: 'http://127.0.0.1:9/login?next=/_whoami' });
+  res.end();
+});
+await new Promise((r) => redirecting.listen(0, '127.0.0.1', r));
+const moved = await save('moved', `http://127.0.0.1:${redirecting.address().port}`, 'token-for-moved');
+n = lines().length;
+assert.equal((await open(moved)).ok, false);
+const sent = await waitNotice('The server sent us somewhere else', 10000, n);
+assert.match(sent.message, /HTTP 302\) to http:\/\/127\.0\.0\.1:9\b/);
+assert.ok(!sent.message.includes('login') && !sent.message.includes('next='), 'only where, not the path or query');
+assert.equal(sawAuthorization, false, 'the token went to no one');
+await new Promise((r) => redirecting.close(r));
+
 step('a server that needs a token, with none saved');
 const none = await save('no token', remote.origin, '');
 n = lines().length;
@@ -116,9 +180,9 @@ assert.match(unreachable.message, /nothing is listening/);
 assert.deepEqual(unreachable.actions, ['edit']);
 
 step('removing a connection removes its Keychain item');
-for (const c of [id, bad, none, nostudio, dead]) cmd({ cmd: 'rmconn', id: c });
-await waitFor((l) => l.what === 'conn-removed' && l.id === dead, 10000, 'all removed');
-assert.ok(!keychainHas(id) && !keychainHas(bad), 'both items are gone');
+for (const c of [id, bad, none, nostudio, dead, mover, twice, moved]) cmd({ cmd: 'rmconn', id: c });
+await waitFor((l) => l.what === 'conn-removed' && l.id === moved, 10000, 'all removed');
+assert.ok(![id, bad, mover, twice, moved].some(keychainHas), 'every item is gone');
 assert.deepEqual(state().connections, []);
 
 step('quit with windows open: nothing of the app is left (the remote server is not the app\'s)');

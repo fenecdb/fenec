@@ -976,15 +976,20 @@ names against FenecQL's and passes values as parameters.
 **[The desktop app is a window on a studio a `fenec-server` serves, one server per
 file.](docs/design/integrations.md#studio-desktop)** `integrations/studio-desktop`
 (Electrobun, macOS, beta) starts a server in one place (`server.ts`), its
-token in the environment, never argv, and a token reaches a page in one
-(`session.ts`, written only where `location.origin` is the server's); a
-studio window is `sandbox: true` and held to its origin, a saved server's
-token is in the Keychain alone, and every failure is a notice window, never
-a native alert (that blocks the main process, and every server's supervision
-with it). The shipped bundle holds none of the test hooks (`__TESTABLE__`,
-`checks/release.mjs`), the toolchain is fetched into `.hutch-home/`, never
-`~/.hutch` or a shell file (`scripts/electrobun.mjs`), and signing runs only
-where its secrets exist (`desktop.yml`).
+token in the environment, never argv, and the rest of the environment an
+allowlist; a token reaches a page in one (`session.ts`, written only where
+`location.origin` is the server's). A studio window is `sandbox: true` (the
+event bridge only) and held to its origin, and every window with the RPC
+bridge is held to its own `views://` folder (`holdTo`): a navigation anywhere
+else is refused. A saved server's token is in the Keychain alone, is never
+sent to another address or along a redirect, and every failure is a notice
+window, never a native alert (that blocks the main process, and every
+server's supervision with it). The shipped bundle holds none of the test
+hooks: a new environment read in the shipped app is a hook unless it is behind
+`__TESTABLE__` (`checks/release.mjs`). The toolchain is fetched into
+`.hutch-home/`, never `~/.hutch` or a shell file, and held to `hutch-pin.json`
+(`scripts/electrobun.mjs`); signing runs only by hand, from main, in an
+environment that holds its secrets (`desktop.yml`).
 
 **[Grafana's data source binds a dashboard's values; it never splices
 them.](docs/design/integrations.md#grafana)** Names become `$n`s

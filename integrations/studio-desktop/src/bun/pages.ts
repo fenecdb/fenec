@@ -8,7 +8,7 @@ import { BrowserView, BrowserWindow, Utils } from "electrobun/main";
 import type { LauncherRPC, NewDbRPC } from "../shared/rpc.ts";
 import { createDatabase, onChange, onEdit, openConnection, openFile, overview, removeConnection, saveConnection } from "./app.ts";
 import { store } from "./store.ts";
-import { pageFrame } from "./windows.ts";
+import { holdTo, pageFrame } from "./windows.ts";
 
 /** The dialogs. A test variant answers from the checks (testhooks.ts) instead of opening one. */
 async function pick(kind: "file" | "folder", startingFolder: string): Promise<string | null> {
@@ -18,6 +18,9 @@ async function pick(kind: "file" | "folder", startingFolder: string): Promise<st
 	}
 	const paths = await Utils.openFileDialog({
 		startingFolder,
+		// A database is a .fenec file (a comma-separated list of extensions, which
+		// the native panel takes as it is); a folder is any.
+		allowedFileTypes: kind === "file" ? "fenec" : "*",
 		canChooseFiles: kind === "file",
 		canChooseDirectory: kind === "folder",
 		allowsMultipleSelection: false,
@@ -87,6 +90,7 @@ export async function showLauncher() {
 		frame: pageFrame(760, 680),
 		preload: hooks?.pagePreloadFor("launcher"),
 	});
+	holdTo(launcher.webview, "views://launcher/*");
 	hooks?.watchPage(launcher, "launcher");
 	launcher.on("close", () => {
 		launcher = null;
@@ -144,6 +148,7 @@ export async function showNewDatabase() {
 		frame: pageFrame(560, 390),
 		preload: hooks?.pagePreloadFor("newdb"),
 	});
+	holdTo(newdb.webview, "views://newdb/*");
 	hooks?.watchPage(newdb, "newdb");
 	newdb.on("close", () => {
 		newdb = null;

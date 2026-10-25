@@ -1,0 +1,11 @@
+{
+	"electrobun": "2.0.4",
+	"hutch": "0.28.1",
+	"macos-arm64": {
+		"archive": "1d1e7b1b51d0fe276f543043faabab0d22416a9994821de3a6357570f2f88bc4",
+		"files": {
+			"bin/hutch": "b228cda0706c5bccd6a6cfb5cd0f41139e5a84891696d2b0d34b726a4f003aea",
+			"bin/hutch-engine": "817ea96568da1f57005df8a6b7976809656ea6e267119490afb319cfdff38cc3"
+		}
+	}
+}

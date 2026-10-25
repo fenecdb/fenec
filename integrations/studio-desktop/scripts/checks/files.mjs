@@ -2,7 +2,7 @@
 // form, closed (the server stops, gracefully), opened again with the edit
 // there; opened twice, and while another program holds it.
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import {
   assertClean, cmd, data, evalIn, file, lastState, lines, mine, pressNotice, quit, startApp, startServer, step, textOf, until, waitFor, waitNotice, waitStudio, log,
 } from './lib.mjs';
@@ -89,7 +89,7 @@ await waitFor((l, i) => i >= t && l.what === 'server-started' && l.path === HELD
 await waitStudio(`file:${HELD}`, t);
 log('opened after the holder stopped');
 
-step('a file that is gone, a folder, and a file that is not a database (which is left as it was)');
+step('a file that is gone, a folder, a file that is not a database, an empty file: said before any server is started, and nothing written beside them');
 const m = lines().length;
 cmd({ cmd: 'open', path: `${file('nothing-here')}` });
 assert.match((await waitNotice('That file is gone', 10000, m)).message, /nothing-here\.fenec/);
@@ -100,9 +100,28 @@ const notes = 'plain text, not a database\n';
 writeFileSync(NOTES, notes);
 cmd({ cmd: 'open', path: NOTES });
 const wrong = await waitNotice('That is not a fenecdb database', 15000, m);
-assert.match(wrong.detail, /invalid fenecdb signature/);
-assert.equal(readFileSync(NOTES, 'utf8'), notes, 'the server changed nothing in it');
+assert.equal(wrong.detail, undefined, 'no server was asked: nothing of its to quote');
+assert.match(wrong.hint, /nothing was written beside it/i);
+assert.equal(readFileSync(NOTES, 'utf8'), notes, 'the file is as it was');
+assert.ok(!existsSync(`${NOTES}.lock`), 'and no lock file was made beside it');
+// An empty file is the one a server would make into a database; Open must not.
+const EMPTY = file('blank');
+writeFileSync(EMPTY, '');
+cmd({ cmd: 'open', path: EMPTY });
+const empty = await waitNotice('That file is empty', 15000, m);
+assert.match(empty.hint, /New Database/);
+assert.equal(statSync(EMPTY).size, 0, 'still empty: not made into a database');
+assert.ok(!existsSync(`${EMPTY}.lock`), 'and no lock file beside it');
+assert.ok(!lines().slice(m).some((l) => l.what === 'server-started' && (l.path === NOTES || l.path === EMPTY)), 'no server for either');
 
+step('quit right after closing a window: the app waits for its server to finish, and the server ends cleanly');
+{
+  const k = lines().length;
+  cmd({ cmd: 'close', key: `file:${HELD}` });
+  cmd({ cmd: 'quit' });
+  const stopped = await waitFor((l, i) => i >= k && l.what === 'server-stopped' && l.key === `file:${HELD}`, 30000, 'the closed window\'s server stopped before the app went');
+  assert.equal(stopped.code, 0, 'its checkpoint was written: exit 0, not killed');
+}
 step('quit: no server, no helper left');
 await quit(app);
 log('clean');

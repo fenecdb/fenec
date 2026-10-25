@@ -15,7 +15,7 @@ import { closeSync, mkdirSync, openSync, rmSync, writeSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { D, HERE, IDENTIFIER, describe, mine } from './lib.mjs';
 
-const ALL = ['release', 'warmup', 'files', 'server-dies', 'orphan', 'sandbox', 'remote', 'newdb', 'finder'];
+const ALL = ['release', 'warmup', 'files', 'server-dies', 'orphan', 'sandbox', 'pages', 'storage', 'environment', 'remote', 'newdb', 'finder'];
 const only = (process.env.ONLY ?? '').split(',').filter(Boolean);
 const names = only.length ? ALL.filter((n) => only.includes(n)) : ALL;
 const LIMIT_MS = 240_000;
