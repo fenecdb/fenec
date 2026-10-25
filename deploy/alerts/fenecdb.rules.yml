@@ -168,6 +168,20 @@ groups:
         annotations:
           summary: "{{ $value }} tenants on {{ $labels.instance }}{{ if $labels.region }} in {{ $labels.region }}{{ end }} have no copy to fail over to"
           runbook: deploy/RUNBOOK.md#tenants-without-a-replica
+      # A file the router may have left on a node -- a create or a move
+      # taken back whose DELETE the node refused, a copy that stayed -- is
+      # noted and counted, never taken off by the router: neither it nor the
+      # node can tell it from a later file at the same place. A repair's
+      # look forgets one it finds gone or placed; the rest are an
+      # operator's to look at.
+      - alert: FenecFilesLeftOnNodes
+        expr: fenec_router_files_left > 0 and on (instance) fenec_router_following == 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} files {{ $labels.instance }} may have left on nodes are placed by nothing"
+          runbook: deploy/RUNBOOK.md#files-left-on-nodes
       - alert: FenecSameZoneCopies
         expr: fenec_router_same_zone_copies > 0 and on (instance) fenec_router_following == 0
         for: 15m

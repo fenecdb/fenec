@@ -109,25 +109,26 @@ const SCHEMA: [&str; 12] = [
     // of its own, read where asked, never mapped; a router from before it
     // neither reads nor writes it.
     "create collection if not exists leasing (ms int)",
-    // A tenant's file this directory's router made on a node, or meant to
-    // take off one, that no placement records ([`Leftover`]): a create or
-    // a move taken back whose `DELETE` the node did not take, a create's
-    // `PUT` unanswered, a replica whose attach failed once its `PUT` was
-    // answered, a detached or deleted tenant's copy that stayed, a move's
-    // source that would not go. Keyed `<tenant>/<node>`; `lineage` and
-    // `seq` where the file stood as the router left it, as its node said.
-    // A repair asks the node to take each back once nothing places its
-    // tenant there, and so does a create of the name meeting the file --
-    // and the node deletes it only where it follows a node or stands
-    // where the router left it (`fenec_http::tenants::Tenants::take_back`):
-    // ignored, it was an orphan that every create of the name on that node
-    // met as 409. Read where asked, never mapped; a router from before it
-    // neither reads nor writes it.
+    // A tenant's file this directory's router may have left on a node --
+    // made, or meant to take off, and placed by nothing ([`Leftover`]): a
+    // create or a move taken back whose `DELETE` the node did not take, a
+    // create's `PUT` unanswered, a replica whose attach failed once its
+    // `PUT` was answered, a detached or deleted tenant's copy that stayed,
+    // a move's source that would not go, an old primary's file on a node
+    // silent as its tenant's replica went elsewhere. Keyed
+    // `<tenant>/<node>`, with why and the directory's change it was noted
+    // at. Reported to an operator -- every repair's `left`,
+    // `fenec_router_files_left` -- and forgotten once a repair's look finds
+    // the file gone or the directory gives it its tenant; never taken off
+    // by the router, which cannot tell the file it left from a later one
+    // at the same place. Ignored, it was an orphan that every create of the
+    // name on that node met as 409, unsaid. Read where asked, never mapped;
+    // a router from before it neither reads nor writes it.
     LEFTOVERS,
 ];
 
 const LEFTOVERS: &str = "create collection if not exists leftovers \
-     (key text @hash, tenant text, node text, lineage text, seq int)";
+     (key text @hash, tenant text, node text, why text, noted int)";
 
 /// The fields `nodes` took after directories were first written, added to
 /// one written before them as the engine adds a field: its nodes read them
@@ -250,22 +251,18 @@ pub struct Reader {
     pub lineage: Option<String>,
 }
 
-/// A tenant's file a router made on a node, or meant to take off one, that
-/// no placement records (`leftovers`): taken back once nothing places the
-/// tenant on the node, by the router's repair or by a create of the name
-/// that meets it, where the node finds it as the router left it.
+/// A tenant's file a router may have left on a node, placed by nothing
+/// (`leftovers`): reported, for an operator to look at and remove by hand.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Leftover {
     pub tenant: String,
     pub node: String,
-    /// The lineage the file was made of, where its node said: one of
-    /// another there by then -- put there by hand -- is not the router's
-    /// to take back.
-    pub lineage: Option<String>,
-    /// The change the router left the file at, as its node said: 0 where
-    /// it does not know, so that only a file holding no write -- or a
-    /// copy following a node -- is taken back.
-    pub seq: u64,
+    /// What the router was doing, and what the node said.
+    pub why: String,
+    /// The directory's change as it was noted, noted again or not: a look
+    /// begun before then forgets nothing of it
+    /// ([`Directory::forget_leftover`]).
+    pub noted: i64,
 }
 
 /// A tenant the directory's maps, brought up to what a router it follows
@@ -1165,54 +1162,34 @@ impl Directory {
         let found = rows(
             &g,
             "leftovers",
-            "get leftovers select tenant, node, lineage, seq order key",
+            "get leftovers select tenant, node, why, noted order key",
         )?;
         Ok(found
             .into_iter()
             .map(|(_, row)| Leftover {
                 tenant: text(&row[0]),
                 node: text(&row[1]),
-                lineage: match &row[2] {
-                    Value::Text(l) => Some(l.clone()),
-                    _ => None,
-                },
-                seq: match row[3] {
-                    Value::Int(n) => n.max(0) as u64,
+                why: text(&row[2]),
+                noted: match row[3] {
+                    Value::Int(n) => n,
                     _ => 0,
                 },
             })
             .collect())
     }
 
-    /// The file a router noted as left of `tenant` on `node`, if one is.
-    pub fn leftover(&self, tenant: &str, node: &str) -> Result<Option<Leftover>> {
-        Ok(self
-            .leftovers()?
-            .into_iter()
-            .find(|l| l.tenant == tenant && l.node == node))
+    /// How many files a router noted as left on nodes:
+    /// `fenec_router_files_left`.
+    pub fn files_left(&self) -> usize {
+        self.leftovers().map_or(0, |l| l.len())
     }
 
-    /// Notes `tenant`'s file on `node` as left there, made of `lineage`
-    /// and left at `seq` where its node said ([`Leftover`]). Noted already,
-    /// it takes what is noted now where that names a lineage, and keeps the
-    /// one it had otherwise: a later try that knows less -- an attach whose
-    /// `PUT` found the file, 409 -- would have it judged as a file of no
-    /// known lineage, which holds no write. A directory from before
-    /// `leftovers`, led now by a router that keeps them -- the standby of
-    /// an older primary, promoted -- is given the collection first.
-    pub fn note_leftover(
-        &mut self,
-        tenant: &str,
-        node: &str,
-        lineage: Option<&str>,
-        seq: u64,
-    ) -> Result<()> {
-        let had = self.leftover(tenant, node)?;
-        match &had {
-            Some(h) if h.lineage.as_deref() == lineage && h.seq == seq => return Ok(()),
-            Some(h) if h.lineage.is_some() && lineage.is_none() => return Ok(()),
-            _ => {}
-        }
+    /// Notes `tenant`'s file on `node` as left there, and why ([`Leftover`]):
+    /// noted again, at the change it is noted at now, so a look begun before
+    /// forgets nothing of it. A directory from before `leftovers`, led now
+    /// by a router that keeps them -- the standby of an older primary,
+    /// promoted -- is given the collection first.
+    pub fn note_leftover(&mut self, tenant: &str, node: &str, why: &str) -> Result<()> {
         if read(&self.db).collection("leftovers").is_err() {
             self.run(LEFTOVERS, &[])?;
         }
@@ -1221,13 +1198,13 @@ impl Directory {
             key.clone(),
             Value::Text(tenant.into()),
             Value::Text(node.into()),
-            lineage.map_or(Value::Null, |l| Value::Text(l.into())),
-            Value::Int(seq.min(i64::MAX as u64) as i64),
+            Value::Text(why.into()),
+            Value::Int(read(&self.db).change_seq().min(i64::MAX as u64) as i64),
         ];
         self.write_block(&[
             ("del leftovers where key = $1", vec![key]),
             (
-                "put leftovers {key: $1, tenant: $2, node: $3, lineage: $4, seq: $5}",
+                "put leftovers {key: $1, tenant: $2, node: $3, why: $4, noted: $5}",
                 row,
             ),
         ])
@@ -1253,14 +1230,28 @@ impl Directory {
         }
     }
 
-    /// Forgets `tenant`'s file on `node` as left there: taken off, gone, or
-    /// the tenant's own copy now.
-    pub fn forget_leftover(&mut self, tenant: &str, node: &str) -> Result<()> {
-        if read(&self.db).collection("leftovers").is_err() {
-            return Ok(());
+    /// Forgets `tenant`'s file on `node` as left there -- gone, or the
+    /// tenant's own copy now -- where it is noted, and, given `noted`, only
+    /// where it was noted then and not again since: a look that began
+    /// before a file was noted again may have missed it. Whether one went.
+    pub fn forget_leftover(
+        &mut self,
+        tenant: &str,
+        node: &str,
+        noted: Option<i64>,
+    ) -> Result<bool> {
+        let had = self
+            .leftovers()?
+            .into_iter()
+            .find(|l| l.tenant == tenant && l.node == node);
+        match had {
+            Some(l) if noted.is_none_or(|n| n == l.noted) => {
+                let key = Value::Text(format!("{tenant}/{node}"));
+                self.run("del leftovers where key = $1", &[key])?;
+                Ok(true)
+            }
+            _ => Ok(false),
         }
-        let key = Value::Text(format!("{tenant}/{node}"));
-        self.run("del leftovers where key = $1", &[key])
     }
 
     /// Forgets a tenant's read replica on `node`.
@@ -2316,59 +2307,65 @@ mod tests {
     }
 
     /// A file a router left on a node is noted once by its tenant and node,
-    /// with where it stood -- its lineage and change -- replaced where a
-    /// later note names a lineage and kept where it names none, forgotten
-    /// by the two, and kept across an open; a directory without the
-    /// collection -- an older primary's, which a standby promoted now leads
-    /// -- takes it as the first is noted, and forgets none it never had.
+    /// with why and the change it was noted at, noted again at a later
+    /// change; forgotten by the two, and, given the change a look read it
+    /// at, only where it was not noted again since; kept across an open.
+    /// A directory without the collection -- an older primary's, which a
+    /// standby promoted now leads -- takes it as the first is noted, and
+    /// forgets none it never had.
     #[test]
     fn a_file_left_on_a_node_is_noted_by_its_tenant_and_node() {
         let path =
             std::env::temp_dir().join(format!("fenec-dir-left-{}.fenec", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        let left = |t: &str, n: &str, l: Option<&str>, seq: u64| Leftover {
-            tenant: t.into(),
-            node: n.into(),
-            lineage: l.map(str::to_string),
-            seq,
+        let whys = |d: &Directory| -> Vec<(String, String, String)> {
+            d.leftovers()
+                .unwrap()
+                .into_iter()
+                .map(|l| (l.tenant, l.node, l.why))
+                .collect()
         };
+        let owned = |t: &str, n: &str, w: &str| (t.to_string(), n.to_string(), w.to_string());
         {
             let mut d = Directory::open(&path).unwrap();
             assert_eq!(d.leftovers().unwrap(), []);
-            d.note_leftover("acme", "n1", Some("0a0b0c0d"), 3).unwrap();
-            d.note_leftover("acme", "n1", Some("0a0b0c0d"), 3).unwrap();
-            // A later try that knows less keeps what is known.
-            d.note_leftover("acme", "n1", None, 0).unwrap();
-            d.note_leftover("acme", "n2", None, 0).unwrap();
-            d.note_leftover("beta", "n1", None, 0).unwrap();
-            d.note_leftover("beta", "n1", Some("01020304"), 7).unwrap();
+            assert_eq!(d.files_left(), 0);
+            d.note_leftover("acme", "n1", "a create taken back")
+                .unwrap();
+            d.note_leftover("acme", "n2", "a move undone").unwrap();
+            d.note_leftover("beta", "n1", "first").unwrap();
+            let first = d.leftovers().unwrap()[2].noted;
+            d.note_leftover("beta", "n1", "again").unwrap();
             assert_eq!(
-                d.leftovers().unwrap(),
+                whys(&d),
                 [
-                    left("acme", "n1", Some("0a0b0c0d"), 3),
-                    left("acme", "n2", None, 0),
-                    left("beta", "n1", Some("01020304"), 7),
+                    owned("acme", "n1", "a create taken back"),
+                    owned("acme", "n2", "a move undone"),
+                    owned("beta", "n1", "again"),
                 ]
             );
-            d.forget_leftover("acme", "n1").unwrap();
-            assert_eq!(d.leftover("acme", "n1").unwrap(), None);
-            assert_eq!(
-                d.leftover("acme", "n2").unwrap(),
-                Some(left("acme", "n2", None, 0))
-            );
+            assert_eq!(d.files_left(), 3);
+            // Read before it was noted again: not forgotten by that look.
+            assert!(!d.forget_leftover("beta", "n1", Some(first)).unwrap());
+            let now = d.leftovers().unwrap()[2].noted;
+            assert!(now > first);
+            assert!(d.forget_leftover("beta", "n1", Some(now)).unwrap());
+            assert!(d.forget_leftover("acme", "n1", None).unwrap());
+            assert!(!d.forget_leftover("acme", "n1", None).unwrap());
+            assert_eq!(whys(&d), [owned("acme", "n2", "a move undone")]);
         }
         {
             let mut d = Directory::open(&path).unwrap();
-            assert_eq!(d.leftovers().unwrap().len(), 2);
+            assert_eq!(whys(&d), [owned("acme", "n2", "a move undone")]);
             d.db()
                 .write()
                 .unwrap()
                 .execute(&fenec_ql::parse_one("drop collection leftovers").unwrap())
                 .unwrap();
             assert_eq!(d.leftovers().unwrap(), []);
-            d.forget_leftover("acme", "n2").unwrap();
-            d.note_leftover("gamma", "n3", None, 0).unwrap();
-            assert_eq!(d.leftovers().unwrap(), [left("gamma", "n3", None, 0)]);
+            assert!(!d.forget_leftover("acme", "n2", None).unwrap());
+            d.note_leftover("gamma", "n3", "why").unwrap();
+            assert_eq!(whys(&d), [owned("gamma", "n3", "why")]);
         }
         let _ = std::fs::remove_file(&path);
     }

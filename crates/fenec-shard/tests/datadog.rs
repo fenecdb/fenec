@@ -513,6 +513,7 @@ fn the_alert_rules_read_only_what_the_servers_expose() {
         "fenec_replica_behind",
         "fenec_router_same_zone_copies",
         "fenec_router_tenants_unreplicated",
+        "fenec_router_files_left",
         "fenec_router_read_replicas_given_up",
         "fenec_quota_refused_total",
         "fenec_router_entry_clients_total",

@@ -532,7 +532,7 @@ impl Router {
 
     /// Holds the read replica of `tenant` in `region` for a change: `None`
     /// where one is under way.
-    pub(crate) fn hold_reader(&self, tenant: &str, region: &str) -> Option<ReaderHold<'_>> {
+    fn hold_reader(&self, tenant: &str, region: &str) -> Option<ReaderHold<'_>> {
         let key = format!("{tenant}/{region}");
         let fresh = self
             .reader_busy

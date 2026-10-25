@@ -173,4 +173,4 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 137. [`deploy/` is the kit for running regions, held to the binaries by two checks](integrations.md#deploy)
 138. [Profiles differ on purpose](crates.md#profiles)
 139. [A JOIN on a key is a `lookup` answered flat, or one table's `get` with the other's rows a filter](fenecql.md#sql-joins-subqueries-and-schema) (added after the move, under *FenecQL and schemas*)
-140. [A replica whose attach failed is tried again, and a file the router left on a node is taken off](tenants.md#replicas-tried-again) (added after the move, under *Tenants and leases*)
+140. [A replica whose attach failed is tried again, and a file the router left on a node is reported](tenants.md#replicas-tried-again) (added after the move, under *Tenants and leases*)

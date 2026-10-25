@@ -169,11 +169,10 @@ pub struct Router {
     /// The router itself, for the work it hands to threads of their own
     /// from wherever it is asked for: a lease grant, a failover, a repair.
     me: std::sync::Weak<Router>,
-    /// The repair wanted -- [`REPAIR_LEFTOVERS`], or [`REPAIR_ALL`] -- and
-    /// whether its thread runs ([`Router::repair_soon`]).
-    repairs: Mutex<(u8, bool)>,
-    /// The repairs run again for what a repair or a placement left undone,
-    /// by reason, and what the thread waiting for the next is told by
+    /// A repair wanted, and whether its thread runs ([`Router::repair_soon`]).
+    repairs: Mutex<(bool, bool)>,
+    /// The repairs run again for the replicas a repair or a placement left
+    /// undone, and what the thread waiting for the next is told by
     /// ([`Router::try_again`]): shared with that thread, which holds the
     /// router weakly.
     again: Arc<(Mutex<Retries>, std::sync::Condvar)>,
@@ -377,8 +376,8 @@ impl Drop for Repairing<'_> {
                 wanted.1 = false;
                 wanted.0
             };
-            if again != 0 {
-                self.0.repair_soon(again == REPAIR_ALL);
+            if again {
+                self.0.repair_soon();
             }
         }
     }
@@ -386,7 +385,7 @@ impl Drop for Repairing<'_> {
 
 /// How long the first repair run again waits ([`Router::try_again`]) --
 /// for a tenant whose primary did not answer, a replica whose attach
-/// failed, a file the router left on a node -- doubled for each more up to
+/// failed, a tenant another operation held -- doubled for each more up to
 /// [`REPAIR_AGAIN_MOST`], [`REPAIR_AGAIN_TRIES`] of them in a row: about
 /// four minutes in all. A repair is otherwise run only when a node failed
 /// over answers again or an operator asks (`POST /_shard/replicas`), so a
@@ -396,95 +395,50 @@ const REPAIR_AGAIN_FIRST: Duration = Duration::from_secs(2);
 const REPAIR_AGAIN_MOST: Duration = Duration::from_secs(60);
 const REPAIR_AGAIN_TRIES: u32 = 8;
 
-/// A repair that settles the files the router left on nodes alone
-/// ([`Router::repair_soon`]): what the router starts itself for those
-/// without `--replicas`, which places no replica unasked.
-const REPAIR_LEFTOVERS: u8 = 1;
-/// A repair that gives every tenant in no pair its replica besides.
-const REPAIR_ALL: u8 = 2;
-
-/// What a repair is run again for ([`Router::try_again`]), each counted
-/// apart.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Again {
-    /// A tenant left without a replica another try may give it: its
-    /// primary did not answer, its attach failed, another operation held
-    /// it.
-    Replicas = 0,
-    /// A file the router left on a node that did not come off: the node did
-    /// not answer, or a change of a read replica there was under way.
-    Leftovers = 1,
-}
-
-/// The repairs run again in a row for each reason ([`Again`]) and when the
-/// next of each is due. Apart, so that a file left on a node silent for
-/// good neither holds every repair at 502, nor puts a fresh failed attach
-/// at the end of its own minute-long waits, nor spends the tries a tenant
-/// without a replica has: counted together, eight repairs that found the
-/// node silent stopped the tries for every tenant.
+/// The repairs run again in a row for the replicas they left undone, and
+/// when the next is due. Only replicas are tried again: a file the router
+/// left on a node is noted and reported, never taken off by a try
+/// ([`Router::left_on`]), so nothing a while changes waits on one.
 #[derive(Debug, Default)]
 struct Retries {
-    tries: [u32; 2],
-    due: [Option<Instant>; 2],
+    tries: u32,
+    due: Option<Instant>,
     /// Whether a thread waits for the next due ([`Router::try_again`]).
     waiting: bool,
 }
 
 impl Retries {
-    /// A fresh failure for `why` at `now`: a repair `REPAIR_AGAIN_FIRST`
-    /// later, however many ran for it before -- it is another try's to
-    /// make, not the end of a run of them.
-    fn fresh(&mut self, why: Again, now: Instant) {
-        let i = why as usize;
-        self.tries[i] = 1;
+    /// A fresh failure at `now` -- an attach of a create or a move that
+    /// failed: a repair `REPAIR_AGAIN_FIRST` later, however many ran before
+    /// -- it is another try's to make, not the end of a run of them, which
+    /// would have it wait out the minute the last of those waited.
+    fn fresh(&mut self, now: Instant) {
+        self.tries = 1;
         let due = now + REPAIR_AGAIN_FIRST;
-        self.due[i] = Some(self.due[i].map_or(due, |d| d.min(due)));
+        self.due = Some(self.due.map_or(due, |d| d.min(due)));
     }
 
-    /// A repair's outcome at `now`, for the reasons it judged (`None`: not
-    /// judged, as a repair settling files alone judges no replica). One it
-    /// left undone is tried again, each wait twice the last up to
-    /// `REPAIR_AGAIN_MOST`, `REPAIR_AGAIN_TRIES` in a row, then given up on
-    /// -- the reasons given up on are returned. One it left nothing of ends
-    /// its count, unless a fresh failure came while it ran, whose try is
-    /// still due.
-    fn after(&mut self, undone: [Option<bool>; 2], now: Instant) -> [bool; 2] {
-        let mut gave_up = [false; 2];
-        for (i, undone) in undone.into_iter().enumerate() {
-            match undone {
-                None => {}
-                Some(false) => {
-                    if self.due[i].is_none() {
-                        self.tries[i] = 0;
-                    }
-                }
-                Some(true) if self.tries[i] >= REPAIR_AGAIN_TRIES => {
-                    self.tries[i] = 0;
-                    gave_up[i] = true;
-                }
-                Some(true) => {
-                    let wait =
-                        (REPAIR_AGAIN_FIRST * 2u32.pow(self.tries[i])).min(REPAIR_AGAIN_MOST);
-                    self.tries[i] += 1;
-                    let due = now + wait;
-                    self.due[i] = Some(self.due[i].map_or(due, |d| d.min(due)));
-                }
+    /// A repair's outcome at `now`: where it left a replica undone, another
+    /// try, each wait twice the last up to `REPAIR_AGAIN_MOST`,
+    /// `REPAIR_AGAIN_TRIES` in a row, then given up on (`true`). One that
+    /// left nothing undone ends the count, unless a fresh failure came while
+    /// it ran, whose try is still due.
+    fn after(&mut self, undone: bool, now: Instant) -> bool {
+        if !undone {
+            if self.due.is_none() {
+                self.tries = 0;
             }
+            return false;
         }
-        gave_up
-    }
-
-    /// The soonest repair due.
-    fn next(&self) -> Option<Instant> {
-        self.due.iter().flatten().min().copied()
-    }
-
-    /// The repair due runs now: what it is for -- every tenant's replica,
-    /// or the files left alone -- and nothing due after it until it says.
-    fn fire(&mut self) -> bool {
-        let replicas = self.due[Again::Replicas as usize].is_some();
-        self.due = [None; 2];
-        replicas
+        if self.tries >= REPAIR_AGAIN_TRIES {
+            self.tries = 0;
+            return true;
+        }
+        let wait = (REPAIR_AGAIN_FIRST * 2u32.pow(self.tries)).min(REPAIR_AGAIN_MOST);
+        self.tries += 1;
+        let due = now + wait;
+        self.due = Some(self.due.map_or(due, |d| d.min(due)));
+        false
     }
 }
 
@@ -516,35 +470,8 @@ enum Unplaced {
     /// The node picked did not take it -- it refused, did not answer, or
     /// answered past the timeout, the follow perhaps landing after -- or no
     /// node free to keep it answered the repair's look: another try may
-    /// ([`Router::repair_later`]).
+    /// ([`Router::try_again`]).
     Failed(String),
-}
-
-/// What became of a file a router left on a node ([`Router::settle_leftover`]).
-enum Settled {
-    /// Taken off its node.
-    TakenOff,
-    /// Forgotten with nothing to take off: its tenant's own copy now, gone
-    /// from its node, of another lineage, or on a node no more recorded.
-    Done,
-    /// Left for a repair's next try at its tenant's replica to adopt.
-    Waiting,
-    /// Kept by its node -- it holds writes the router did not leave there,
-    /// or the node takes no file back -- which a while does not change:
-    /// why. Named by every repair, for an operator.
-    Kept(String),
-    /// Still there, a repair after to try again: why.
-    Stays(String),
-}
-
-/// Whether `n` may keep a replica of a tenant on `primary`: another node of
-/// `primary`'s region, in no pair either way -- a standby's files follow
-/// its node's, and a paired node's tenants are replicated by its standby.
-fn may_keep_replica(dir: &Directory, primary: &str, n: &str) -> bool {
-    n != primary
-        && dir.region_of(n) == dir.region_of(primary)
-        && dir.standby(n).is_none()
-        && !dir.is_standby(n)
 }
 
 /// How many times a request a failover cut is sent on before it is
@@ -720,7 +647,7 @@ impl Router {
         }
         Arc::new_cyclic(|me| Router {
             me: me.clone(),
-            repairs: Mutex::new((0, false)),
+            repairs: Mutex::new((false, false)),
             again: Arc::default(),
             dir: RwLock::new(dir),
             repl,
@@ -1261,6 +1188,18 @@ impl Router {
         }
     }
 
+    /// Whether a repair is due to run again ([`Self::try_again`]): how a
+    /// test knows that a file left on a node scheduled none.
+    #[doc(hidden)]
+    pub fn repair_due(&self) -> bool {
+        self.again
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .due
+            .is_some()
+    }
+
     /// Lease grants waiting for their node's turn behind another: how a
     /// test knows a create's grant is queued behind a round's it holds.
     #[doc(hidden)]
@@ -1531,7 +1470,7 @@ impl Router {
         // Granted again at once: the grant it answered left out the tenants
         // a failover withheld from it, which it holds again now.
         self.lease_now(node);
-        self.repair_soon(true);
+        self.repair_soon();
     }
 
     /// Has a repair ([`Self::repair`]) run on a thread of its own, and again
@@ -1541,13 +1480,10 @@ impl Router {
     /// and ran on the leasing thread: a node back from a failover had the
     /// repair call a node gone -- its name's lookup alone 5 s a call in V5's
     /// drill -- for 20 s, no lease renewed meanwhile, and the healthy node it
-    /// ran for was failed over at its end. `all`: tenants are given their
-    /// replicas too, not only the files left on nodes settled.
-    fn repair_soon(&self, all: bool) {
+    /// ran for was failed over at its end.
+    fn repair_soon(&self) {
         let mut wanted = self.repairs.lock().unwrap_or_else(|e| e.into_inner());
-        wanted.0 = wanted
-            .0
-            .max(if all { REPAIR_ALL } else { REPAIR_LEFTOVERS });
+        wanted.0 = true;
         if wanted.1 {
             return;
         }
@@ -1561,20 +1497,17 @@ impl Router {
             .spawn(move || {
                 let _panicked = Repairing(&router);
                 loop {
-                    let all = {
+                    {
                         let mut wanted = router.repairs.lock().unwrap_or_else(|e| e.into_inner());
                         // Its mark taken off under the lock that found no
                         // repair wanted: a repair wanted after that starts
                         // a thread of its own.
-                        match std::mem::take(&mut wanted.0) {
-                            0 => {
-                                wanted.1 = false;
-                                return;
-                            }
-                            w => w == REPAIR_ALL,
+                        if !std::mem::take(&mut wanted.0) {
+                            wanted.1 = false;
+                            return;
                         }
-                    };
-                    let r = router.repair_with(all);
+                    }
+                    let r = router.repair();
                     fenec_http::log!("repair: {} {}", r.status, String::from_utf8_lossy(&r.body));
                 }
             });
@@ -1584,37 +1517,34 @@ impl Router {
         }
     }
 
-    /// Has a repair run again in a while for `why`, a fresh failure: a
-    /// replica whose attach failed on a create or a move, or a file the
-    /// router left on a node ([`Retries`]).
-    fn try_again(&self, why: Again) {
+    /// Has a repair run again in a while for a fresh failure: a replica
+    /// whose attach failed on a create or a move ([`Retries::fresh`]). Only
+    /// a replica: a file the router left on a node is noted and reported
+    /// ([`Self::left_on`]) and schedules nothing -- where it had a repair
+    /// run again to take it off, a router without `--replicas` gave every
+    /// tenant in no pair a replica nobody asked for.
+    fn try_again(&self) {
         let (lock, wake) = &*self.again;
         let mut r = lock.lock().unwrap_or_else(|e| e.into_inner());
-        r.fresh(why, Instant::now());
+        r.fresh(Instant::now());
         wake.notify_all();
         self.wait_for_retry(&mut r);
     }
 
-    /// What a repair left undone, by reason ([`Retries::after`]): another
-    /// try in a while for each, up to [`REPAIR_AGAIN_TRIES`] in a row. Only
-    /// an operator's repair or a node answering after its failover tries
-    /// after that: `fenec_router_tenants_unreplicated` counts the tenants
-    /// left without a copy meanwhile, and a repair's `kept` names the files.
-    fn repaired(&self, replicas: Option<bool>, leftovers: bool) {
+    /// Whether a repair left a replica undone that another try may give
+    /// ([`Retries::after`]): another try in a while, up to
+    /// [`REPAIR_AGAIN_TRIES`] in a row. Only an operator's repair or a node
+    /// answering after its failover tries after that:
+    /// `fenec_router_tenants_unreplicated` counts the tenants left without
+    /// a copy meanwhile.
+    fn repaired(&self, undone: bool) {
         let (lock, wake) = &*self.again;
         let mut r = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let gave_up = r.after([replicas, Some(leftovers)], Instant::now());
-        if gave_up[Again::Replicas as usize] {
+        if r.after(undone, Instant::now()) {
             fenec_http::log!(
                 "repair: {REPAIR_AGAIN_TRIES} repairs in a row left a tenant without its \
                  replica -- its primary or the node picked did not answer: POST \
                  /_shard/replicas tries again"
-            );
-        }
-        if gave_up[Again::Leftovers as usize] {
-            fenec_http::log!(
-                "repair: {REPAIR_AGAIN_TRIES} repairs in a row could not take back a file this \
-                 router left on a node: POST /_shard/replicas tries again"
             );
         }
         wake.notify_all();
@@ -1623,14 +1553,9 @@ impl Router {
 
     /// A thread waiting for the next repair due, where one is due and none
     /// waits: told as a sooner one comes due, and holding the router weakly,
-    /// so a router let go of runs nothing again. The repair it starts
-    /// gives tenants their replicas where one was due for them, or where
-    /// the router gives them (`--replicas`); otherwise it settles the files
-    /// left on nodes alone: a router without `--replicas` places no replica
-    /// unasked, where a take-back that failed had it give one to every
-    /// tenant in no pair.
+    /// so a router let go of runs nothing again.
     fn wait_for_retry(&self, r: &mut Retries) {
-        if r.waiting || r.next().is_none() {
+        if r.waiting || r.due.is_none() {
             return;
         }
         r.waiting = true;
@@ -1641,17 +1566,17 @@ impl Router {
                 let (lock, wake) = &*again;
                 let mut r = lock.lock().unwrap_or_else(|e| e.into_inner());
                 loop {
-                    let Some(due) = r.next() else {
+                    let Some(due) = r.due else {
                         r.waiting = false;
                         return;
                     };
                     let now = Instant::now();
                     if now >= due {
-                        let replicas = r.fire();
+                        r.due = None;
                         r.waiting = false;
                         drop(r);
                         if let Some(router) = me.upgrade() {
-                            router.repair_soon(replicas || router.cfg.replicas);
+                            router.repair_soon();
                         }
                         return;
                     }
@@ -3280,6 +3205,12 @@ impl Router {
                 }
             }
             out.family(
+                "fenec_router_files_left",
+                "gauge",
+                "Files this directory's router may have left on nodes -- made, or meant to be taken off, and placed by nothing -- for an operator to look at and remove by hand: a repair's `left` names each.",
+            );
+            out.sample("fenec_router_files_left", &[], dir.files_left());
+            out.family(
                 "fenec_router_tenants_moving",
                 "gauge",
                 "Tenants a move began on and has not recorded done: served from where they were.",
@@ -3756,10 +3687,15 @@ impl Router {
         let (tenants, _) = dir.load_by_node();
         let replicas = dir.replicas_by_node();
         let from = dir.replicas_from(primary);
+        let region = dir.region_of(primary);
         let zone = dir.node(primary).map_or("", |n| n.zone.as_str());
         let held = |n: &str| tenants.get(n).unwrap_or(&0) + replicas.get(n).unwrap_or(&0);
         let free = |n: &&String| {
-            may_keep_replica(&dir, primary, n) && answering.is_none_or(|a| a.contains(n))
+            n.as_str() != primary
+                && dir.region_of(n) == region
+                && dir.standby(n).is_none()
+                && !dir.is_standby(n)
+                && answering.is_none_or(|a| a.contains(n))
         };
         let apart = |n: &str| match (zone, dir.node(n).map_or("", |n| n.zone.as_str())) {
             ("", _) | (_, "") => 1,
@@ -3786,16 +3722,14 @@ impl Router {
     /// `primary`. Recorded once it follows, not before.
     ///
     /// Where it fails once its `PUT` was answered, the file is noted as left
-    /// on `on` ([`directory::Leftover`]), where the `PUT` said it stood --
-    /// made (201), of the lineage and at the change its answer names; found
-    /// (409), of none known, so that only a copy following a node or a file
-    /// holding no write is taken back. The follow may have landed after the
-    /// router gave it up -- a node's rename of `.follows` took 13.3 s under
-    /// load, past the deploy kit's 10 s -- and the copy follows `primary`
-    /// unrecorded. The repair that tries again adopts it, the node holding
-    /// a copy coming first among those of the zone it would pick
-    /// ([`Self::replica_node`]); one that places the replica elsewhere, a
-    /// node of a better zone come free meanwhile, takes it back.
+    /// on `on` ([`Self::left_on`]) -- made there (201), or found there (409)
+    /// -- and reported, never taken off: the follow may have landed after
+    /// the router gave it up -- a node's rename of `.follows` took 13.3 s
+    /// under load, past the deploy kit's 10 s -- and the copy follows
+    /// `primary` unrecorded. The repair that tries again adopts it, the
+    /// node holding a copy coming first among those of the zone it would
+    /// pick ([`Self::replica_node`]), and its look forgets the note once the
+    /// copy is recorded.
     fn attach(&self, tenant: &str, primary: &str, on: &str) -> std::result::Result<(), String> {
         let (p, r) = {
             let dir = self.read_dir();
@@ -3804,16 +3738,15 @@ impl Router {
         };
         let base = format!("/_admin/tenants/{tenant}");
         let from = format!("{{\"from\":{}}}", quote(&format!("http://{}", p.addr)));
-        // Where the `PUT` said the file stood, once it was answered.
-        let mut put: Option<(Option<String>, u64)> = None;
-        let left = |put: &Option<(Option<String>, u64)>, why: String| {
-            if let Some((lineage, seq)) = put {
-                if let Err(e) = self
-                    .write_dir()
-                    .note_leftover(tenant, on, lineage.as_deref(), *seq)
-                {
-                    fenec_http::log!("tenant `{tenant}`'s file on `{on}` went unnoted: {e}");
-                }
+        // What the `PUT` did, once it was answered: a file is there.
+        let mut put: Option<&str> = None;
+        let left = |put: Option<&str>, why: String| {
+            if let Some(how) = put {
+                self.left_on(
+                    tenant,
+                    on,
+                    &format!("{how} by an attach of its replica that failed: {why}"),
+                );
             }
             why
         };
@@ -3832,35 +3765,27 @@ impl Router {
                 .pool
                 .call_with(&r.addr, method, &target, &r.token, &named, body)
             {
-                Ok((201, answer)) if method == "PUT" => {
-                    put = Some((lineage_in(&answer), seq_in(&answer).unwrap_or(0)))
-                }
-                Ok((409, _)) if method == "PUT" => put = Some((None, 0)),
+                Ok((201, _)) if method == "PUT" => put = Some("made"),
+                Ok((409, _)) if method == "PUT" => put = Some("found there"),
                 Ok((status, _)) if ok.contains(&status) => {}
                 Ok((status, body)) => {
                     return Err(left(
-                        &put,
+                        put,
                         format!(
                             "`{on}` answered {status}: {}",
                             String::from_utf8_lossy(&body).trim()
                         ),
                     ))
                 }
-                Err(e) => return Err(left(&put, format!("`{on}` did not answer: {e}"))),
+                Err(e) => return Err(left(put, format!("`{on}` did not answer: {e}"))),
             }
         }
         // Its quota, so a failover onto it finds the tenant held as it was.
         if let Some(w) = self.send_quota(tenant, on) {
-            return Err(left(&put, w));
+            return Err(left(put, w));
         }
         let mut dir = self.write_dir();
         dir.set_replica(tenant, Some(on)).map_err(|e| message(&e))?;
-        // A file an earlier try left there is this replica's now: adopted.
-        if matches!(dir.leftover(tenant, on), Ok(Some(_))) {
-            if let Err(e) = dir.forget_leftover(tenant, on) {
-                fenec_http::log!("tenant `{tenant}`'s replica on `{on}` stays noted as left: {e}");
-            }
-        }
         // Placed in its primary's zone only where the region had no node
         // free in another (`replica_node`): said here, and counted by
         // `fenec_router_same_zone_copies` for as long as it stays.
@@ -3878,8 +3803,7 @@ impl Router {
     /// Takes a tenant's replica off its node and out of the directory. A
     /// node that does not answer keeps its copy, which follows nothing the
     /// router routes to; the record goes either way, and the copy is noted
-    /// as left there ([`Self::left_on`]), a copy of no lineage known: taken
-    /// back while it follows a node.
+    /// as left there ([`Self::left_on`]).
     fn detach(&self, tenant: &str) -> Option<String> {
         let (on, node) = {
             let dir = self.read_dir();
@@ -3904,50 +3828,66 @@ impl Router {
         match unrecorded {
             Err(e) => Some(message(&e)),
             Ok(()) => {
-                if why.is_some() {
-                    self.left_on(tenant, &on, None, 0);
+                if let Some(w) = &why {
+                    self.left_on(
+                        tenant,
+                        &on,
+                        &format!("a replica taken off its record that stayed on its node: {w}"),
+                    );
                 }
                 why
             }
         }
     }
 
-    /// Notes `tenant`'s file on `node`, which the router meant to take off
-    /// and could not, as left there ([`directory::Leftover`]) -- of
-    /// `lineage` at `seq` where it knows where the file stood, of no
-    /// lineage at 0 where it does not -- and has a repair try again in a
-    /// while ([`Self::try_again`]): ignored, a create taken back left an
+    /// Notes `tenant`'s file on `node` as one the router may have left
+    /// there -- made and not recorded, or meant to be taken off and not --
+    /// and why ([`directory::Leftover`]): every repair names it under
+    /// `left`, and `fenec_router_files_left` counts it, for an operator to
+    /// look at and remove by hand. Unnoted, a create taken back left an
     /// orphan that every create of the name on that node met as 409, and a
-    /// deleted tenant's copy stayed for good.
-    fn left_on(&self, tenant: &str, node: &str, lineage: Option<&str>, seq: u64) {
-        if let Err(e) = self.write_dir().note_leftover(tenant, node, lineage, seq) {
+    /// deleted tenant's copy stayed for good, both unsaid.
+    ///
+    /// Never taken off by the router: neither it nor the node can tell the
+    /// file it left from a later one at the same place. A move undone,
+    /// its `DELETE` refused, noted the target's copy; the tenant moved back
+    /// onto that node later and its copy elsewhere was deleted, and a
+    /// standby router promoted behind its primary took the tenant's one
+    /// file back. On nodes without `--replication-token` every lineage is
+    /// none, and a tenant deleted and made again there, one row written,
+    /// went as a file of no write. Taking files back is a per-file instance
+    /// id's to make safe, the node's to mint at each create and import,
+    /// follow and promotion.
+    fn left_on(&self, tenant: &str, node: &str, why: &str) {
+        if let Err(e) = self.write_dir().note_leftover(tenant, node, why) {
             fenec_http::log!("tenant `{tenant}`'s file left on `{node}` went unnoted: {e}");
         }
-        self.try_again(Again::Leftovers);
     }
 
     /// Takes `tenant`'s file back off `node` as its create, or a move onto
     /// the node, is undone -- at once, in the operation that made it, as a
-    /// tenant is there with its schema or not at all -- or notes it as left
-    /// there, standing at `lineage` and `seq` as made ([`Self::left_on`]).
-    fn take_back(&self, tenant: &str, node: &str, lineage: Option<&str>, seq: u64) {
+    /// tenant is there with its schema or not at all -- or, where the node
+    /// does not take the `DELETE`, notes it as left there, `what` the
+    /// router was undoing ([`Self::left_on`]).
+    fn take_back(&self, tenant: &str, node: &str, what: &str) {
         let Ok(n) = self.node(node) else {
             return;
         };
         let target = format!("/_admin/tenants/{tenant}");
-        let why = match self.pool.call(&n.addr, "DELETE", &target, &n.token, b"") {
-            Ok((204 | 404, _)) => return,
-            Ok((status, body)) => format!(
-                "`{node}` answered {status}: {}",
-                String::from_utf8_lossy(&body).trim()
-            ),
-            Err(e) => format!("`{node}` did not answer: {e}"),
-        };
+        let gone = self.pool.call(&n.addr, "DELETE", &target, &n.token, b"");
+        if matches!(gone, Ok((204 | 404, _))) {
+            return;
+        }
+        let why = said(node, &gone);
         fenec_http::log!(
             "tenant `{tenant}`'s file stayed on `{node}` as the router took it back ({why}): \
-             a repair takes it back"
+             noted as left there, for an operator"
         );
-        self.left_on(tenant, node, lineage, seq);
+        self.left_on(
+            tenant,
+            node,
+            &format!("{what}, its file not taken back: {why}"),
+        );
     }
 
     /// A replica for a tenant created or moved onto `primary`, where the
@@ -3969,7 +3909,7 @@ impl Router {
             Ok(on) => Ok(on),
             Err(Unplaced::Nowhere(w)) => Err(w),
             Err(Unplaced::Failed(w)) => {
-                self.try_again(Again::Replicas);
+                self.try_again();
                 Err(format!("{w}; a repair tries again"))
             }
         })
@@ -4005,28 +3945,20 @@ impl Router {
     }
 
     /// `POST /_shard/replicas`: every tenant in no pair, not moving, without
-    /// a replica, is given one, and the files this router left on nodes
-    /// are taken back ([`Self::repair_with`]).
-    fn repair(&self) -> Response {
-        self.repair_with(true)
-    }
-
-    /// A repair: where `place`, every tenant in no pair, not moving, without
     /// a replica, is given one -- on a node that holds a copy already where
     /// there is one, so a node back from a failover has its old primaries
-    /// follow the new ones rather than lie there. Then the files this
-    /// router left on nodes are taken back where nothing places their
-    /// tenant ([`Self::take_back_leftovers`]).
+    /// follow the new ones rather than lie there. And the files this router
+    /// may have left on nodes are reported (`left`), each forgotten that the
+    /// look finds gone or the directory gives its tenant now
+    /// ([`Self::look_at_leftovers`]).
     ///
-    /// It runs again in a while ([`Self::repaired`]) for what it left
-    /// undone that another try may do, each reason counted apart: a tenant
-    /// whose primary did not answer, one another operation held, one whose
-    /// attach failed; a file that did not come off. A tenant with no node
-    /// free to keep its replica is not among them, nor a file its node
-    /// keeps (holding writes the router did not leave, or a node from
-    /// before take-backs): nothing a while changes. Only a tenant without
-    /// its replica answers 502; the files are `kept` with why.
-    fn repair_with(&self, place: bool) -> Response {
+    /// It runs again in a while ([`Self::repaired`]) where it left a replica
+    /// undone that another try may give: a tenant whose primary did not
+    /// answer, one another operation held, one whose attach failed. A
+    /// tenant with no node free to keep its replica is not among them:
+    /// nothing a while changes. Only a tenant without its replica answers
+    /// 502; a file left is reported, and fails no repair.
+    fn repair(&self) -> Response {
         // The leading router's to make: a following one's directory takes
         // no write, and the copies it would attach would go unrecorded.
         if self.read_dir().following() {
@@ -4035,6 +3967,9 @@ impl Router {
                 "this router follows another: its primary repairs the directory",
             );
         }
+        // Read before the look, so that a file noted after it is judged by
+        // the next look, not by one that may have missed it.
+        let leftovers = self.read_dir().leftovers();
         let holding: Vec<(String, Vec<String>)> = {
             let nodes: Vec<(String, Node)> = self
                 .read_dir()
@@ -4053,20 +3988,17 @@ impl Router {
                 })
                 .collect()
         };
-        let wanting: Vec<(String, String)> = match place {
-            false => Vec::new(),
-            true => {
-                let dir = self.read_dir();
-                dir.tenants()
-                    .into_iter()
-                    .filter(|(t, p)| {
-                        p.state == State::Active
-                            && dir.replica(t).is_none()
-                            && dir.standby(&p.node).is_none()
-                    })
-                    .map(|(t, p)| (t, p.node))
-                    .collect()
-            }
+        let wanting: Vec<(String, String)> = {
+            let dir = self.read_dir();
+            dir.tenants()
+                .into_iter()
+                .filter(|(t, p)| {
+                    p.state == State::Active
+                        && dir.replica(t).is_none()
+                        && dir.standby(&p.node).is_none()
+                })
+                .map(|(t, p)| (t, p.node))
+                .collect()
         };
         let answering: Vec<String> = holding.iter().map(|(node, _)| node.clone()).collect();
         let (mut done, mut failed) = (Vec::new(), Vec::new());
@@ -4128,15 +4060,20 @@ impl Router {
                 }
             }
         }
-        let (taken, kept, stays) = self.take_back_leftovers(&holding);
-        self.repaired(place.then_some(again), stays);
+        self.repaired(again);
+        let left = match leftovers {
+            Ok(leftovers) => self.look_at_leftovers(leftovers, &holding),
+            Err(e) => {
+                fenec_http::log!("repair: the files left on nodes could not be read: {e}");
+                Vec::new()
+            }
+        };
         Response::json(
             if failed.is_empty() { 200 } else { 502 },
             format!(
-                "{{\"replicated\":[{}],\"taken_back\":[{}],\"kept\":[{}],\"failed\":[{}]}}",
+                "{{\"replicated\":[{}],\"left\":[{}],\"failed\":[{}]}}",
                 done.join(","),
-                taken.join(","),
-                kept.join(","),
+                left.join(","),
                 failed.join(",")
             ),
         )
@@ -4147,9 +4084,7 @@ impl Router {
     /// failover took it off (`failed_from`) -- did not answer the repair's
     /// look: answering, it would have kept the replica, its old primary's
     /// file made to follow, and silent, the file was left unnoted, an
-    /// orphan. A file of writes the router did not leave, it is never taken
-    /// back: its node keeps it, and every repair names it `kept`, for an
-    /// operator to remove once nothing in it is wanted.
+    /// orphan holding the writes it took before the failover.
     fn note_old_primary(&self, tenant: &str, on: &str, answering: &[String]) {
         let dir = self.read_dir();
         let Some(old) = dir.failed_from(tenant) else {
@@ -4159,71 +4094,68 @@ impl Router {
             return;
         }
         drop(dir);
-        self.left_on(tenant, &old, None, 0);
+        self.left_on(
+            tenant,
+            &old,
+            &format!(
+                "the tenant's old primary, failed over off this node, which did not answer as \
+                 its replica went to `{on}`"
+            ),
+        );
     }
 
-    /// Takes back each file this router noted as left on a node
-    /// ([`directory::Leftover`]) where nothing places its tenant there, by
-    /// `holding`, what each node answered the repair's look with: what was
-    /// taken back (`{tenant, node}`), what stays (`{tenant, why}`), and
-    /// whether one stays that a repair after may take back -- its node did
-    /// not answer, another operation held its tenant -- where one its node
-    /// keeps, or one left for its tenant's next try at a replica to adopt,
-    /// waits on nothing a while changes ([`Self::settle_leftover`]).
-    fn take_back_leftovers(
+    /// Forgets each file of `leftovers` -- read before the look `holding`
+    /// is what each node answered -- that the directory gives its tenant now
+    /// ([`Self::records_file`]), that the look found gone, or whose node is
+    /// no more; and answers every file still noted as `{tenant, node,
+    /// why}`, for an operator: nothing here takes one off
+    /// ([`Self::left_on`]). A file noted again since it was read is not
+    /// forgotten by this look, which may have missed it
+    /// ([`directory::Directory::forget_leftover`]).
+    fn look_at_leftovers(
         &self,
+        leftovers: Vec<directory::Leftover>,
         holding: &[(String, Vec<String>)],
-    ) -> (Vec<String>, Vec<String>, bool) {
-        let leftovers = match self.read_dir().leftovers() {
-            Ok(l) => l,
-            Err(e) => {
-                fenec_http::log!("repair: the files left on nodes could not be read: {e}");
-                return (Vec::new(), Vec::new(), true);
-            }
-        };
-        let (mut taken, mut kept, mut stays) = (Vec::new(), Vec::new(), false);
+    ) -> Vec<String> {
         for left in leftovers {
-            let Ok(_claim) = self.claim(&left.tenant) else {
-                stays = true;
-                continue;
-            };
-            let names = holding
+            let (tenant, node) = (left.tenant.as_str(), left.node.as_str());
+            let gone = {
+                let dir = self.read_dir();
+                dir.node(node).is_none() || Self::records_file(&dir, tenant, node)
+            } || holding
                 .iter()
-                .find(|(node, _)| *node == left.node)
-                .map(|(_, names)| names.as_slice());
-            match self.settle_leftover(&left, names) {
-                Settled::TakenOff => taken.push(format!(
-                    "{{\"tenant\":{},\"node\":{}}}",
-                    quote(&left.tenant),
-                    quote(&left.node)
-                )),
-                Settled::Done | Settled::Waiting => {}
-                Settled::Kept(why_not) => kept.push(why(&left.tenant, &why_not)),
-                Settled::Stays(why_not) => {
-                    stays = true;
-                    kept.push(why(&left.tenant, &why_not));
+                .any(|(n, names)| n == node && !names.iter().any(|t| t == tenant));
+            if gone {
+                if let Err(e) = self
+                    .write_dir()
+                    .forget_leftover(tenant, node, Some(left.noted))
+                {
+                    fenec_http::log!("tenant `{tenant}`'s file on `{node}` stays noted: {e}");
                 }
             }
         }
-        (taken, kept, stays)
-    }
-
-    /// Takes back `tenant`'s file on `node` where this router noted it as
-    /// left there, its tenant's claim held -- a create meeting the file as
-    /// 409: whether the create may make it again there.
-    fn clear_leftover(&self, tenant: &str, node: &str) -> Outcome<bool> {
-        let left = self.read_dir().leftover(tenant, node).map_err(internal)?;
-        let Some(left) = left else {
-            return Ok(false);
-        };
-        // The node said the file is there.
-        match self.settle_leftover(&left, Some(&[tenant.to_string()])) {
-            Settled::TakenOff | Settled::Done => Ok(true),
-            Settled::Waiting => Ok(false),
-            Settled::Kept(why_not) | Settled::Stays(why_not) => {
-                Err(Fail(409, format!("tenant `{tenant}`: {why_not}")))
+        let still = match self.read_dir().leftovers() {
+            Ok(l) => l,
+            Err(e) => {
+                fenec_http::log!("repair: the files left on nodes could not be read: {e}");
+                return Vec::new();
             }
-        }
+        };
+        still
+            .into_iter()
+            .map(|l| {
+                let mut why = l.why;
+                if !holding.iter().any(|(n, _)| *n == l.node) {
+                    why.push_str(&format!("; `{}` did not answer this repair's look", l.node));
+                }
+                format!(
+                    "{{\"tenant\":{},\"node\":{},\"why\":{}}}",
+                    quote(&l.tenant),
+                    quote(&l.node),
+                    quote(&why)
+                )
+            })
+            .collect()
     }
 
     /// Whether `tenant`'s file on `node` is a copy the directory gives it
@@ -4234,130 +4166,6 @@ impl Router {
             .is_some_and(|p| p.node == node || dir.standby(&p.node) == Some(node))
             || dir.replica(tenant) == Some(node)
             || dir.readers(tenant).iter().any(|r| r.node == node)
-    }
-
-    /// What becomes of a file this router left on a node, its tenant's claim
-    /// held, `names` the tenants the node answered a look with, `None` where
-    /// it did not answer one. Forgotten where the directory gives the
-    /// tenant that copy now ([`Self::records_file`]), or where the node
-    /// holds no such file; left as it is while its tenant has no copy and
-    /// the router gives tenants replicas (`--replicas`), the file of
-    /// another lineage than the tenant's -- the next try adopts it; taken
-    /// back otherwise -- the tenant made elsewhere, deleted, or given its
-    /// copy on another node -- by the node, which deletes it only where it
-    /// follows a node or stands where the router left it, of the lineage
-    /// and at the change noted (`POST /_admin/tenants/<t>/take-back`,
-    /// `fenec_http::tenants::Tenants::take_back`).
-    ///
-    /// Judged by the node because only it can: deleted as the router
-    /// judged it -- a `DELETE` after a lineage asked, or none known -- a
-    /// standby promoted behind its primary took back a tenant a create had
-    /// since made on the node and written, and any file put under the name
-    /// by hand. A node from before take-backs answers the path 404 and
-    /// deletes nothing: the file is kept, never sent a `DELETE` instead.
-    ///
-    /// The tenant's claim is held across the one call, through the read
-    /// replicas' pool, bounded by [`Config::reader_timeout`] rather than
-    /// `--upstream-timeout`: a failover on a lease that finds the tenant
-    /// held waits for it ([`Self::fail_over_held`]), and a minute a call
-    /// was the failover's minute. Let go of across the call, a repair
-    /// attaching the tenant's replica there between the check and the call
-    /// would have the copy it made to follow taken back, as a copy
-    /// following a node.
-    fn settle_leftover(&self, left: &directory::Leftover, names: Option<&[String]>) -> Settled {
-        let (tenant, node) = (left.tenant.as_str(), left.node.as_str());
-        let forget = |done: Settled| -> Settled {
-            match self.write_dir().forget_leftover(tenant, node) {
-                Ok(()) => done,
-                Err(e) => Settled::Stays(format!(
-                    "the file left on `{node}` stays noted: {}",
-                    message(&e)
-                )),
-            }
-        };
-        let (n, region) = {
-            let dir = self.read_dir();
-            let Some(n) = dir.node(node).cloned() else {
-                drop(dir);
-                return forget(Settled::Done);
-            };
-            if Self::records_file(&dir, tenant, node) {
-                drop(dir);
-                return forget(Settled::Done);
-            }
-            // A move's copies hold the tenant's own lineage, and a move's
-            // source stays frozen: adopted, its follow was refused at every
-            // try. Taken back, the try after makes a copy of its own.
-            let adoptable = self.cfg.replicas
-                && dir.placement(tenant).is_some_and(|p| {
-                    dir.copy_of(tenant).is_none()
-                        && may_keep_replica(&dir, &p.node, node)
-                        && left
-                            .lineage
-                            .as_deref()
-                            .is_none_or(|l| dir.lineage(tenant).as_deref() != Some(l))
-                });
-            if adoptable {
-                return Settled::Waiting;
-            }
-            (n, dir.region_of(node).to_string())
-        };
-        let Some(names) = names else {
-            return Settled::Stays(format!(
-                "a file this router left on `{node}` stays: the node does not answer"
-            ));
-        };
-        if !names.iter().any(|t| t == tenant) {
-            return forget(Settled::Done);
-        }
-        // A read replica placed there is recorded only once it follows, by
-        // a change holding this, not the tenant's claim: held off while the
-        // take-back is out, so the copy it makes is never taken back.
-        let Some(_hold) = self.hold_reader(tenant, &region) else {
-            return Settled::Stays(format!(
-                "a file this router left on `{node}` stays: a change of the tenant's read \
-                 replica in {} is under way",
-                region_name(&region)
-            ));
-        };
-        // And asked again at the last moment, the hold taken: a pair's
-        // standby is recorded before its copy is made, with no claim.
-        if Self::records_file(&self.read_dir(), tenant, node) {
-            return forget(Settled::Done);
-        }
-        let mut body = String::from("{\"lineage\":");
-        match &left.lineage {
-            Some(l) => body.push_str(&quote(l)),
-            None => body.push_str("null"),
-        }
-        body.push_str(&format!(",\"seq\":{}}}", left.seq));
-        let target = format!("/_admin/tenants/{tenant}/take-back");
-        let answer = self
-            .reader_pool
-            .call(&n.addr, "POST", &target, &n.token, body.as_bytes());
-        match answer {
-            Ok((200, b)) if outcome_in(&b).as_deref() == Some("deleted") => {
-                forget(Settled::TakenOff)
-            }
-            Ok((200, b)) if outcome_in(&b).as_deref() == Some("absent") => forget(Settled::Done),
-            Ok((409, b)) if outcome_in(&b).as_deref() == Some("kept") => Settled::Kept(format!(
-                "`{node}` keeps the file this router left there: {}",
-                error_in(&b)
-            )),
-            // A node from before take-backs: deletes nothing, and is sent
-            // no `DELETE` instead.
-            Ok((404, b)) if outcome_in(&b).is_none() => Settled::Kept(format!(
-                "`{node}` takes no file back (a fenec-server from before take-backs): the file \
-                 this router left there stays"
-            )),
-            Ok((status, b)) => Settled::Stays(format!(
-                "the file this router left on `{node}` stays: it answered {status}: {}",
-                String::from_utf8_lossy(&b).trim()
-            )),
-            Err(e) => Settled::Stays(format!(
-                "the file this router left on `{node}` stays: it did not answer: {e}"
-            )),
-        }
     }
 
     /// [`Self::failover`] an operator asked for, and then each node its
@@ -4916,31 +4724,21 @@ impl Router {
             ));
         }
         let target = format!("/_admin/tenants/{tenant}");
-        let mut made = self.pool.call(&n.addr, "PUT", &target, &n.token, b"");
-        // 409: a file of the name on the node, which the directory does not
-        // know. One this router left there -- a create taken back whose
-        // `DELETE` the node did not take -- is taken back and the tenant
-        // made again, where the node finds it standing as the router left
-        // it ([`Self::settle_leftover`]); any other, or one holding writes
-        // since, is not this router's to touch, and the 409 stands.
-        if matches!(made, Ok((409, _))) && self.clear_leftover(tenant, &name)? {
-            made = self.pool.call(&n.addr, "PUT", &target, &n.token, b"");
-        }
+        let made = self.pool.call(&n.addr, "PUT", &target, &n.token, b"");
         // No answer: the node may have made the file all the same, an
-        // orphan no placement names. Noted as left there, of no lineage
-        // known -- taken back only while it holds no write -- so a create of
-        // the name taken there again does not meet it as 409 for good.
-        if made.is_err() {
-            self.left_on(tenant, &name, None, 0);
+        // orphan no placement names, which a create of the name placed there
+        // again meets as 409. Noted as left there, for an operator.
+        if let Err(e) = &made {
+            self.left_on(
+                tenant,
+                &name,
+                &format!("a create whose PUT went unanswered: {e}"),
+            );
         }
         let made = expect(made, 201, &name)?;
         // Its lineage beside its placement: its read replicas are bound to
-        // it, and a tenant made again under the name has another. And the
-        // change it stands at, which a take-back of it asks it to stand at
-        // still: none from a node from before take-backs, 0 -- a file
-        // holding no write.
+        // it, and a tenant made again under the name has another.
         let lineage = lineage_in(&made);
-        let seq = seq_in(&made).unwrap_or(0);
         // Bound first: an `if let`'s guard lives through its block, the DELETE's round trip too.
         let placed = {
             let mut dir = self.write_dir();
@@ -4950,7 +4748,11 @@ impl Router {
         if let Err(e) = placed {
             // Not recorded means not reachable: take the file back off the
             // node rather than leave an orphan there.
-            self.take_back(tenant, &name, lineage.as_deref(), seq);
+            self.take_back(
+                tenant,
+                &name,
+                "a create taken back, its placement not recorded",
+            );
             return Err(internal(e));
         }
         self.lease_now(&name);
@@ -4978,7 +4780,7 @@ impl Router {
                 )
             });
             if let Err(e) = sent {
-                self.take_back(tenant, &name, lineage.as_deref(), seq);
+                self.take_back(tenant, &name, "a create taken back, its quota not taken");
                 if let Err(e) = self.write_dir().remove_tenant(tenant) {
                     fenec_http::log!("tenant `{tenant}` stayed in the directory: {e}");
                 }
@@ -5002,7 +4804,11 @@ impl Router {
                 match got {
                     Ok((200, body)) => Some(String::from_utf8_lossy(&body).into_owned()),
                     other => {
-                        self.take_back(tenant, &name, lineage.as_deref(), seq);
+                        self.take_back(
+                            tenant,
+                            &name,
+                            "a create taken back, its schema not applied",
+                        );
                         if let Err(e) = self.write_dir().remove_tenant(tenant) {
                             fenec_http::log!("tenant `{tenant}` stayed in the directory: {e}");
                         }
@@ -5089,8 +4895,8 @@ impl Router {
         }
         let standby = self.read_dir().standby(&placement.node).map(str::to_string);
         self.write_dir().remove_tenant(tenant).map_err(internal)?;
-        // What stays of its copies is noted as left on their nodes, which a
-        // repair takes off: a create of the name placed there met it as 409.
+        // What stays of its copies is noted as left on their nodes, for an
+        // operator: a create of the name placed there meets it as 409.
         if let Some(w) = self.on_standby(
             &placement.node,
             "DELETE",
@@ -5098,7 +4904,11 @@ impl Router {
         ) {
             fenec_http::log!("tenant `{tenant}`'s replica was not removed: {w}");
             if let Some(s) = &standby {
-                self.left_on(tenant, s, None, 0);
+                self.left_on(
+                    tenant,
+                    s,
+                    &format!("a deleted tenant's standby copy that stayed: {w}"),
+                );
             }
         }
         // Its own replica: the record went with the tenant, the file here.
@@ -5106,12 +4916,17 @@ impl Router {
             replica.and_then(|r| self.read_dir().node(&r).cloned().map(|n| (r, n)))
         {
             let target = format!("/_admin/tenants/{tenant}");
-            if !matches!(
-                self.pool.call(&r.addr, "DELETE", &target, &r.token, b""),
-                Ok((204 | 404, _))
-            ) {
+            let gone = self.pool.call(&r.addr, "DELETE", &target, &r.token, b"");
+            if !matches!(gone, Ok((204 | 404, _))) {
                 fenec_http::log!("tenant `{tenant}`'s replica on {} stayed", r.addr);
-                self.left_on(tenant, &on, None, 0);
+                self.left_on(
+                    tenant,
+                    &on,
+                    &format!(
+                        "a deleted tenant's replica that stayed: {}",
+                        said(&on, &gone)
+                    ),
+                );
             }
         }
         Ok(Response::empty(204))
@@ -5249,21 +5064,18 @@ impl Router {
             let _ = self.pool.call(&dst.addr, "DELETE", &base, &dst.token, b"");
             installed = put(&image);
         }
-        let installed = expect(installed, 201, to).map_err(thaw)?;
-        // Where the image stands, as the target says -- the source's, frozen
-        // since its export: what a copy taken back later must stand at.
-        let (moved, at) = (lineage_in(&installed), seq_in(&installed).unwrap_or(0));
+        expect(installed, 201, to).map_err(thaw)?;
         // Its quota goes with it, before the directory points there: the
         // first write the target takes is held to it.
         if let Some(w) = self.send_quota(tenant, to) {
-            self.take_back(tenant, to, moved.as_deref(), at);
+            self.take_back(tenant, to, "a move undone, its quota not taken");
             return Err(thaw(Fail(502, w)));
         }
 
         // Bound first: an `if let`'s guard lives through its block, where `thaw` locks it again.
         let placed = self.write_dir().place(tenant, to, State::Active);
         if let Err(e) = placed {
-            self.take_back(tenant, to, moved.as_deref(), at);
+            self.take_back(tenant, to, "a move undone, its placement not recorded");
             return Err(thaw(internal(e)));
         }
         self.lease_now(to);
@@ -5332,10 +5144,16 @@ impl Router {
         if left {
             fenec_http::log!(
                 "tenant `{tenant}` moved to `{to}`, but its copy on `{from}` could not be \
-                 removed; it is frozen there and no longer routed to: a repair takes it back"
+                 removed; it is frozen there and no longer routed to: noted as left there"
             );
-            // Standing where the image did: what the node holds it to.
-            self.left_on(tenant, &from, moved.as_deref(), at);
+            self.left_on(
+                tenant,
+                &from,
+                &format!(
+                    "a move's source, frozen, that would not go once the move was done: {}",
+                    said(&from, &cleanup)
+                ),
+            );
         }
         Ok(Response::json(
             200,
@@ -5431,38 +5249,17 @@ pub(crate) fn lineage_in(body: &[u8]) -> Option<String> {
     })
 }
 
-/// The change a node says a tenant it made or installed stands at
-/// (`"seq"`): none from a node from before take-backs.
-pub(crate) fn seq_in(body: &[u8]) -> Option<u64> {
-    let fields = fenec_core::json::parse_object(&String::from_utf8_lossy(body)).ok()?;
-    fields.into_iter().find_map(|(k, v)| match (k.as_str(), v) {
-        ("seq", Value::Int(n)) => u64::try_from(n).ok(),
-        _ => None,
-    })
-}
-
-/// What a node did with a file taken back (`"outcome"`): none from a node
-/// from before take-backs, which knows no such path.
-fn outcome_in(body: &[u8]) -> Option<String> {
-    let fields = fenec_core::json::parse_object(&String::from_utf8_lossy(body)).ok()?;
-    fields.into_iter().find_map(|(k, v)| match (k.as_str(), v) {
-        ("outcome", Value::Text(o)) => Some(o),
-        _ => None,
-    })
-}
-
-/// A node's `"error"`, or its whole answer where it names none.
-fn error_in(body: &[u8]) -> String {
-    let text = String::from_utf8_lossy(body);
-    fenec_core::json::parse_object(&text)
-        .ok()
-        .and_then(|f| {
-            f.into_iter().find_map(|(k, v)| match (k.as_str(), v) {
-                ("error", Value::Text(e)) => Some(e),
-                _ => None,
-            })
-        })
-        .unwrap_or_else(|| text.trim().to_string())
+/// What `node` said to a call: its status and answer, or that it did not
+/// answer -- why a file stayed where the router meant to take it off.
+#[cold]
+fn said(node: &str, answer: &std::io::Result<(u16, Vec<u8>)>) -> String {
+    match answer {
+        Ok((status, body)) => format!(
+            "`{node}` answered {status}: {}",
+            String::from_utf8_lossy(body).trim()
+        ),
+        Err(e) => format!("`{node}` did not answer: {e}"),
+    }
 }
 
 /// `{tenant, why}`, a failure's entry in a list of them.
@@ -5831,47 +5628,37 @@ fn constant_eq(a: &[u8], b: &[u8]) -> bool {
 mod tests {
     use super::*;
 
-    /// A repair's tries again, each reason its own: a file left on a node
-    /// silent for good, its waits at their minute-long end and its tries
-    /// spent, neither delays a fresh failed attach -- due 2 s after it --
-    /// nor stops a tenant's tries; a fresh failure that came while a repair
-    /// ran stays due when that repair left nothing of its reason; and a
-    /// repair judging no replica leaves their count where it is. Counted
-    /// together, the eighth silent repair stopped every tenant's tries, and
-    /// a fresh failure waited out the minute.
+    /// A repair's tries again: a fresh failed attach is due 2 s after it,
+    /// though the tries before it waited out their minute; one that came
+    /// while a repair ran stays due when that repair left nothing undone;
+    /// and eight in a row undone are given up on. Counted from the last
+    /// wait, a fresh failure waited out the minute.
     #[test]
-    fn a_reason_s_tries_are_its_own() {
+    fn a_fresh_failure_is_tried_again_soon() {
         let t0 = Instant::now();
         let mut r = Retries::default();
-        r.fresh(Again::Leftovers, t0);
-        assert_eq!(r.next(), Some(t0 + REPAIR_AGAIN_FIRST));
-        // Seven repairs find the node silent: its waits grow to a minute.
+        r.fresh(t0);
+        assert_eq!(r.due, Some(t0 + REPAIR_AGAIN_FIRST));
+        // Repairs leave the replica undone: their waits grow to a minute.
         let mut now = t0;
-        for _ in 0..7 {
-            now = r.next().unwrap();
-            assert!(!r.fire());
-            assert_eq!(r.after([Some(false), Some(true)], now), [false, false]);
+        for _ in 0..6 {
+            now = r.due.take().unwrap();
+            assert!(!r.after(true, now));
         }
-        assert_eq!(r.next(), Some(now + REPAIR_AGAIN_MOST));
+        assert_eq!(r.due, Some(now + REPAIR_AGAIN_MOST));
         // An attach fails: its repair is due 2 s on, not at the minute's end.
-        r.fresh(Again::Replicas, now);
-        assert_eq!(r.next(), Some(now + REPAIR_AGAIN_FIRST));
-        assert!(r.fire(), "a repair due for a replica gives replicas");
-        // That repair leaves the replica undone and the file still there:
-        // the file's tries end, the replica's go on at their own pace.
-        let gave_up = r.after([Some(true), Some(true)], now);
-        assert_eq!(gave_up, [false, true]);
-        assert_eq!(r.next(), Some(now + REPAIR_AGAIN_FIRST * 2));
-        // A fresh failure while a repair ran, which left nothing of it.
-        r.fire();
-        r.fresh(Again::Replicas, now);
-        r.after([Some(false), None], now);
-        assert_eq!(r.next(), Some(now + REPAIR_AGAIN_FIRST));
-        // A repair that judged no replica leaves its count as it was.
-        r.fire();
-        r.after([None, Some(false)], now);
-        assert_eq!(r.tries[Again::Replicas as usize], 1);
-        assert_eq!(r.next(), None);
+        r.fresh(now);
+        assert_eq!(r.due, Some(now + REPAIR_AGAIN_FIRST));
+        // A fresh failure while a repair ran, which left nothing undone.
+        r.due = None;
+        r.fresh(now);
+        assert!(!r.after(false, now));
+        assert_eq!(r.due, Some(now + REPAIR_AGAIN_FIRST));
+        // Undone eight times in a row: given up on, the count over.
+        r.due = None;
+        let gave_up = (0..8).map(|_| r.after(true, now)).collect::<Vec<_>>();
+        assert_eq!(gave_up.iter().filter(|g| **g).count(), 1);
+        assert_eq!(r.tries, 0);
     }
 
     /// The waits of a following router's asks of a copy, each ask made the

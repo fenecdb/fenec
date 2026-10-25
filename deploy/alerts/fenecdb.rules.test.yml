@@ -94,6 +94,36 @@ tests:
         alertname: FenecTenantsWithoutReplica
         exp_alerts: []
 
+  # Files left on nodes, counted by the leading router and its standby
+  # alike: the leading one's count alerts once it has held half an hour,
+  # and clears as an operator removes them and a repair's look forgets
+  # them; a count that a repair's try forgot within minutes never alerts.
+  - interval: 1m
+    input_series:
+      - series: 'fenec_router_files_left{instance="r1:8090"}'
+        values: '2x40 0x10'
+      - series: 'fenec_router_following{instance="r1:8090"}'
+        values: '0x50'
+      - series: 'fenec_router_files_left{instance="r2:8090"}'
+        values: '2x40 0x10'
+      - series: 'fenec_router_following{instance="r2:8090"}'
+        values: '1x50'
+      - series: 'fenec_router_files_left{instance="r3:8090"}'
+        values: '0 1 1 0x47'
+      - series: 'fenec_router_following{instance="r3:8090"}'
+        values: '0x50'
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: FenecFilesLeftOnNodes
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "r1:8090"}
+            exp_annotations:
+              summary: "2 files r1:8090 may have left on nodes are placed by nothing"
+              runbook: deploy/RUNBOOK.md#files-left-on-nodes
+      - eval_time: 45m
+        alertname: FenecFilesLeftOnNodes
+        exp_alerts: []
+
   # No archiver connected: a count of 0, which still alerts.
   - interval: 1m
     input_series:

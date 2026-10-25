@@ -117,19 +117,6 @@ pub struct Tenant {
     opened: u64,
 }
 
-/// What [`Tenants::take_back`] did with a file a router took back.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TakenBack {
-    /// It was there, held nothing the router did not leave, and is gone.
-    Deleted,
-    /// There was no such file.
-    Absent,
-    /// It holds writes the router did not leave, and stays: why. Apart from
-    /// a refusal of the moment -- the tenant still in use, a sync log not
-    /// applied yet -- which a router asks again.
-    Kept(String),
-}
-
 /// The opens of tenants' files in this process, numbered.
 static OPENS: AtomicU64 = AtomicU64::new(1);
 
@@ -1662,69 +1649,6 @@ impl Tenants {
             self.touch(name);
         }
         Ok(deleted)
-    }
-
-    /// Deletes `name` as a router takes back a file it left on this node
-    /// (`POST /_admin/tenants/<t>/take-back`), and only where the file holds
-    /// nothing the router did not leave there: it follows a node -- a copy,
-    /// whose writes are its primary's -- or it stands where the router left
-    /// it, of `lineage` (asked of none where none is given) at a change no
-    /// later than `seq`. Judged under the slot's lock the delete takes, as
-    /// [`Self::delete_refused`] judges, so nothing lands between: a `DELETE`
-    /// judged by the router, a lineage asked first, deleted the tenant a
-    /// create had since made there and written, or a file put under the
-    /// name by hand. Refused 409 otherwise, and where a sync log beside a
-    /// closed file holds durable writes the file does not (Linux, after the
-    /// machine went down): read short of them, the file would look as left.
-    pub fn take_back(
-        &self,
-        name: &str,
-        lineage: Option<u32>,
-        seq: u64,
-    ) -> std::result::Result<TakenBack, Refused> {
-        check_name(name)?;
-        let taken = self.with_slot(name, |held| {
-            if !self.on_disk(name) {
-                return Ok(TakenBack::Absent);
-            }
-            let (change, history) = match &*held {
-                Held::Open(t) => {
-                    let db = t.read();
-                    (db.change_seq(), db.history().clone())
-                }
-                Held::Closed => {
-                    let log = fenec_core::fs::beside(&self.path(name), "sync");
-                    if std::fs::metadata(&log).is_ok_and(|m| m.len() > 0) {
-                        return Err(Refused(
-                            409,
-                            format!(
-                                "tenant `{name}` has a sync log beside its file, writes the \
-                                 file does not hold yet: not taken back"
-                            ),
-                        ));
-                    }
-                    let db = fenec_core::fs::open_read_only(self.path(name)).map_err(|e| {
-                        Refused(500, format!("could not read tenant `{name}`: {e}"))
-                    })?;
-                    (db.change_seq(), db.history().clone())
-                }
-            };
-            let of = crate::replication::lineage_of(&history);
-            let left =
-                history.following || (lineage.is_none_or(|l| of == Some(l)) && change <= seq);
-            if !left {
-                return Ok(TakenBack::Kept(format!(
-                    "tenant `{name}` holds writes the router did not leave here (change \
-                     {change}, lineage {}): not taken back",
-                    of.map_or("none".into(), crate::replication::lineage_text)
-                )));
-            }
-            self.delete_held(name, held).map(|_| TakenBack::Deleted)
-        })?;
-        if taken == TakenBack::Deleted {
-            self.touch(name);
-        }
-        Ok(taken)
     }
 
     fn delete_held(&self, name: &str, held: &mut Held) -> std::result::Result<(), Refused> {
