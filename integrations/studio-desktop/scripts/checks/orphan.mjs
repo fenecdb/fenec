@@ -27,6 +27,15 @@ await waitStudio(`file:${B}`);
 
 step(`stop server B (${b.pid}) where it is, then SIGKILL the app (everything of it but its servers)`);
 process.kill(b.pid, 'SIGSTOP');
+// A stopped process ignores SIGTERM until it is continued: whatever ends this check,
+// B is let go, so that a failure here never leaves a server holding its file.
+process.on('exit', () => {
+  try {
+    process.kill(b.pid, 'SIGCONT');
+  } catch {
+    // already gone
+  }
+});
 for (const p of mine().filter((p) => !p.command.includes('fenec-server'))) {
   try {
     process.kill(p.pid, 'SIGKILL');
