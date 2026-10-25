@@ -20,16 +20,20 @@ assert.match(loaded.detail.side, /orders 50/);
 log('studio loaded, signed in, orders 50; server pid', started.pid);
 
 step('an edit through the studio\'s own New row form');
-const ins = await evalIn(KEY, `const until = async (f) => { for (let i = 0; i < 200; i++) { const v = f(); if (v) return v; await new Promise(r => setTimeout(r, 50)); } throw new Error('timed out: ' + document.body.innerText.slice(0, 200)); };
+// What the page runs reaches it as one line: no // comments in it, and every statement ends in a ;.
+// `ask` reads the row back through the server, as the page itself would, with the token it was handed.
+const ASK = `const session = JSON.parse(sessionStorage.getItem('fenec-studio')); const ask = async () => { const r = await fetch('/query', {method: 'POST', headers: {'content-type': 'application/json', authorization: 'Bearer ' + session.token}, body: JSON.stringify({query: 'get orders where customer = $1', params: ['desktop']})}); return r.json(); };`;
+const ins = await evalIn(KEY, `${ASK}
+const until = async (f) => { for (let i = 0; i < 200; i++) { const v = await f(); if (v) return v; await new Promise(r => setTimeout(r, 50)); } throw new Error('timed out: ' + document.body.innerText.slice(0, 200)); };
 const btn = t => [...document.querySelectorAll('button')].find(b => b.textContent.trim() === t);
 btn('New row').click();
 const i = await until(() => document.getElementById('new-customer')); i.value = 'desktop'; i.dispatchEvent(new Event('input', {bubbles: true}));
 const s = document.getElementById('new-owner'); s.value = 'check'; s.dispatchEvent(new Event('input', {bubbles: true}));
 (await until(() => btn('Insert row'))).click();
-await until(() => /orders 51/.test(document.body.innerText.replace(/\\s+/g, ' ')));
-return document.body.innerText.replace(/\\s+/g, ' ')`);
+return await until(async () => { const rows = await ask(); return rows.length ? rows : null; });`, 40000);
 assert.ok(ins.ok, ins.value);
-assert.match(ins.value, /orders 51/, 'the new row is counted');
+assert.equal(ins.value.length, 1, 'the row is in the database');
+assert.equal(ins.value[0].owner, 'check');
 
 step('the same file again, while it is open in this app: its window is shown, no second server');
 cmd({ cmd: 'open', path: SMALL });
@@ -49,6 +53,8 @@ const n = lines().length;
 cmd({ cmd: 'open', path: SMALL });
 await waitFor((l, i) => i >= n && l.what === 'server-started', 15000, 'the second server');
 await waitStudio(KEY, n);
+const kept = await evalIn(KEY, `${ASK} return await ask()`);
+assert.equal(kept.value.length, 1, 'the row written before the close is there after the reopen');
 await until(() => /orders 51/.test(lastState(KEY)?.side ?? ''), 15000, 'orders 51 after the reopen');
 
 step('close, then open at once, while the first server is still writing its checkpoint: it waits, and is not told the file is held');

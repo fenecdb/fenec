@@ -115,6 +115,9 @@ let evals = 0;
  * The result comes back through the event-only bridge.
  */
 export async function evalIn(key, js, ms = 15000) {
+  // A script reaches the page as one line (executeJavascript), where a `//`
+  // comment would swallow what follows it: the eval would never answer.
+  if (/(^|\n)\s*\/\//.test(js)) throw new Error('an eval script holds a // comment: use /* */ or none');
   const id = `e${++evals}`;
   const wrapped = `(async()=>{try{const v=await (async()=>{${js}})();window.__electrobunSendToHost({type:"eval",id:${JSON.stringify(id)},ok:true,value:v})}catch(e){window.__electrobunSendToHost({type:"eval",id:${JSON.stringify(id)},ok:false,value:String(e)})}})()`;
   cmd({ cmd: 'eval', key, js: wrapped });

@@ -50,8 +50,12 @@ export function pagePreload(origin: string): string {
 		`var n=0,last="",t=setInterval(function(){n++;`,
 		`var txt=document.body?document.body.innerText:"";`,
 		`var signin=/Connect to a fenecdb server/.test(txt);`,
-		`var loaded=!signin&&/Rows/.test(txt)&&/Schema/.test(txt)&&/\\d/.test(txt);`,
-		`var side=(txt.match(/\\n[a-z_]+\\n\\d[\\d,]*/g)||[]).join("|").replace(/\\n/g," ");`,
+		// The collections and their counts come from the sidebar's own elements, not
+		// the page's text: a narrow window slides the sidebar out of sight, and the
+		// shell's own words ("Rows", "Schema") are there long before any data is.
+		// "Loaded" is a collection with its count drawn.
+		`var side=[].map.call(document.querySelectorAll("li.coll"),function(li){var n=li.querySelector(".coll-name"),c=li.querySelector(".coll-count");return (n?n.textContent:"")+" "+(c?c.textContent:"");}).join("|");`,
+		`var loaded=!signin&&/\\d/.test(side);`,
 		`var sig=signin+"/"+loaded+"/"+side+"/"+document.title;`,
 		`if(sig!==last||n===1){last=sig;`,
 		`window.__electrobunSendToHost&&window.__electrobunSendToHost({type:"state",n:n,at:Date.now(),signin:signin,loaded:loaded,side:side,title:document.title,text:txt.slice(0,300)});}`,
