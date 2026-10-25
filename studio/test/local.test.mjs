@@ -341,8 +341,11 @@ test('on a phone: the studio takes the width, every view one tap away', { skip: 
   await frame.waitForSelector('.side-open .coll[data-name="orders"]');
   // In, once it has slid all the way: a click as it moves lands nowhere.
   await frame.waitForFunction(() => document.querySelector('.side-host').getBoundingClientRect().left >= 0);
+  // An empty editor, so the pick that lands starts a statement over it (one
+  // holding an example is left alone until a caret is put).
+  await frame.$eval('#query', (e) => (e.value = ''));
   await frame.click('.coll[data-name="orders"] .coll-line');
-  await frame.waitForFunction(() => document.querySelector('.ed #query')?.value.includes('orders'), { timeout: 10_000 });
+  await frame.waitForFunction(() => document.querySelector('.ed #query')?.value === 'get orders limit 100', { timeout: 10_000 });
   assert.deepEqual(page.problems, []);
   await page.close();
 });
