@@ -11,7 +11,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [engine.md](engine.md) -- the single writer, a block's documents built beside the readers, long reads pinned, and a block as one record
 - [durability.md](durability.md) -- a storage error stopping writes, buffered writes written behind the lock, and the sync log
 - [replication.md](replication.md) -- replication, a node's tenants archived over one stream, `/_changes`, `Fenec-After`, sealed archives and `--follow`
-- [tenants.md](tenants.md) -- scaling out by tenant, the router's directory, moves, failovers and leases
+- [tenants.md](tenants.md) -- scaling out by tenant, the router's directory, moves, failovers and leases, and replicas tried again
 - [regions.md](regions.md) -- regions and zones, a region's own directory, and the global entry
 - [read-replicas.md](read-replicas.md) -- a tenant's read replicas in other regions, the reads marked for them, and reading one's own writes across a failover
 - [access.md](access.md) -- scoped tokens, field lists, rules reading another collection, a token bound to its tenant, and empty tokens
@@ -173,3 +173,4 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 137. [`deploy/` is the kit for running regions, held to the binaries by two checks](integrations.md#deploy)
 138. [Profiles differ on purpose](crates.md#profiles)
 139. [A JOIN on a key is a `lookup` answered flat, or one table's `get` with the other's rows a filter](fenecql.md#sql-joins-subqueries-and-schema) (added after the move, under *FenecQL and schemas*)
+140. [A replica whose attach failed is tried again, and a file the router left on a node is taken off](tenants.md#replicas-tried-again) (added after the move, under *Tenants and leases*)

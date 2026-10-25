@@ -75,3 +75,10 @@ path = "tests/cuts.rs"
 [[test]]
 name = "follower_cuts"
 path = "tests/follower_cuts.rs"
+
+# Apart: two or three nodes, a proxy and a router a test, a thread each
+# request the proxy carries -- in `all`, near macOS's threads a process
+# already, other tests' spawns failed beside them.
+[[test]]
+name = "replica_retries"
+path = "tests/replica_retries.rs"

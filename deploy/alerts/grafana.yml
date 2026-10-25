@@ -302,7 +302,7 @@ groups:
             model:
               refId: A
               instant: true
-              expr: (sum by (instance) (fenec_router_tenants) - (sum by (instance) (fenec_router_replicas) or sum by (instance) (fenec_router_tenants) * 0) > 0) and on (instance) fenec_router_following == 0
+              expr: fenec_router_tenants_unreplicated > 0 and on (instance) fenec_router_following == 0
           - refId: B
             datasourceUid: __expr__
             model:
@@ -315,8 +315,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "{{ $values.A.Value }} tenants of {{ $labels.instance }} have no replica"
-          runbook: deploy/RUNBOOK.md#a-node-back
+          summary: "{{ $values.A.Value }} tenants of {{ $labels.region }} on {{ $labels.instance }} have no copy to fail over to"
+          runbook: deploy/RUNBOOK.md#tenants-without-a-replica
       - uid: fenec-same-zone-copies
         title: FenecSameZoneCopies
         condition: B

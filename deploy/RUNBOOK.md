@@ -250,7 +250,10 @@ with none. Past it the client is answered 502, the request perhaps run.
   collection, a `compact` of a large tenant, a large batch or a heavy
   aggregate. A write so cut may have run, which an `Idempotency-Key` makes
   safe to send again; run such statements against the node on the private
-  network, or raise the timeout for them. A move copies a tenant's image
+  network, or raise the timeout for them. A new replica's follow slower
+  than it -- a node's rename of `.follows` took 13 s under load -- leaves
+  its tenant `unreplicated` for a moment: the router tries again by itself
+  and adopts the copy (Tenants without a replica). A move copies a tenant's image
   through the region's router under the same bound, read by read: a
   tenant whose export or install takes longer fails the move, which puts
   it back as it was.
@@ -517,6 +520,49 @@ Check: `GET /_shard/tenants/<t>` names the node as `replica`;
 disk was lost stays down until it has been failed over -- a lease -- and
 then starts empty: the repair places replicas there from images. Started
 sooner, it would hold the leases of tenants it no longer has.
+
+## Tenants without a replica
+
+`FenecTenantsWithoutReplica`: for 15 minutes the region's router has
+counted tenants with no copy a failover could promote -- no replica of
+their own, no standby on their node
+(`fenec_router_tenants_unreplicated{region}`). Such a tenant whose primary
+dies stays on it, writing nothing, until the node is back. Find them with
+`GET /_shard/tenants?region=<r>` on the region's router (the entries with
+no `"replica"`) and the router's log, which says why each has none:
+
+- **A node failed over** (`FenecNodeFailedOver`). Its own tenants were
+  promoted on their replicas, and the replicas it held are gone: none of
+  them has a copy until the node answers again (A node back), when its
+  files follow the new primaries. A node gone for good: `POST
+  /_shard/replicas` gives them copies on the nodes left.
+- **A replica that did not take**: `tenant `t` has no replica yet: `eu-b`
+  answered 503 ...; a repair tries again`, or `did not answer`. The router
+  tries again by itself 2, 4, 8 s ... later, up to a minute apart, eight
+  times, about four minutes; a copy whose follow landed after the router
+  stopped waiting is adopted, not made twice. Past that it logs `repair: 8
+  repairs in a row left a tenant without its replica ...`. Look at the node
+  it names -- its load, its disk (a slow rename of `.follows` outlasts the
+  10 s `FENEC_UPSTREAM_TIMEOUT`), its connections -- then `POST
+  /_shard/replicas`.
+- **No other node in the region**: `there is no other node in region `eu`
+  to keep it`. Add one (Adding a node), then `POST /_shard/replicas`.
+- **Its primary did not answer the repair's look**: as A node lost.
+
+```sh
+curl -X POST http://10.1.0.21:8090/_shard/replicas -H "Authorization: Bearer $ROOT"
+# {"replicated":[{"tenant":"acme","replica":"eu-b"}],"taken_back":[],"failed":[]}
+```
+
+A repair answers what it did, and why it did not, tenant by tenant. It
+also takes off the files the router left on nodes that no placement names
+-- a create taken back (its schema refused) whose `DELETE` the node did
+not take, a move undone whose target kept the copy, a copy a failed try
+made, a deleted tenant's copy that stayed -- in `taken_back`; one it
+cannot take off is in `failed`, and tried again.
+Those files are noted in the directory, so a router restarted or promoted
+still knows them, and a create of the name on that node takes it off first
+rather than answer 409.
 
 ## A lease late
 
@@ -903,7 +949,7 @@ textfile collector).
 | `FenecAutoFailoverIncomplete` | critical | a node failed over still has tenants placed on it: they take no writes | A node lost, step 1 |
 | `FenecAutoFailover` | warning | a node was failed over | A node lost |
 | `FenecLeaseRenewalLate` | warning | a renewal to a node was late in the last five minutes (threshold for a 5 s lease); not a node failed over in the last ten | A lease late |
-| `FenecTenantsWithoutReplica` | warning | tenants with no replica, a node lost away | A node back |
+| `FenecTenantsWithoutReplica` | warning | tenants with no copy to fail over to: a node failed over, a replica that did not take in four minutes, no other node | Tenants without a replica |
 | `FenecSameZoneCopies` | warning | copies in their primary's zone | Adding a node |
 | `FenecReadReplicasGivenUp` | warning | read replicas no longer made again | Read replicas |
 | `FenecTenantsMoving` | warning | a move did not record done | Placing and moving a tenant |

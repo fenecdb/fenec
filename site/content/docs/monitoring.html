@@ -335,6 +335,7 @@ tenant moves. No label names a tenant.</p>
 <tr><td><code>fenec_router_nodes</code>, <code>fenec_router_tenants{node, region}</code></td><td>gauge</td><td>the nodes in the directory, and the tenants placed on each; <code>region</code> where the node names one (<a href="sharding.html#regions">Regions</a>), as on every gauge by node below</td></tr>
 <tr><td><code>fenec_router_replicas{node, region}</code></td><td>gauge</td><td>the replicas of their own each node holds, with <code>--replicas</code>; a node's count falls to 0 after a failover took the node's replicas away, until <code>POST /_shard/replicas</code></td></tr>
 <tr><td><code>fenec_router_same_zone_copies{region}</code></td><td>gauge</td><td>tenants whose replica or standby copy is in their primary's zone, so a datacenter lost takes both: placed there only where the region had no node free in another zone</td></tr>
+<tr><td><code>fenec_router_tenants_unreplicated{region}</code></td><td>gauge</td><td>with <code>--replicas</code>, the tenants with no copy a failover could promote — no replica of their own and no standby on their node — every region a node names, 0 or not: an attach that did not take, tried again for about four minutes (<a href="sharding.html#replicas-of-their-own">Replicas of their own</a>); the replicas a failed-over node held, until it answers again or <code>POST /_shard/replicas</code>; a region with no other node. A standby router counts its primary's directory</td></tr>
 <tr><td><code>fenec_router_tenants_moving</code></td><td>gauge</td><td>tenants a move began on and did not record done — served from where they were, and cleared by moving them again</td></tr>
 <tr><td><code>fenec_router_following</code></td><td>gauge</td><td>1 on a standby router; its directory's <code>fenec_replica_*</code> gauges follow, and a primary's <code>fenec_replicas</code></td></tr>
 <tr><td><code>fenec_router_lease_age_seconds{node, region}</code></td><td>gauge</td><td>with <code>--auto-failover</code>, the seconds since each node last took its lease: renewed every third of a lease, and failed over past the lease and a tenth</td></tr>
@@ -367,6 +368,8 @@ fenec_router_tenants_moving > 0
 increase(fenec_router_auto_failovers_total[5m]) > 0
 fenec_router_node_failed_over > 0
 fenec_router_same_zone_copies > 0
+# tenants with no copy to fail over to, on the router keeping the directory
+fenec_router_tenants_unreplicated > 0 and on (instance) fenec_router_following == 0
 # behind the global entry: a token or a clock to fix, or an entry naming
 # nobody (its ENTRY_TOKEN unset) -- on a router only the entry reaches
 rate(fenec_router_entry_clients_total{outcome=~"bad_mark|stale"}[5m]) > 0

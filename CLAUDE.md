@@ -322,6 +322,16 @@ and `may_write`), every route answering a write asks
 promotes only a copy of the tenant's lineage and history
 (`tenants::Expected`, 409) unless `force`d.
 
+**[A replica whose attach failed is tried again, and a file the router left on a node is taken off.](docs/design/tenants.md#replicas-tried-again)**
+A failed attach -- a create's, a move's, a repair's -- has a repair run
+again (`repair_later`, 2 s doubling to 60, eight times), which asks again
+under the tenant's claim and adopts a copy whose follow landed late, its
+node first within the zone rule; a node silent at the repair's look gets
+no replica. A file the router made or meant to take off that no placement
+records is noted in the directory (`leftovers`), taken off by a repair once
+nothing places its tenant there, or by a create of the name meeting it,
+409. `fenec_router_tenants_unreplicated{region}` counts tenants with no copy.
+
 ### Regions and the global entry
 
 **[A node is in a region and a zone, and a tenant in its node's region.](docs/design/regions.md#regions-and-zones)**

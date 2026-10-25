@@ -24,15 +24,18 @@ tests:
               runbook: deploy/RUNBOOK.md#a-node-lost
 
   # A region of two nodes after one was lost: every tenant on the other,
-  # which holds no replica -- its count absent, not 0 -- and the standby
-  # router's copy of the same directory alerting nothing.
+  # none with a copy, counted by region -- and the standby router's count
+  # of the same directory alerting nothing, nor a region with every tenant
+  # replicated, its count 0.
   - interval: 1m
     input_series:
-      - series: 'fenec_router_tenants{instance="r1:8090",node="eu-b",region="eu"}'
+      - series: 'fenec_router_tenants_unreplicated{instance="r1:8090",region="eu"}'
         values: '6x20'
+      - series: 'fenec_router_tenants_unreplicated{instance="r1:8090",region="us"}'
+        values: '0x20'
       - series: 'fenec_router_following{instance="r1:8090"}'
         values: '0x20'
-      - series: 'fenec_router_tenants{instance="r2:8090",node="eu-b",region="eu"}'
+      - series: 'fenec_router_tenants_unreplicated{instance="r2:8090",region="eu"}'
         values: '6x20'
       - series: 'fenec_router_following{instance="r2:8090"}'
         values: '1x20'
@@ -40,26 +43,25 @@ tests:
       - eval_time: 16m
         alertname: FenecTenantsWithoutReplica
         exp_alerts:
-          - exp_labels: {severity: warning, instance: "r1:8090"}
+          - exp_labels: {severity: warning, instance: "r1:8090", region: eu}
             exp_annotations:
-              summary: "6 tenants of r1:8090 have no replica"
-              runbook: deploy/RUNBOOK.md#a-node-back
+              summary: "6 tenants of eu on r1:8090 have no copy to fail over to"
+              runbook: deploy/RUNBOOK.md#tenants-without-a-replica
 
-  # Every tenant replicated: nothing.
+  # A replica that did not take, given one by the router's own try after
+  # two minutes: never 15 minutes without, so nothing. Nor a count that
+  # comes and goes, each stretch shorter than the rule's `for`.
   - interval: 1m
     input_series:
-      - series: 'fenec_router_tenants{instance="r1:8090",node="eu-a",region="eu"}'
-        values: '3x20'
-      - series: 'fenec_router_tenants{instance="r1:8090",node="eu-b",region="eu"}'
-        values: '3x20'
-      - series: 'fenec_router_replicas{instance="r1:8090",node="eu-a",region="eu"}'
-        values: '3x20'
-      - series: 'fenec_router_replicas{instance="r1:8090",node="eu-b",region="eu"}'
-        values: '3x20'
+      - series: 'fenec_router_tenants_unreplicated{instance="r1:8090",region="eu"}'
+        values: '0 1 1 0x10 1x10 0x5'
       - series: 'fenec_router_following{instance="r1:8090"}'
-        values: '0x20'
+        values: '0x30'
     alert_rule_test:
       - eval_time: 16m
+        alertname: FenecTenantsWithoutReplica
+        exp_alerts: []
+      - eval_time: 25m
         alertname: FenecTenantsWithoutReplica
         exp_alerts: []
 
