@@ -15,3 +15,4 @@ mod studio;
 mod support;
 mod tokens;
 mod tracing;
+mod version;
