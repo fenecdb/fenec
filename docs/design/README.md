@@ -16,7 +16,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [read-replicas.md](read-replicas.md) -- a tenant's read replicas in other regions, the reads marked for them, and reading one's own writes across a failover
 - [access.md](access.md) -- scoped tokens, field lists, rules reading another collection, a token bound to its tenant, and empty tokens
 - [quotas.md](quotas.md) -- a tenant's quotas, how the sync meets them, and the wait every 503 names
-- [http.md](http.md) -- the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache and JSON written from stored rows
+- [http.md](http.md) -- the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows and connections no thread is made for
 - [hnsw.md](hnsw.md) -- the graph as derived data, its records, its restore and open, its linking, and vectors written again
 - [benchmarks.md](benchmarks.md) -- what `make scale-bench` and `make ycsb` measure and how
 - [writes.md](writes.md) -- `insert` and `put`, arithmetic in `set`, `require`, upserts, picked writes, an `order` by expression and `returning`
@@ -174,3 +174,4 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 138. [Profiles differ on purpose](crates.md#profiles)
 139. [A JOIN on a key is a `lookup` answered flat, or one table's `get` with the other's rows a filter](fenecql.md#sql-joins-subqueries-and-schema) (added after the move, under *FenecQL and schemas*)
 140. [A replica whose attach failed is tried again, and a file the router left on a node is reported](tenants.md#replicas-tried-again) (added after the move, under *Tenants and leases*)
+141. [A connection no thread can be made for is answered 503, as one past the ceiling is](http.md#connections-without-a-thread) (added after the move, under *The HTTP server*)

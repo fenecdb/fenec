@@ -1,6 +1,6 @@
 # The HTTP server
 
-The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *The HTTP server*: the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache and JSON written from stored rows. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *The HTTP server*: the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, and connections no thread is made for (added after the move). Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Studio
 
@@ -450,3 +450,142 @@ and 1.17 to write out; `select` reads a row in one pass now (`one_pass`,
 0.39), and `query_json` takes 0.46 for both. The browser module's scan of
 100 such rows went 0.355 -> 0.254 ms for 353 bytes brotli; `make
 load-bench`'s pages read back 165.8k -> 212.0k rows a second.
+
+## Connections without a thread
+
+**A connection no thread can be made for is answered 503, as one past the
+ceiling is** (`fenec_http::accept`). Every connection is a thread, and past
+the system's thread limit -- macOS's 2 048 a process, a cgroup's
+`pids.max`, systemd's `TasksMax=`, `ulimit -u` -- `thread::Builder::spawn`
+fails and drops the closure it could not run, and the stream inside it
+closed with nothing said. Its client had sent its request and read
+`Connection reset by peer`; through the router a write fared worse:
+written whole, its connection ended before a byte of an answer, which is
+what a node that ran it and went down looks like, so `replayable` had it
+answered 502, "did not answer", where the node had run nothing (#372 found
+it, fenec-shard's test binary at 2 047 threads). Both accept loops, the
+node's -- the HTTP endpoint, `--metrics`, a `--dir` node, and with them MCP,
+replication and the node's archive streams, which are its paths -- and the
+router's, now spawn through `accept::spawn`: the stream goes into the
+closure in a `Handed`, whose drop, where the closure never ran, puts it in
+a thread-local of the thread that called `spawn` -- which is where std
+drops a closure it made no thread for -- for `spawn` to hand back. Safe
+where a raw descriptor taken out and made a stream again would not be, and
+nothing more on the way: no `try_clone` (a `dup` a connection) and no
+allocation. `accept::refuse` answers it on the accepting thread as the
+ceiling's refusal is answered, which goes the same way now: 503,
+`Retry-After: 1`, `{"error", "retry_after"}`, the CORS headers and
+`Fenec-Unserved: no_thread` (or `ceiling`), the router's mark
+(`Fenec-Shard: 1`) on its own. A pooled connection has its thread already.
+
+The router passes a node's 503 on as the node's answer, as it passes every
+503 that is not a cut's (`forward`) -- once it reads it: it wrote a
+request's head and body in two `write`s (`exchange`), and a node that had
+answered the connection and closed it before the head arrived had Linux
+take the reset its closed socket sent the head back inside the head's own
+`write`, the body's then failing EPIPE, unsent, the 503 unread in the
+buffer and the write told 502 (CI; in Docker's Linux, three cores beside
+six busy loops, 809 and 853 puts of 20 000 through a router, 11 to 37% of
+`Pool::send`s, a send in 30 000 idle). Head and body go in one `writev`
+now (`http::write_parts`), and a write that fails on a connection made for
+the request reads what answer has arrived (`answer_waiting`, a peek, then
+the head as any): an answer in before the request went out whole is the
+node's to a request it never read whole, so it ran nothing -- a body past
+what one `writev` takes meets the reset after its first bytes. Only a
+status of 400 or more: a fenec node answers a request it has not read
+whole only to refuse it (400, 411, 413, 431, the 503 unserved), never a 2xx
+or a 401, reading the whole body before it asks the token or runs a byte,
+so a 200 there is a peer claiming what it cannot have done and the request
+stays unsent. A failover's cut that meets the head there is a cut of a
+request unsent (`unsent_cut`), its last byte never gone out: counted sent
+whole, an unkeyed write was told 502 that could go to the new primary. Not
+on a pooled connection, whose waiting byte may be no answer of this
+request's and whose failure goes on to a fresh one. A write that fails
+leaves the request's last byte unsent, though not that its call took none
+of its bytes: Linux takes none, and macOS's `dofilewrite` answers EPIPE
+with -1 where part of the call went out. Either holds the small write
+alone: 0 of 30 000 sends failed under that load with one, the other or
+both, and 0 of 40 000 puts through a router with both. A router drops a
+node's `Fenec-Unserved` from what it forwards: the router's own
+connection was served, and a client of it, the global entry among them,
+reads the mark as the router's. A router relaying to a region's routers
+(`relay_send`, `call_routers_by`) and the global entry (`judged`'s
+`unserved`) send a request a router answered marked on to the next
+router, whatever the request -- it never ran there -- that router not
+noted as the one that answered last, its 503 the answer only where every
+router gives one; taken for any router's answer, a router at its thread
+limit kept every request, where a reset of its connection had sent a read
+on to the standby beside it. A standby's 409 refusing a `/_shard/` change
+is passed over the same way, marked `Fenec-Follows`
+([regions.md](regions.md#the-global-entry)): asked after a busy primary
+and taken for the answer, it held every later change of the entry's
+isolate at the standby.
+
+The socket is made non-blocking before the write: the accepting thread is
+every connection's, and a client that reads nothing must not hold it. The
+answer, a few hundred bytes into a new socket's empty send buffer, goes out
+whole in one write all the same, and where it would not it is let go of. The
+request is not read first -- what has not arrived cannot be waited for
+there, and the answer does not hang on it -- but what has arrived is read
+off after the answer, up to 64 KiB and non-blocking too: closed with its
+request unread, a socket is reset rather than ended, on macOS and Linux
+alike (probed: the client read the answer, then `ECONNRESET`), and a client
+reading to the end took the answer for an error. A request arriving after
+the close, or a body past what had arrived, still meets the reset, which
+both systems hand a client only after the bytes it received; a lingering
+close, reading on until the client ends, would want a thread or a list of
+sockets to come back to. Each is counted -- `fenec_connections_refused_total`
+and the router's `fenec_router_connections_refused_total`, by `reason`,
+`ceiling` or `no_thread`, the ceiling's counted nowhere before, neither in
+`fenec_router_requests_total` -- and one with no thread is said in the log
+a minute apart at most by the monotonic clock (a wall clock set back held
+it silent), naming the limits to raise, its peer looked up only then and
+the line carrying the answer's request id; one whose stream a std would
+not give back -- none does -- is counted and said as well, closed
+unanswered, and a debug build's assertion. `FenecNoThreadForConnection`
+pages on any, since the process's other threads, a router's lease grants
+among them, meet the same limit; a scrape is a connection too, so `up`
+falls to 0 beside it.
+
+A test makes the next spawns fail (`Server::fail_spawns`,
+`Router::fail_spawns`, `#[doc(hidden)]`) by asking for a stack of 2 EiB,
+which no address space maps: macOS, glibc and musl each refused 2^50 to
+2^62 with EAGAIN, the error at the thread limit, where 2^46 was mapped;
+reaching the real limit would fail every other test's threads in the
+process. A connection pays one relaxed load for it. fenec-http's
+`a_connection_with_no_thread_is_answered_503_and_told_when_to_come_back`,
+fenec-shard's `no_thread.rs` -- a write through the router answered the
+node's 503 and not run, where it was a 502; the router's own; a relay
+asking the region's next router -- `upstream`'s
+`a_node_refusing_a_connection_as_it_takes_it_is_answered_by_its_refusal`
+(2 000 sends, failing on Linux with both of the router's fixes taken out)
+and `an_answer_in_before_the_body_went_out_whole_is_the_answer` (64 MiB,
+failing without the read after the write), `entry.test.js`'s router that
+refused the connection passed over, and `accept`'s unit tests -- the
+stream given back; an end, not a reset, after the answer -- each fail with
+its part taken out. The counts by reason, a delta of one each and none of
+the other, are `refused_counts.rs`'s in fenec-http and fenec-shard, each a
+`[[test]]` of its own, the count being the process's.
+
+In ABBA turns against main at loads of 1.95-2.97, the machine moving
+between two modes run by run on either build, the accept loop alone
+changed: `make requests-bench`, three quartets, every figure inside the
+runs' spread, no request's path having changed -- a row by id 0.022 ms p50
+against 0.0235 (0.022-0.025 and 0.020-0.025), eight clients 146.1k a
+second against 136.2k (133.7-147.3k and 133.3-148.7k), a put 0.023 ms
+either way and 128.3k against 123.1k (118.2-130.9k and 119.3-128.5k).
+Both benches keep their connection alive, so they meet the accept loop
+once: a connection a request -- connect, `GET /`, read to the close, 5 000
+a turn, three ABBA quartets from one process -- took 75.55 us p50 against
+75.95 (74.7-77.1 and 73.2-76.4). With the router's one `writev` and the
+mark, `make shard-bench ARGS=latency`, six quartets at loads of 2.5-2.97:
+a request through the router 42.2 us p50 against 42.1 (42.0-42.6 and
+39.5-42.4; the quartets' differences 0 to +0.3 us, one +1.55 over main's
+39.5), the node asked directly 20.1 against 20.6 (19.8-21.6 and
+20.2-21.6), so the added p50 read 22.05 against 21.1 -- the node's move,
+whose path did not change, not the router's; a `GET`'s head went in one
+`write` before as well, its empty body writing nothing. `fenec-server`'s
+`__text` grew 4 032 bytes and `fenec-shard`'s 6 720 (aarch64-apple-darwin):
+`refuse`, `no_thread`, its lines and the family, the relays' and the
+early answer's code. Nothing below `fenec-http` changed, and the browser
+module is the same to the byte.

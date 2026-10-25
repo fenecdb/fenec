@@ -182,6 +182,16 @@ replicas, the clients' peak and a quarter more, and raise `LimitNOFILE`
 and `TasksMax` with it (65 536 and 16 384 leave room for 4 000).
 `FenecConnectionsNearCeiling` fires at four fifths. A router's ceiling (its
 default, 1 000) is its clients' and the regions' relays.
+`FenecNoThreadForConnection` fires once a process could make no thread for
+a connection and refused it 503 (`reason="no_thread"`): it reached
+`TasksMax` (or its cgroup's `pids.max`) before `--max-connections`, so its
+other threads -- a router's lease grants and failovers, a node's
+followers -- may be refused too. Raise `TasksMax`, or lower
+`--max-connections` well below it; `systemctl status` shows the unit's
+tasks against its limit. Prometheus's scrape is a connection too, refused
+the same way while the limit holds: `up` goes to 0, so the target-down
+alerts (`FenecNodeDown`, `FenecPrimaryRouterDown`, ...) are the other sign
+of it, and the count shows once a scrape gets its thread.
 
 `TimeoutStopSec` leaves a node 120 s to sync every open tenant and
 checkpoint their graphs on SIGTERM; a kill past it loses no write under
@@ -946,7 +956,11 @@ it short and says what it costs.
 - `FenecRouter5xx`: more than 1% of tenants' requests answered 5xx. 502 is
   a node the router could not reach (`FenecNodeUnreachable` names it), 503
   a tenant frozen for a move or a lease lapsed, 504 a replica behind the
-  read's position. Look at which, and at the node.
+  read's position. Look at which, and at the node. A router's own 503s
+  as it takes a connection -- past `--max-connections`, at its thread limit
+  -- are not among them: they never reach `fenec_router_requests_total`,
+  and are counted in `fenec_router_connections_refused_total` alone
+  (`FenecNoThreadForConnection`).
 - `FenecNodeUnreachable`: the router cannot reach a node. Before a lease
   lapses its tenants answer 502; past it the node is failed over.
 - `FenecStatementErrors`: more than 5% of a node's statements end in an
@@ -991,6 +1005,7 @@ textfile collector).
 | `FenecRouterDown` | critical | a router never seen up in the hour does not answer | A router lost |
 | `FenecScrapeMissing` | warning | a job has no target at all, node_exporter's among them: every rule over it is blind | Alerts |
 | `FenecConnectionsNearCeiling` | warning | a process at four fifths of its `--max-connections` | Installing a machine |
+| `FenecNoThreadForConnection` | critical | a process at its thread limit refused a connection 503 | Installing a machine |
 | `FenecNodeFailedOver` | critical | a node was failed over and has not answered since | A node lost |
 | `FenecAutoFailoverIncomplete` | critical | a node failed over still has tenants placed on it: they take no writes | A node lost, step 1 |
 | `FenecAutoFailover` | warning | a node was failed over | A node lost |

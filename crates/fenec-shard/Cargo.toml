@@ -28,6 +28,12 @@ path = "tests/all.rs"
 name = "metrics"
 path = "tests/metrics.rs"
 
+# Apart: the count of connections refused as they were taken is the
+# process's own, a node's in it as well as the router's.
+[[test]]
+name = "refused_counts"
+path = "tests/refused_counts.rs"
+
 # Apart: the wait after a refusal is counted by the process.
 [[test]]
 name = "refusals"

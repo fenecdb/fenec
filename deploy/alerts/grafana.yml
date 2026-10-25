@@ -182,6 +182,33 @@ groups:
         annotations:
           summary: "{{ $labels.instance }} holds {{ $values.A.Value }} connections, near its --max-connections"
           runbook: deploy/RUNBOOK.md#adding-a-node
+      - uid: fenec-no-thread-for-connection
+        title: FenecNoThreadForConnection
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: sum by (instance) (increase(fenec_connections_refused_total{reason="no_thread"}[5m])) > 0 or sum by (instance) (increase(fenec_router_connections_refused_total{reason="no_thread"}[5m])) > 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.instance }} could make no thread for a connection and refused it 503: it is at its thread limit"
+          runbook: deploy/RUNBOOK.md#installing-a-machine
       - uid: fenec-node-failed-over
         title: FenecNodeFailedOver
         condition: B

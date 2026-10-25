@@ -37,9 +37,8 @@
 # node exports none by tenant; /t/<t>/_replication/status has it), how far
 # a node's archive is behind its node (`fenec archive` serves no metrics;
 # the node's fenec_node_streams says only whether an archiver is
-# connected), a region router's copy of the global directory (its follower
-# exports nothing), and the connections a ceiling refused (none counts them:
-# FenecConnectionsNearCeiling watches the gauge instead).
+# connected), and a region router's copy of the global directory (its
+# follower exports nothing).
 
 groups:
   - name: fenecdb-targets
@@ -93,7 +92,8 @@ groups:
       # Set it at four fifths of --max-connections: 3200 for a node's 4000,
       # 800 for a router's 1000. Past the ceiling a connection is refused
       # 503 -- a new tenant's replica among them, whose writes are then
-      # acknowledged with no replica -- and nothing counts the refusals.
+      # acknowledged with no replica -- each counted under reason
+      # "ceiling", which this warns of before it happens.
       - alert: FenecConnectionsNearCeiling
         expr: fenec_connections > 3200 or fenec_router_connections > 800
         for: 5m
@@ -102,6 +102,18 @@ groups:
         annotations:
           summary: "{{ $labels.instance }} holds {{ $value }} connections, near its --max-connections"
           runbook: deploy/RUNBOOK.md#adding-a-node
+      # A connection the process could make no thread for is refused 503
+      # and closed: it reached its thread limit (systemd's TasksMax=, a
+      # cgroup's pids.max) before its --max-connections, and every other
+      # thread it makes -- a router's lease grant or failover, a node's
+      # follower -- may be refused beside it.
+      - alert: FenecNoThreadForConnection
+        expr: sum by (instance) (increase(fenec_connections_refused_total{reason="no_thread"}[5m])) > 0 or sum by (instance) (increase(fenec_router_connections_refused_total{reason="no_thread"}[5m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.instance }} could make no thread for a connection and refused it 503: it is at its thread limit"
+          runbook: deploy/RUNBOOK.md#installing-a-machine
 
   - name: fenecdb-router
     rules:

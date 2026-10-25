@@ -189,6 +189,8 @@ pub struct Router {
     /// waits on for a tenant it had to leave ([`Router::fail_over_held`]).
     freed: std::sync::Condvar,
     live: AtomicUsize,
+    /// The connections' threads a test has fail ([`Router::fail_spawns`]).
+    fail_spawns: fenec_http::accept::FailSpawns,
     /// Each node's lease, under automatic failover, and the pool its grants
     /// go through: bounded by a third of the lease rather than by
     /// `upstream_timeout`, so a node that does not answer cannot hold up
@@ -656,6 +658,7 @@ impl Router {
             freed: std::sync::Condvar::new(),
             marks: Mutex::new(Default::default()),
             live: AtomicUsize::new(0),
+            fail_spawns: Default::default(),
             leases: cfg
                 .auto_failover
                 .map(|term| (lease::Leases::new(term), Pool::new(term / 3))),
@@ -762,26 +765,38 @@ impl Router {
             let live = self.live.fetch_add(1, Ordering::SeqCst) + 1;
             if self.cfg.max_connections > 0 && live > self.cfg.max_connections {
                 self.live.fetch_sub(1, Ordering::SeqCst);
-                let mut s = stream;
-                fenec_http::request_id::begin(None);
-                let _ = self
-                    .cors(Response::retry_after(503, "too many connections", 1))
-                    .write(&mut s, false, false);
-                fenec_http::request_id::end();
+                let answer = self.cors(Response::retry_after(503, "too many connections", 1));
+                fenec_http::accept::refuse(stream, answer, fenec_http::accept::Refusal::Ceiling);
                 continue;
             }
             let router = Arc::clone(self);
-            let spawned = std::thread::Builder::new()
-                .name("fenec-shard".into())
-                .spawn(move || {
-                    router.connection(stream);
-                    router.live.fetch_sub(1, Ordering::SeqCst);
-                });
-            if spawned.is_err() {
+            let builder = std::thread::Builder::new().name("fenec-shard".into());
+            let spawned = fenec_http::accept::spawn(builder, stream, &self.fail_spawns, move |s| {
+                router.connection(s);
+                router.live.fetch_sub(1, Ordering::SeqCst);
+            });
+            // No thread: answered 503 as the ceiling answers, with the
+            // router's mark, where it was closed unanswered
+            // (`fenec_http::accept`'s comment).
+            if let Err(unserved) = spawned {
                 self.live.fetch_sub(1, Ordering::SeqCst);
+                let answer =
+                    self.cors(Response::retry_after(503, fenec_http::accept::NO_THREAD, 1));
+                fenec_http::accept::no_thread(
+                    unserved,
+                    answer,
+                    "fenec_router_connections_refused_total",
+                );
             }
         }
         Ok(())
+    }
+
+    /// Has the next connections' threads fail to be made, as at the
+    /// system's thread limit (`fenec_http::accept::FailSpawns`): a test's.
+    #[doc(hidden)]
+    pub fn fail_spawns(&self) -> fenec_http::accept::FailSpawns {
+        self.fail_spawns.clone()
     }
 
     /// Starts the leasing thread under automatic failover: every third of a
@@ -2711,13 +2726,16 @@ impl Router {
             // the ids leaves out. So do the router's CORS headers, where it
             // has its own: a page is told one rule, the one the router's
             // preflight told it. Whether the node verified a token is the
-            // router's to know and no one else's.
+            // router's to know and no one else's. A node's mark of a
+            // connection it served nothing on is about that connection, not
+            // the router's (`fenec_http::accept::UNSERVED_HEADER`).
             if k.eq_ignore_ascii_case(fenec_http::audit::VERIFIED_HEADER) {
                 verified = true;
             } else if !hop_by_hop(k)
                 && !k.eq_ignore_ascii_case("content-length")
                 && !k.eq_ignore_ascii_case(fenec_http::request_id::HEADER)
                 && !k.eq_ignore_ascii_case(region::SHARD_HEADER)
+                && !k.eq_ignore_ascii_case(fenec_http::accept::UNSERVED_HEADER)
                 && !(cors.is_some() && fenec_http::cors::is_cors_header(k, v))
             {
                 for part in [k.as_str(), ": ", v.as_str(), "\r\n"] {
@@ -3065,7 +3083,8 @@ impl Router {
                 409,
                 "this router follows another: send /_shard/ changes to the primary, \
                  or promote this one (POST /_replication/promote)",
-            );
+            )
+            .header(region::FOLLOWS_HEADER, "1");
         }
         // What regions keeping their own directory change: relayed to the
         // router keeping the directory it touches, or carried out here

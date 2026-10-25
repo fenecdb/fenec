@@ -40,6 +40,7 @@ instances:
       - refused
       - auto_compactions
       - connections
+      - connections_refused
       - memory_bytes
       - vectors_unlinked
       # A file's server

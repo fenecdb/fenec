@@ -200,6 +200,12 @@ side in ABBA turns over three rounds at loads of 1.3-2.7 (20.1-23.8 and
 18.6-21.5; the third round 20.5 against 20.55): `forward`, `answer_out`
 inlined in it, is main's to the instruction, and `read_body`'s path for a
 body with a length the same instructions in other registers.
+A request's head and body go in one `writev` (`http::write_parts`), and a
+write that fails on a connection made for the request reads the answer
+already in (`answer_waiting`): a node's refusal as it took the connection
+had Linux fail the body's own `write` with the reset its closed socket sent
+the head back, the request unsent and the 503 unread, told 502
+([http.md](http.md#connections-without-a-thread)).
 
 ## Failover cuts
 

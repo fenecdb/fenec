@@ -38,6 +38,7 @@ macro_rules! log {
     }};
 }
 
+pub mod accept;
 pub mod access;
 pub mod admin;
 pub mod api;
@@ -208,6 +209,8 @@ pub struct Server {
     backend: Backend,
     cfg: Arc<Config>,
     live: Arc<AtomicUsize>,
+    /// The connections' threads a test has fail ([`Server::fail_spawns`]).
+    fail_spawns: accept::FailSpawns,
 }
 
 #[derive(Clone)]
@@ -253,6 +256,7 @@ impl Server {
             },
             cfg: Arc::new(cfg),
             live: Arc::new(AtomicUsize::new(0)),
+            fail_spawns: Default::default(),
         }
     }
 
@@ -282,6 +286,7 @@ impl Server {
             backend: Backend::Tenants(tenants),
             cfg: Arc::new(cfg),
             live: Arc::new(AtomicUsize::new(0)),
+            fail_spawns: Default::default(),
         }
     }
 
@@ -298,6 +303,7 @@ impl Server {
             backend: Backend::Metrics { db, repl },
             cfg: Arc::new(cfg.settled()),
             live: Arc::new(AtomicUsize::new(0)),
+            fail_spawns: Default::default(),
         }
     }
 
@@ -394,35 +400,40 @@ impl Server {
             let live = self.live.fetch_add(1, Ordering::SeqCst) + 1;
             if self.cfg.max_connections > 0 && live > self.cfg.max_connections {
                 self.live.fetch_sub(1, Ordering::SeqCst);
-                let mut s = stream;
-                request_id::begin(None);
                 // Told with the CORS headers as every other answer is: a
                 // page on another origin read a refusal without them as
                 // the network failing.
-                let _ = cors(
-                    Response::retry_after(503, "too many connections", 1),
-                    &self.cfg,
-                )
-                .write(&mut s, false, false);
-                request_id::end();
+                let answer = Response::retry_after(503, "too many connections", 1);
+                accept::refuse(stream, cors(answer, &self.cfg), accept::Refusal::Ceiling);
                 continue;
             }
 
             let backend = self.backend.clone();
             let cfg = Arc::clone(&self.cfg);
             let counter = Arc::clone(&self.live);
-            let spawned = std::thread::Builder::new()
+            let builder = std::thread::Builder::new()
                 .name("fenec-http".into())
-                .stack_size(CONNECTION_STACK)
-                .spawn(move || {
-                    serve_connection(stream, &backend, &cfg);
-                    counter.fetch_sub(1, Ordering::SeqCst);
-                });
-            if spawned.is_err() {
+                .stack_size(CONNECTION_STACK);
+            let spawned = accept::spawn(builder, stream, &self.fail_spawns, move |stream| {
+                serve_connection(stream, &backend, &cfg);
+                counter.fetch_sub(1, Ordering::SeqCst);
+            });
+            // No thread: answered as the ceiling answers, where it was
+            // closed unanswered (`accept`'s comment).
+            if let Err(unserved) = spawned {
                 self.live.fetch_sub(1, Ordering::SeqCst);
+                let answer = cors(Response::retry_after(503, accept::NO_THREAD, 1), &self.cfg);
+                accept::no_thread(unserved, answer, "fenec_connections_refused_total");
             }
         }
         Ok(())
+    }
+
+    /// Has the next connections' threads fail to be made, as at the
+    /// system's thread limit ([`accept::FailSpawns`]): a test's.
+    #[doc(hidden)]
+    pub fn fail_spawns(&self) -> accept::FailSpawns {
+        self.fail_spawns.clone()
     }
 }
 

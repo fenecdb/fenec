@@ -203,6 +203,15 @@ fn a_standby_forwards_from_the_primarys_directory_and_takes_over_when_promoted()
     assert!(body.contains("primary"), "{body}");
     let (status, body) = call(standby, "DELETE", "/_shard/nodes/n1", "", None);
     assert_eq!(status, 409, "{body}");
+    // Marked, so that a client of several routers -- the global entry, a
+    // relay -- asks the next and takes this one for none that answered.
+    let mut s = TcpStream::connect(("127.0.0.1", standby)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    s.write_all(b"DELETE /_shard/nodes/n1 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    assert!(out.contains("\r\nFenec-Follows: 1\r\n"), "{out}");
 
     // Promoted -- the primary is gone, say -- it takes them.
     let (status, body) = call(standby, "POST", "/_replication/promote", "", Some(TOKEN));

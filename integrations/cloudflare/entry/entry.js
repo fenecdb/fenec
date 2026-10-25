@@ -77,6 +77,25 @@ export const DOWN_MS = 10_000;
 export const SHARD = 'fenec-shard';
 
 /**
+ * The mark of a router's 503 written as it took the connection, before it
+ * read a byte of the request -- past its `--max-connections`, or at its
+ * thread limit (`fenec_http::accept::UNSERVED_HEADER`): the request never
+ * ran there, so it goes on to the region's next router whatever it is, and
+ * the router is not the one that answered last. Taken as any router's
+ * answer, a router at its thread limit kept every request from the standby
+ * beside it, where a reset of its connection had sent a read there.
+ */
+export const UNSERVED = 'fenec-unserved';
+
+/**
+ * The mark of a standby router's 409 refusing a `/_shard/` change
+ * (`fenec-shard`'s `region::FOLLOWS_HEADER`): it follows another router's
+ * directory and ran nothing, so the change goes on to the next router, and
+ * the standby is not the one that answered last.
+ */
+export const FOLLOWS = 'fenec-follows';
+
+/**
  * Answers Cloudflare gives a Worker's fetch where the origin was never
  * reached -- refused (521), unreachable (523), its TLS failed (525, 526),
  * no tunnel connector (530) -- so the router cannot have run the request.
@@ -151,9 +170,11 @@ const DROPPED = new Set([
  * front of a router's tunnel does, outside strict service token
  * authentication: a `CF_Authorization` cookie for the service token's
  * session, which passed on would let any client of the entry reach the
- * router's hostname past Access without the token.
+ * router's hostname past Access without the token. And {@link UNSERVED},
+ * which says what became of the entry's connection to the router, not the
+ * client's.
  */
-const ANSWER_DROPPED = ['connection', 'keep-alive', 'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'fenec-verified', HOME, 'set-cookie'];
+const ANSWER_DROPPED = ['connection', 'keep-alive', 'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'fenec-verified', HOME, 'set-cookie', UNSERVED];
 
 /**
  * The headers fenec-http's `cors::headers` writes under `--http-cors`: the
@@ -506,17 +527,20 @@ async function prepare(request, cfg, tenant) {
 
 /**
  * How an answer at a router's URL is taken: the router's (`router`), one
- * Cloudflare gives for a router never reached (`unrun`), or one something
- * else in front of the router gave -- a tunnel's connector that could not
- * reach it answers 502, Cloudflare 520, 522 or 524 -- which may have
- * reached it (`unknown`). Every answer a router writes, its own and those
- * it forwards, carries its mark ({@link SHARD}), which nothing else in
- * front of it writes: `X-Request-Id`, which every answer of a router
- * carries too, a load balancer may write on its own 502.
+ * Cloudflare gives for a router never reached (`unrun`), the router's 503
+ * written as it took the connection, the request never read (`unserved`,
+ * {@link UNSERVED}), or one something else in front of the router gave --
+ * a tunnel's connector that could not reach it answers 502, Cloudflare
+ * 520, 522 or 524 -- which may have reached it (`unknown`). Every answer a
+ * router writes, its own and those it forwards, carries its mark ({@link
+ * SHARD}), which nothing else in front of it writes: `X-Request-Id`, which
+ * every answer of a router carries too, a load balancer may write on its
+ * own 502.
  */
 export function judged(answer) {
   if (UNREACHED.has(answer.status)) return 'unrun';
   if (answer.status >= 500 && !answer.headers.has(SHARD)) return 'unknown';
+  if (answer.status === 503 && answer.headers.has(UNSERVED)) return 'unserved';
   return 'router';
 }
 
@@ -535,6 +559,18 @@ async function toRegion(request, url, region, sent, state, guess) {
   const tries = region.routers.length;
   const start = (state.answered.get(region.name) ?? 0) % tries;
   let why = '';
+  // A router's 503 written as it took the connection ({@link UNSERVED}),
+  // and a standby's 409 refusing a change ({@link FOLLOWS}): neither ran
+  // the request, so the next router is asked, and the 503 -- or else the
+  // 409 -- is the client's answer where no router does better.
+  let refused = null;
+  let following = null;
+  const drop = async (a) => a?.body?.cancel().catch(() => {});
+  const best = async () => {
+    if (!refused) return following;
+    await drop(following);
+    return refused;
+  };
   for (let k = 0; k < tries; k++) {
     const i = (start + k) % tries;
     const router = region.routers[i];
@@ -556,7 +592,16 @@ async function toRegion(request, url, region, sent, state, guess) {
     }
     if (answer) {
       kind = judged(answer);
+      // A standby router refusing a `/_shard/` change it cannot take: taken
+      // for the router that answered, a change meeting the busy primary's
+      // 503 went on to the standby, was its 409 -- telling an operator to
+      // promote a standby beside a living primary -- and every change after
+      // it from the isolate went to the standby first, the primary never
+      // asked again.
+      if (kind === 'router' && answer.headers.has(FOLLOWS)) kind = 'follows';
       if (kind === 'router') {
+        await drop(refused);
+        await drop(following);
         state.answered.set(region.name, i);
         state.down.delete(region.name);
         // A router that could not reach the tenant's home -- it relays to
@@ -569,9 +614,19 @@ async function toRegion(request, url, region, sent, state, guess) {
         }
         return { answer };
       }
-      why = `answered ${answer.status}, not by the router`;
-      // Read nothing of it, and let its connection go.
-      await answer.body?.cancel().catch(() => {});
+      if (kind === 'unserved') {
+        why = `refused the connection unserved (${answer.headers.get(UNSERVED)})`;
+        await drop(refused);
+        refused = answer;
+      } else if (kind === 'follows') {
+        why = 'follows another router';
+        await drop(following);
+        following = answer;
+      } else {
+        why = `answered ${answer.status}, not by the router`;
+        // Read nothing of it, and let its connection go.
+        await drop(answer);
+      }
     }
     console.warn(`region ${region.name}: ${router}: ${why}`);
     // The next request of the region goes to the next router either way.
@@ -581,13 +636,28 @@ async function toRegion(request, url, region, sent, state, guess) {
     // written. Sent again, a write would reach its node twice -- unless its
     // key makes it once there.
     if (kind === 'unknown' && !sent.repeatable) {
+      await drop(refused);
+      await drop(following);
       state.down.set(region.name, Date.now());
       return { fail: 'ran', why };
     }
     if (!sent.again) {
+      // A router there refused it, unrun: its answer, a 503 to come back
+      // from where one was given.
+      if (kind === 'unserved' || kind === 'follows') return { answer: await best() };
+      await drop(refused);
+      await drop(following);
       state.down.set(region.name, Date.now());
       return { fail: 'spent', why };
     }
+  }
+  // A router there, refusing: the region is not down, and a guess goes on
+  // to the next region for a 503 unserved, whose router relays home a
+  // request that ran nowhere; a standby's 409 is a `/_shard/` change's,
+  // never a guess's.
+  if (refused || following) {
+    const answer = await best();
+    return guess && answer === refused ? { fail: 'resend', why, answer } : { answer };
   }
   state.down.set(region.name, Date.now());
   return { fail: 'resend', why };

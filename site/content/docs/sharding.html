@@ -293,7 +293,9 @@ origin. The router answers a browser's preflight itself, before it looks the
 tenant up, and puts the CORS headers on every answer it gives. Its own — an
 unknown tenant's <code>404</code>, a standby's <code>503</code>, an
 unreachable node's <code>502</code>, the <code>503</code> past
-<code>--max-connections</code>, the <code>401</code> of <code>/_shard/</code> without its token — reach the
+<code>--max-connections</code> or at its thread limit (marked
+<code>Fenec-Unserved</code>: the request never ran, so the global entry and
+a relaying router ask the region's next router), the <code>401</code> of <code>/_shard/</code> without its token — reach the
 page as the refusals they are; without the headers a browser hands the page a
 network error for each, and the sync layer backs off from what was an answer.
 On a node's answer the router's headers take the place of the node's, so the
@@ -1632,7 +1634,12 @@ curl https://db.example.com/t/acme/query -H "Authorization: Bearer $TOKEN" \
     <code>/_replication</code> and the rest are a <code>404</code>, however
     the path is spelled.</li>
   <li><b>A router that cannot be reached</b> is passed over for the region's
-    standby router. An unmarked request of a tenant whose home the entry
+    standby router, and so is one that refused the connection as it took it
+    — past its <code>--max-connections</code> or at its thread limit, its
+    <code>503</code> marked <code>Fenec-Unserved</code> — whatever the
+    request, since it never ran there; a standby's <code>409</code> refusing
+    a <code>/_shard/</code> change (marked <code>Fenec-Follows</code>) is
+    passed over too, the primary's answer taken before it. An unmarked request of a tenant whose home the entry
     knows is never sent to another region: its region's routers all failing
     is a <code>503</code> with <code>Retry-After</code>. One it has not heard
     goes on to the next region, whose router relays it home, and a marked
