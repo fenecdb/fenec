@@ -1591,7 +1591,9 @@ curl https://db.example.com/t/acme/query -H "Authorization: Bearer $TOKEN" \
     standby router, and so is one that refused the connection as it took it
     — past its <code>--max-connections</code> or at its thread limit, its
     <code>503</code> marked <code>Fenec-Unserved</code> — whatever the
-    request, since it never ran there. An unmarked request of a tenant whose home the entry
+    request, since it never ran there; a standby's <code>409</code> refusing
+    a <code>/_shard/</code> change (marked <code>Fenec-Follows</code>) is
+    passed over too, the primary's answer taken before it. An unmarked request of a tenant whose home the entry
     knows is never sent to another region: its region's routers all failing
     is a <code>503</code> with <code>Retry-After</code>. One it has not heard
     goes on to the next region, whose router relays it home, and a marked

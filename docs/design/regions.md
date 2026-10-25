@@ -309,7 +309,15 @@ at its thread limit, before it read the request
 ([http.md](http.md#connections-without-a-thread)) -- that router not taken
 for the one that answered last, its 503 the client's where every router
 gives one: taken for the router's answer, a router at its thread limit kept
-every request from its standby; one that may have -- a thrown fetch (workerd says
+every request from its standby. A standby's 409 refusing a `/_shard/`
+change is passed over the same way, marked `Fenec-Follows`
+(`region::FOLLOWS_HEADER`, which `call_routers_by` reads too, beside the
+words a router from before the mark refuses in), the busy primary's 503
+the answer before it: taken for the router's answer, a change meeting the
+busy primary went on to the standby, was told to promote it, and every
+change after from that isolate went to the standby first, refused, the
+primary never asked again (the review's stand-ins, `[409, 409, 409]`
+where the primary answered `[200, 200, 200]`). One that may have -- a thrown fetch (workerd says
 `Network connection lost.` of a connection refused and of one reset after
 the request alike, probed), Cloudflare's 520/522/524 (its 522 page counts a
 request unacknowledged for 90 s on a connection made), a tunnel's connector

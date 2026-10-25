@@ -78,6 +78,17 @@ pub const HOME_HEADER: &str = "fenec-home";
 /// own on its own 502.
 pub const SHARD_HEADER: &str = "Fenec-Shard";
 
+/// The mark on a standby router's 409 refusing a `/_shard/` change
+/// (`Fenec-Follows: 1`): it follows another router's directory and ran
+/// nothing, so a client of several routers -- one relaying, the global
+/// entry -- asks the next, and takes this one for no router that
+/// answered. Matched by its body before, and only in the relays: the
+/// entry took it for the router's answer, and once the busy primary
+/// refused a connection unserved and the standby was asked, every later
+/// change from that isolate went to the standby first, refused 409, the
+/// primary never asked again.
+pub const FOLLOWS_HEADER: &str = "Fenec-Follows";
+
 /// `resp` naming the tenant's home where it is known: a placing router's
 /// own failure -- a node it could not reach -- is the home's answer, which
 /// the entry passes on rather than try another region.
@@ -327,7 +338,13 @@ impl Router {
                     let body = a
                         .read_body(pool, false)
                         .map_err(|e| format!("{url} broke off: {e}"))?;
-                    if status == 409 && contains(&body, b"follows another") {
+                    // Its mark, or the words a router from before the mark
+                    // says it in.
+                    let follows = hs
+                        .iter()
+                        .any(|(k, _)| k.eq_ignore_ascii_case(FOLLOWS_HEADER))
+                        || contains(&body, b"follows another");
+                    if status == 409 && follows {
                         last = format!("{url} follows another router");
                         continue;
                     }

@@ -494,7 +494,7 @@ loops spawn through `accept::spawn`, which hands back the stream of a thread
 the system refused, and `accept::refuse` answers it on the accepting thread,
 non-blocking, then reads off what arrived so the close is no reset, counted
 by `reason` and marked `Fenec-Unserved`, which the entry and relays take as
-unrun.
+unrun, as a standby's 409 marked `Fenec-Follows`.
 
 ### The HNSW graph
 

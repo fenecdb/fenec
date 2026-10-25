@@ -459,6 +459,18 @@ fn failed(flight: &Flight, stage: Stage, e: io::Error) -> Failure {
     Failure(Stage::Cut, io::Error::other(Ended::Cut { whole }))
 }
 
+/// A cut's error `c`, of a request whose last byte never went out: a cut
+/// of one sent whole ([`failed`]'s, the head waited for) is one unsent, its
+/// request run nowhere; a move stays a move.
+#[cold]
+#[inline(never)]
+fn unsent_cut(c: io::Error) -> io::Error {
+    match ended_by(&c) {
+        Some(Ended::Cut { whole: true }) => io::Error::other(Ended::Cut { whole: false }),
+        _ => c,
+    }
+}
+
 /// An answer whose body [`Answer::read_body_kept`] has read already.
 #[cold]
 #[inline(never)]
@@ -1064,10 +1076,12 @@ impl Pool {
         // the head back inside the head's own `write`, and the body's met
         // EPIPE: unsent, its 503 unread, the write was told 502 (CI; in
         // Docker's Linux, three cores beside six busy loops, 809 and 853
-        // puts through a router of 20 000, none since). A `write` that
-        // fails took none of its bytes, so the request's last byte never
-        // went out: an empty body writes nothing, and the head's last byte
-        // is then the last.
+        // puts through a router of 20 000, none since). A write that fails
+        // leaves the request's last byte unsent: the call that would carry
+        // it failed, or never came. Not that the failed call took none of
+        // its bytes -- Linux takes none, but macOS's `dofilewrite` answers
+        // EPIPE with -1 where part of the call went out. An empty body
+        // writes nothing, and the head's last byte is then the last.
         let early = match fenec_http::http::write_parts(&mut w, head, body) {
             Ok(()) => None,
             // Timed out, the node is there and not reading: sent again, it
@@ -1101,12 +1115,21 @@ impl Pool {
         }
         let kept_off = client_ended || early.is_some();
         match (self.head(addr, s, want, kept_off, flying), early) {
-            // Nothing read that is an answer: the request is what it was,
-            // unsent, a cut's where one came.
-            (Err(Failure(stage, _)), Some(e)) if !matches!(stage, Stage::Cut) => {
-                Err(Failure(Stage::Unsent, e))
-            }
-            (answer, _) => answer,
+            (answer, None) => answer,
+            // An answer in before the request went out whole is a fenec
+            // node's refusal of one it never read whole -- 400, 411, 413,
+            // 431, the 503 of a connection it served nothing on -- never a
+            // 2xx or a 401: a node reads the whole body before it asks the
+            // token or runs a byte. Under 400 it is a peer claiming what it
+            // cannot have done, and the request stays unsent.
+            (Ok(a), Some(_)) if a.status >= 400 => Ok(a),
+            // A cut's shutdown met the head: the last byte never went out,
+            // so it ran nothing, which a cut of a request sent whole would
+            // deny -- an unkeyed write told 502 that could go to the new
+            // primary.
+            (Err(Failure(Stage::Cut, c)), Some(_)) => Err(Failure(Stage::Cut, unsent_cut(c))),
+            // Nothing read that is an answer: the request is what it was.
+            (_, Some(e)) => Err(Failure(Stage::Unsent, e)),
         }
     }
 
@@ -2699,6 +2722,32 @@ mod tests {
             .unwrap_or_else(|e| panic!("the node's answer, not {e}"));
         assert_eq!(a.status, 413);
         assert_eq!(a.read_body(&pool, false).unwrap(), b"{}");
+        node.join().unwrap();
+    }
+
+    /// The same with a 200: no fenec node answers a request it has not read
+    /// whole but to refuse it, so a success in before the body went out is
+    /// a peer claiming what it cannot have done -- the write stays unsent,
+    /// and the answer is not passed on.
+    #[test]
+    fn a_success_in_before_the_body_went_out_whole_is_no_answer() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        let node = std::thread::spawn(move || {
+            let (mut c, _) = l.accept().unwrap();
+            let mut first = [0u8; 1];
+            c.read_exact(&mut first).unwrap();
+            c.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .unwrap();
+        });
+        let pool = Pool::new(Duration::from_secs(30));
+        let body = vec![b'x'; 64 << 20];
+        let sent = pool.send(&addr, "POST", "/t/acme/query", &[], &body);
+        assert!(
+            sent.is_err(),
+            "taken for an answer: {:?}",
+            sent.map(|a| a.status)
+        );
         node.join().unwrap();
     }
 }

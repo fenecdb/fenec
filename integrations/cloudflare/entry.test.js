@@ -848,6 +848,43 @@ test('a router that refused the connection as it took it is passed over for the 
   }
 });
 
+test("a change meeting the global router busy is its 503, and the standby's refusal leaves the primary the one asked first", async () => {
+  // The primary at its thread limit once, then answering.
+  let busy = true;
+  const primary = await standIn((req, res) => {
+    if (busy) {
+      busy = false;
+      res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': '1', 'Fenec-Shard': '1', 'Fenec-Unserved': 'no_thread' });
+      res.end('{"error":"no thread for the connection","retry_after":1}');
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Fenec-Shard': '1' });
+    res.end('{}');
+  });
+  // A standby takes no change: its 409, as fenec-shard words and marks it.
+  const standby = await standIn((req, res) => {
+    res.writeHead(409, { 'Content-Type': 'application/json', 'Fenec-Shard': '1', 'Fenec-Follows': '1' });
+    res.end('{"error":"this router follows another: send /_shard/ changes to the primary, or promote this one (POST /_replication/promote)"}');
+  });
+  try {
+    const fetchOf = inNode({ REGIONS: JSON.stringify({ eu: [standby.url] }), ADMIN: JSON.stringify([primary.url, standby.url]), HOMES_CACHE: 'off' });
+    const change = () =>
+      fetchOf('/_shard/tenants/acme/quota', { method: 'PUT', body: '{"rows":10}', headers: { Authorization: 'Bearer admin' } });
+    const first = await change();
+    assert.equal(first.status, 503, 'the busy primary\'s answer, to come back from');
+    assert.equal(first.headers.get('retry-after'), '1');
+    assert.equal(primary.seen.length, 1);
+    assert.equal(standby.seen.length, 1);
+    const after = [];
+    for (let k = 0; k < 3; k++) after.push((await change()).status);
+    assert.deepEqual(after, [200, 200, 200]);
+    assert.equal(standby.seen.length, 1, 'the standby asked no more');
+  } finally {
+    primary.close();
+    standby.close();
+  }
+});
+
 test('a body sent with no length is read up to what is kept for a retry, and refused past it', async () => {
   const stub = await standIn((req, res) => res.end('{}'));
   try {

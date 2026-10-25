@@ -491,9 +491,19 @@ now (`http::write_parts`), and a write that fails on a connection made for
 the request reads what answer has arrived (`answer_waiting`, a peek, then
 the head as any): an answer in before the request went out whole is the
 node's to a request it never read whole, so it ran nothing -- a body past
-what one `writev` takes meets the reset after its first bytes. Not on a
-pooled connection, whose waiting byte may be no answer of this request's
-and whose failure goes on to a fresh one. Either holds the small write
+what one `writev` takes meets the reset after its first bytes. Only a
+status of 400 or more: a fenec node answers a request it has not read
+whole only to refuse it (400, 411, 413, 431, the 503 unserved), never a 2xx
+or a 401, reading the whole body before it asks the token or runs a byte,
+so a 200 there is a peer claiming what it cannot have done and the request
+stays unsent. A failover's cut that meets the head there is a cut of a
+request unsent (`unsent_cut`), its last byte never gone out: counted sent
+whole, an unkeyed write was told 502 that could go to the new primary. Not
+on a pooled connection, whose waiting byte may be no answer of this
+request's and whose failure goes on to a fresh one. A write that fails
+leaves the request's last byte unsent, though not that its call took none
+of its bytes: Linux takes none, and macOS's `dofilewrite` answers EPIPE
+with -1 where part of the call went out. Either holds the small write
 alone: 0 of 30 000 sends failed under that load with one, the other or
 both, and 0 of 40 000 puts through a router with both. A router drops a
 node's `Fenec-Unserved` from what it forwards: the router's own
@@ -505,7 +515,11 @@ router, whatever the request -- it never ran there -- that router not
 noted as the one that answered last, its 503 the answer only where every
 router gives one; taken for any router's answer, a router at its thread
 limit kept every request, where a reset of its connection had sent a read
-on to the standby beside it.
+on to the standby beside it. A standby's 409 refusing a `/_shard/` change
+is passed over the same way, marked `Fenec-Follows`
+([regions.md](regions.md#the-global-entry)): asked after a busy primary
+and taken for the answer, it held every later change of the entry's
+isolate at the standby.
 
 The socket is made non-blocking before the write: the accepting thread is
 every connection's, and a client that reads nothing must not hold it. The

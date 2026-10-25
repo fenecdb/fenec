@@ -2975,7 +2975,8 @@ impl Router {
                 409,
                 "this router follows another: send /_shard/ changes to the primary, \
                  or promote this one (POST /_replication/promote)",
-            );
+            )
+            .header(region::FOLLOWS_HEADER, "1");
         }
         // What regions keeping their own directory change: relayed to the
         // router keeping the directory it touches, or carried out here
