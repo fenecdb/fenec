@@ -46,12 +46,13 @@ integrations/studio-desktop/build/stable-macos-arm64/fenec studio.app
 integrations/studio-desktop/artifacts/macos-arm64-fenecstudio.dmg
 ```
 
-`make studio-desktop STUDIO_SERVER=0.1.11` bundles that release's server
-instead: it downloads `fenec-v0.1.11-<target>.tar.gz` and checks its SHA-256
+`make studio-desktop STUDIO_SERVER=0.1.12` bundles that release's server
+instead: it downloads `fenec-v0.1.12-<target>.tar.gz` and checks its SHA-256
 against the release's own `SHA256SUMS` (the same script, `scripts/get-server.sh
-0.1.11`). Either way a server without `--studio` is refused with a message
-saying so: the first release with `--studio` is 0.1.11, and every release
-before it (up to 0.1.10) has none.
+0.1.12`). Either way a server without the two flags the app starts it with,
+`--studio` and `--exit-on-stdin-close`, is refused with a message saying so:
+the first release with `--studio` is 0.1.11 and the first with both is 0.1.12,
+and every release before them (up to 0.1.10) has neither.
 
 By hand, from this directory:
 
@@ -94,8 +95,8 @@ script says which hashes), which a pull request shows. What Hutch then fetches
    under `node --test` (names, the remote probe against stand-in servers, a
    redirect that must not carry a token, the wording of every failure, the
    token hand-off script run as a page would, the server's environment, what a
-   file is before a server is started on it, the reaper against real processes,
-   the signing switches in `electrobun.config.ts`, the pin, `get-server.sh`
+   file is before a server is started on it, the token hand-off run through
+   the studio's own `connect.js`, the signing switches in `electrobun.config.ts`, the pin, `get-server.sh`
    against a release laid out in a directory).
 2. The **test variant**: the same app built with `FENEC_DESKTOP_TEST_BUILD=1`,
    which adds `src/bun/testhooks.ts` and gives it an identifier of its own
@@ -119,8 +120,8 @@ script says which hashes), which a pull request shows. What Hutch then fetches
    | `warmup` | the first launch of a build (below) |
    | `files` | open, edit through the studio's own form, a second open only shows the window, close stops the server with exit 0, reopen has the edit (also at once, while the first server is still stopping); a file another program holds is a message and **Try again** works once it lets go; a missing file, a folder, a file that is not a database and an empty one are said before any server is started, and nothing is written beside them; a quit right after a close waits for that server, and it ends with exit 0 |
    | `server-dies` | `kill -9` the server under a window: a message, the window closed, **Open again** works |
-   | `orphan` | the app killed: the server outlives it and keeps the lock; the next launch stops it, and the check waits for that to be done |
-   | `sandbox` | only the event bridge in a studio window, no navigating off its origin, links out only as web addresses, to the browser |
+   | `orphan` | the app killed with two files open, one opened after the other: **both servers end by themselves** (the end of their stdin), and both files are free for another program; so the second's start did not carry the first's pipe |
+   | `sandbox` | the session is `window.fenecHost`, frozen, in the page's own world, and in no storage; the studio has no sign-in form and no Sign out; only the event bridge in a studio window, no navigating off its origin, links out only as web addresses, to the browser, one in three seconds |
    | `pages` | the launcher, the new-database window and a notice window cannot be navigated anywhere else (a web page, a file, another of the app's pages): without the rule, the launcher goes to example.com |
    | `storage` | what a window keeps (the studio's history, theme) is its own: two saved servers on one address do not share it, a saved server's survives its window, a file's does not outlive its window, a removed connection's is cleared |
    | `environment` | the server is started with the allowlist and its token, whatever the app was started with (`OTEL_*`, `FENEC_JWT_SECRET`, and the checks' own variables stay out) |
@@ -161,13 +162,12 @@ thing in the list below that has to be looked at with a real certificate.
 
 | | |
 |---|---|
-| `src/bun/server.ts` | **the one place a server is started**: `fenec-server --file F --studio --http 127.0.0.1:0` with a random 32-byte token in `FENEC_HTTP_TOKEN`, found by the `listening on:` line on stderr; SIGTERM when the window closes (sync and checkpoint on the way down), SIGKILL after 30 s; given a few variables (`env.ts`: `HOME`, `PATH`, `TMPDIR`, `LANG`, `LC_*`, `USER`, `LOGNAME`, `TZ`) and nothing else of the app's environment |
-| `src/bun/session.ts` | **the one place a token reaches a page** (below) |
+| `src/bun/server.ts` | **the one place a server is started**: `fenec-server --file F --studio --http 127.0.0.1:0 --exit-on-stdin-close` with a random 32-byte token in `FENEC_HTTP_TOKEN` and **a pipe on its stdin that the app holds for the server's life**, found by the `listening on:` line on stderr, which is read for as long as it runs; SIGTERM when the window closes (sync and checkpoint on the way down), SIGKILL after 30 s; given a few variables (`env.ts`: `HOME`, `PATH`, `TMPDIR`, `LANG`, `LC_*`, `USER`, `LOGNAME`, `TZ`) and nothing else of the app's environment |
+| `src/bun/session.ts` | **the one place a token reaches a page**: the preload that defines `window.fenecHost` (below) |
 | `src/bun/windows.ts` | what a studio window is held to; the notice window; `holdTo`, which holds every window of the app to its address |
 | `src/bun/app.ts` | open a file or a saved server, make a new database, keep the saved list; one window per `file:<real path>` or `remote:<id>`; one open of a thing at a time; what a quit waits for |
 | `src/bun/pages.ts` | the launcher and the new-database window and what they may ask (`src/shared/rpc.ts`) |
 | `src/bun/messages.ts`, `remote.ts`, `names.ts`, `dbfile.ts`, `env.ts` | every failure in words, the probe of a saved server, the check of a new name, what a file is, the server's environment: pure, unit-tested |
-| `src/bun/strays.ts`, `registry.ts` | a server an earlier run of the app left behind (below) |
 | `src/bun/secrets.ts`, `store.ts` | Keychain (`Bun.secrets`) and `state.json` |
 | `src/launcher`, `src/newdb`, `src/notice`, `src/ui` | the app's own pages |
 
@@ -225,11 +225,21 @@ it. So a window that shows one gets:
   its environment (`ps` shows every user's processes' arguments, not their
   environment), and hands the page the same token in its preload.
   For a saved server the token comes from the Keychain. The preload is a user
-  script that runs at document start, before the page's modules, and writes the
-  key the studio already reads (`sessionStorage["fenec-studio"] =
-  {server, token, tenant}`, `studio/connect.js`) **only if `location.origin` is
-  the server's own**; the test runs the script as a page would, with another
-  origin, a lookalike host and a token that tries to break out of the string.
+  script that runs at document start, in the page's own world and before its
+  modules, and defines **`window.fenecHost`**, frozen, with the session
+  `{server, token, tenant}` in it, **only if `location.origin` is the server's
+  own** (site/content/docs/studio.html#host): it runs in every page the window
+  loads, a redirect's or a sign-in page's, and a page of another origin that
+  found `fenecHost` would read the token. The studio takes the session only
+  frozen and naming the origin that served it, **never stores it** (the token
+  is in no storage of the page's), shows no sign-in form and no Sign out (the
+  app holds the connection), and says the app handed it none, without sending
+  anything, if it finds no session. `test/session.test.ts` runs the script as a
+  page would and then asks the studio's own `studio/connect.js` what it makes of
+  it: with another origin, a lookalike host, a token that tries to break out of
+  the string, and an attempt to redefine or change what was handed over;
+  `checks/sandbox.mjs` asks the running window (the preload does run in the
+  page's world: an isolated one would leave the studio with nothing).
 * **No call into the main process from a page a server serves.** A studio
   window is `sandbox: true`: the RPC bridge to Bun is not injected, only the
   event-only `__electrobunSendToHost` a window keeps, which carries a message
@@ -257,13 +267,6 @@ it. So a window that shows one gets:
   reads `OTEL_EXPORTER_OTLP_*` (trace export), `FENEC_JWT_SECRET` and more, and
   an app started from a shell must not hand them to a database it opens.
 
-When `fenec-server` learns to exit when its stdin closes
-(`--exit-on-stdin-close`) and `studio/connect.js` to read a frozen
-`window.fenecHost.session` first, two places change and nothing else:
-`spawnServer` in `server.ts` (the flag, and a stdin pipe the app holds open for
-the server's life) and `sessionPreload` in `session.ts` (define that property
-instead of writing storage). `strays.ts` and `checks/orphan.mjs` then go.
-
 **What is not covered, said as it is:**
 
 * **The Keychain keeps the token from other users and from pages, not from
@@ -278,7 +281,8 @@ instead of writing storage). `strays.ts` and `checks/orphan.mjs` then go.
   memory of the app: the app is as exposed as the Mac it runs on to what
   already runs as its user.
 * The token of a local server lives in the app's and the server's memory and in
-  the page's session storage until the window closes.
+  the page's (`window.fenecHost`, readable by any script of the studio's own
+  page, which is the studio) until the window closes; it is in no storage.
 * A saved server on plain `http://` to another machine sends its token
   unencrypted: the launcher warns where the address is typed.
 * **A page can ask for a link to open in your browser without a click**
@@ -287,17 +291,21 @@ instead of writing storage). `strays.ts` and `checks/orphan.mjs` then go.
   three seconds from a window, so a server's page cannot open tabs without end;
   the page is the studio of a server you chose to open.
 
-### A server the app left behind
+### No server outlives the app
 
-macOS has no parent-death signal, so an app that is killed (not quit) cannot
-stop its servers, and an orphaned server keeps the file's lock. Every server
-the app starts is noted in `servers.json` beside `state.json` at once (not when
-it listens), and the next launch stops the ones still running that are still
-*that* server (its arguments say `--file <that file> --studio`, because a pid
-is reused, after a reboot above all): SIGTERM, a wait for each to be gone,
-SIGKILL after ten seconds, and one that survives even that stays noted for the
-launch after. A quit waits for every server, one being started and one whose
-window closed a moment ago included.
+macOS has no parent-death signal, so a child is not told when its app is
+killed (not quit). But the system closes every descriptor a dead process held,
+and each server's stdin is a pipe the app holds the write end of
+(`--exit-on-stdin-close`, site/content/docs/server.html): the server sees it
+end, **`kill -9` too**, and shuts down as on SIGTERM (sync, checkpoint, its lock
+let go, exit 0) instead of running on holding the file with nobody to answer.
+Nothing is noted on disk and nothing is stopped at the next launch: an earlier
+app's registry and reaper are gone, since no release of this app ever held a
+server that would need them. The write end must stay in the app alone: a child
+that inherited it would keep the server's stdin open after the app was gone
+(`checks/orphan.mjs` opens two files one after the other, kills the app, and
+needs both to end and both files to be free). A quit waits for every server, one
+being started and one whose window closed a moment ago included.
 
 ## What a failure looks like
 
@@ -309,7 +317,8 @@ server's supervision, until someone clicks):
 |---|---|---|
 | the file is open in another program | "This database is open in another program: close it there first; two programs over one file would corrupt it", with what the server said | Try again |
 | the file is not a database, or is empty | said before a server is started; nothing is written beside it | |
-| the server could not start | "Could not open the database", with what it said | Try again |
+| the server could not start | "Could not open the database", with what it said (exit 1) | Try again |
+| the server refuses how the app starts it (exit 2) | "This app's database server is out of step with it": the app and its server were built apart; rebuild | |
 | the server dies under a window | "The database server stopped; nothing written before it stopped is lost", the exit and its last lines | Open again |
 | a saved server is unreachable | "Could not reach the server": nothing is listening, the name does not resolve, no answer in 6 seconds, its certificate is not accepted | Edit connection |
 | it has no studio | "This server has no studio: start it with `--studio`" | |
@@ -348,7 +357,7 @@ main's. **A maintainer sets it up once:**
    | `ELECTROBUN_APPLEAPIKEY_P8` | its `AuthKey_<id>.p8`, base64 |
 
 Without them the `sign` job ends at its first step with a notice. With them,
-Actions, desktop, Run workflow, with a release's tag (`v0.1.11`): the job
+Actions, desktop, Run workflow, with a release's tag (`v0.1.12`): the job
 bundles that release's server (SHA-256 checked), signs and notarizes with the
 certificate in a keychain of its own that only `codesign` and `security` may
 use (and no cache restored in it), holds the result to the same hook check the

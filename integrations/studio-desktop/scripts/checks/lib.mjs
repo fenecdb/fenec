@@ -31,7 +31,7 @@ mkdirSync(`${D}/logs`, { recursive: true });
 export const R = realpathSync(D);
 export const REPORT = `${D}/report.jsonl`;
 export const CONTROL = `${D}/control.jsonl`;
-/** Where the test variant keeps its state.json and servers.json. */
+/** Where the test variant keeps its state.json. */
 export const USER_DATA = join(homedir(), 'Library', 'Application Support', IDENTIFIER, 'stable');
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

@@ -39,7 +39,7 @@ function get(version: string, out: string) {
 }
 
 test("a release's asset is installed once its SHA-256 matches the release's own", () => {
-	release("9.0.1", "usage: fenec-server --file <path> --studio");
+	release("9.0.1", "usage: fenec-server --file <path> --studio --exit-on-stdin-close");
 	const out = join(work, "ok", "fenec-server");
 	const r = get("9.0.1", out);
 	assert.equal(r.status, 0, r.stderr);
@@ -56,7 +56,7 @@ test("a v in front of the version is fine", () => {
 });
 
 test("an asset that is not what the release says is refused, and a server already there is kept", () => {
-	const { dir, asset } = release("9.0.2", "usage: --studio");
+	const { dir, asset } = release("9.0.2", "usage: --studio --exit-on-stdin-close");
 	// The download changed after the sums were made.
 	writeFileSync(join(dir, asset), readFileSync(join(dir, asset)).toString("latin1") + "x", "latin1");
 	const out = join(work, "tampered", "fenec-server");
@@ -70,7 +70,7 @@ test("an asset that is not what the release says is refused, and a server alread
 });
 
 test("a release whose sums do not list the asset is refused", () => {
-	const { dir } = release("9.0.3", "usage: --studio");
+	const { dir } = release("9.0.3", "usage: --studio --exit-on-stdin-close");
 	writeFileSync(join(dir, "SHA256SUMS"), `${"0".repeat(64)}  something-else.tar.gz\n`);
 	const r = get("9.0.3", join(work, "unlisted", "fenec-server"));
 	assert.notEqual(r.status, 0);
@@ -78,12 +78,22 @@ test("a release whose sums do not list the asset is refused", () => {
 });
 
 test("a server without --studio is refused with the way out, and installs nothing", () => {
-	release("9.0.4", "usage: fenec-server --file <path> --http <addr>");
+	release("9.0.4", "usage: fenec-server --file <path> --http <addr> --exit-on-stdin-close");
 	const out = join(work, "old", "fenec-server");
 	const r = get("9.0.4", out);
 	assert.notEqual(r.status, 0);
 	assert.match(r.stderr, /no --studio/);
 	assert.match(r.stderr, /build the one in this checkout/);
+	assert.ok(!existsSync(out));
+});
+
+test("a server with --studio and without --exit-on-stdin-close is refused too: the app could not stop it with its own end", () => {
+	release("9.0.5", "usage: fenec-server --file <path> --studio --http <addr>");
+	const out = join(work, "half", "fenec-server");
+	const r = get("9.0.5", out);
+	assert.notEqual(r.status, 0);
+	assert.match(r.stderr, /no --exit-on-stdin-close/);
+	assert.match(r.stderr, /0\.1\.12/);
 	assert.ok(!existsSync(out));
 });
 

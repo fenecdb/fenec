@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { alreadyHereMessage, diedNotice, emptyFile, heldNotice, missingFile, notADatabase, remoteNotice, startFailedNotice } from "../src/bun/messages.ts";
+import { alreadyHereMessage, diedNotice, emptyFile, heldNotice, missingFile, notADatabase, outOfStepNotice, remoteNotice, startFailedNotice } from "../src/bun/messages.ts";
 import type { Probe } from "../src/bun/remote.ts";
 
 const origin = "https://db.example.com";
@@ -69,6 +69,15 @@ test("a file that is some other kind of file says so, and that nothing was chang
 	const n = startFailedNotice("notes.txt", "could not open /x/notes.txt: corrupt: invalid fenecdb signature");
 	assert.match(n.title, /not a fenecdb database/);
 	assert.match(n.hint ?? "", /Nothing was changed/);
+	assert.equal(n.actions, undefined, "trying again would not help");
+});
+
+test("a server that refuses the app's flags says the app and its server are out of step, and what to do", () => {
+	const n = outOfStepNotice("a.fenec", "unknown option: --exit-on-stdin-close\n\nusage: fenec-server ...");
+	assert.match(n.title, /out of step/);
+	assert.match(n.hint ?? "", /--exit-on-stdin-close/);
+	assert.match(n.hint ?? "", /0\.1\.12/);
+	assert.match(n.detail ?? "", /unknown option/);
 	assert.equal(n.actions, undefined, "trying again would not help");
 });
 

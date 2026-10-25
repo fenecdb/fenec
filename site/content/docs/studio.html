@@ -468,9 +468,11 @@ open "integrations/studio-desktop/build/stable-macos-arm64/fenec studio.app"
 
 <details class="deep"><summary>Details</summary>
 <p>A token is never in a URL or on a command line: a file's server is given
-a random one in its environment, and the window hands it to the studio's own
-session storage only on that server's origin, before any of the page's code
-runs. A studio window cannot call into the app (it has an event bridge that
+a random one in its environment, and the window hands it to the studio as
+<a href="#host"><code>window.fenecHost</code></a>, frozen and never stored,
+only on that server's origin, before any of the page's code runs. A server the
+app started does not outlive it: its stdin is a pipe the app holds, and the
+server stops when it ends, <code>kill -9</code> of the app included. A studio window cannot call into the app (it has an event bridge that
 carries a message one way, and nothing else) and cannot leave its server's
 origin: a link to another site opens in your browser. The Keychain keeps the
 token from other users and from the pages, not from another program of yours:

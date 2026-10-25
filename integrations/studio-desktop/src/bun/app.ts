@@ -19,13 +19,14 @@ import {
 	missingFile,
 	notADatabase,
 	notAFile,
+	outOfStepNotice,
 	remoteNotice,
 	startFailedNotice,
 } from "./messages.ts";
 import { databaseFileName } from "./names.ts";
 import { originOf, probeRemote, tokenMayStay } from "./remote.ts";
 import { secrets } from "./secrets.ts";
-import { AlreadyOpen, startFileServer, type FileServer } from "./server.ts";
+import { AlreadyOpen, StartFailed, startFileServer, type FileServer } from "./server.ts";
 import { store, type StoredConnection } from "./store.ts";
 import { openStudioWindow, showNotice, type StudioWindow } from "./windows.ts";
 
@@ -141,6 +142,11 @@ async function startFile(path: string, key: string): Promise<Result> {
 		if (err instanceof AlreadyOpen) {
 			notify(heldNotice(name, said), (id) => id === "retry" && void openFile(path));
 			return failed(`${name} is open in another program.`);
+		}
+		// Exit 2 is a flag refused: nothing to retry, the server is not this app's.
+		if (err instanceof StartFailed && err.exit === 2) {
+			notify(outOfStepNotice(name, said));
+			return failed(`${name} was not opened: the server is out of step with the app.`);
 		}
 		notify(startFailedNotice(name, said), (id) => id === "retry" && void openFile(path));
 		return failed(`Could not open ${name}.`);

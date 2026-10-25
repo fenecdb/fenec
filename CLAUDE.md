@@ -992,9 +992,11 @@ names against FenecQL's and passes values as parameters.
 **[The desktop app is a window on a studio a `fenec-server` serves, one server per
 file.](docs/design/integrations.md#studio-desktop)** `integrations/studio-desktop`
 (Electrobun, macOS, beta) starts a server in one place (`server.ts`), its
-token in the environment, never argv, and the rest of the environment an
-allowlist; a token reaches a page in one (`session.ts`, written only where
-`location.origin` is the server's). A studio window is `sandbox: true` (the
+token in the environment, never argv, the rest of the environment an
+allowlist, and a pipe on its stdin the app holds (`--exit-on-stdin-close`, so no
+server outlives the app, `kill -9` included); a token reaches a page in one
+(`session.ts`: a frozen `window.fenecHost`, defined only where
+`location.origin` is the server's, never stored). A studio window is `sandbox: true` (the
 event bridge only) and held to its origin, and every window with the RPC
 bridge is held to its own `views://` folder (`holdTo`): a navigation anywhere
 else is refused. A saved server's token is in the Keychain alone, is never

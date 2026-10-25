@@ -25,6 +25,36 @@ assert.deepEqual(globals.value.filter((k) => !SANDBOXED.includes(k)), [], 'nothi
 const rpc = await evalIn(KEY, `return [typeof window.__electrobunBunBridge, typeof window.electrobun, typeof window.__electrobunRpcSocketPort, typeof window.__electrobunSecretKey].join(',')`);
 assert.equal(rpc.value, 'undefined,undefined,undefined,undefined');
 
+step('the session is handed over as the studio asks: window.fenecHost, frozen, in the page\'s own world, and never stored');
+const host = await evalIn(KEY, `
+const d = Object.getOwnPropertyDescriptor(window, 'fenecHost');
+const h = window.fenecHost;
+const buttons = [...document.querySelectorAll('button')].map(b => b.textContent.trim());
+return {
+  defined: !!d,
+  descriptor: d && { writable: d.writable, enumerable: d.enumerable, configurable: d.configurable },
+  frozen: !!h && Object.isFrozen(h) && Object.isFrozen(h.session),
+  server: h && h.session.server,
+  origin: location.origin,
+  tokenLength: h && h.session.token.length,
+  tenant: h && h.session.tenant,
+  sessionStorage: Object.keys(sessionStorage),
+  localStorage: Object.keys(localStorage),
+  signOut: buttons.includes('Sign out'),
+  signIn: /Connect to a fenecdb server/.test(document.body.innerText),
+};`);
+assert.ok(host.ok, host.value);
+assert.equal(host.value.defined, true, 'the preload ran in the same world as the page: the page sees it');
+assert.deepEqual(host.value.descriptor, { writable: false, enumerable: false, configurable: false });
+assert.equal(host.value.frozen, true);
+assert.equal(host.value.server, host.value.origin, 'the origin that served the page');
+assert.equal(host.value.tokenLength, 43, '32 random bytes, base64url');
+assert.equal(host.value.tenant, null);
+assert.deepEqual(host.value.sessionStorage, [], 'the token is not in session storage');
+assert.deepEqual(host.value.localStorage.filter((k) => /token|session|fenec-studio/i.test(k)), [], 'nor local storage');
+assert.equal(host.value.signOut, false, 'under an app the studio has no Sign out: the app holds the connection');
+assert.equal(host.value.signIn, false, 'and no sign-in form');
+
 step("navigating away from the server's origin is refused");
 const m1 = lines().length;
 await evalIn(KEY, `location.href = "https://example.com/"; return 1`);

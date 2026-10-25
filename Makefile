@@ -14,7 +14,7 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 # page whose code declares none.
 FEATURES ?=
 SCHEMA ?= 1
-# `make studio-desktop STUDIO_SERVER=0.1.11`: the server the desktop app bundles
+# `make studio-desktop STUDIO_SERVER=0.1.12`: the server the desktop app bundles
 # is that release's, not built from this checkout. A release's version, and
 # nothing else: make expands `$(shell ...)` in a value given on its command line,
 # so whatever passes one on (desktop.yml's signing job) checks it first, and
@@ -109,7 +109,7 @@ studio-test: wasm
 
 ## fenec studio as a desktop app (beta; macOS on Apple silicon, see
 ## integrations/studio-desktop/README.md): the server it bundles built from this
-## checkout (scripts/get-server.sh; STUDIO_SERVER=0.1.11 downloads that
+## checkout (scripts/get-server.sh; STUDIO_SERVER=0.1.12 downloads that
 ## release's asset instead and checks its SHA-256 against the release's
 ## SHA256SUMS), then the unsigned .app and .dmg, in build/ and artifacts/ there.
 ## The toolchain (Electrobun's Hutch, its Bun and runtime) is fetched into

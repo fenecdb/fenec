@@ -81,6 +81,20 @@ export function startFailedNotice(name: string, serverSaid: string): Notice {
 	};
 }
 
+/**
+ * The server refused how the app starts it (exit 2: a flag it does not know):
+ * the app and its server were built apart. The first release that has both
+ * `--studio` and `--exit-on-stdin-close` is 0.1.12.
+ */
+export function outOfStepNotice(name: string, serverSaid: string): Notice {
+	return {
+		title: "This app's database server is out of step with it",
+		message: `The fenec-server inside this app refused how the app starts it, so ${name} was not opened.`,
+		hint: "The app and its server were built apart. Build the app again (make studio-desktop), with a fenec-server from this checkout or from release 0.1.12 or later, which have --studio and --exit-on-stdin-close.",
+		detail: tail(serverSaid, 4),
+	};
+}
+
 /** The server a window was reading from exited under it. */
 export function diedNotice(name: string, exit: number | null, serverSaid: string): Notice {
 	return {

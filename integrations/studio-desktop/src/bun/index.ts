@@ -15,7 +15,6 @@ import Electrobun, { Utils } from "electrobun/main";
 import { anythingOpen, isQuitting, openFile, serversBusy, stopAll } from "./app.ts";
 import { startMenu } from "./menu.ts";
 import { closeLauncher, showLauncher } from "./pages.ts";
-import { strays } from "./registry.ts";
 
 const started = Date.now();
 /** The launcher was shown because nothing else was opening, not because someone asked for it. */
@@ -61,16 +60,14 @@ for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
 	});
 }
 
-// Servers an earlier run left behind (strays.ts) go before anything opens a
-// file, and this waits until each is gone: the file's lock is theirs till then.
-const stray = await strays.reap();
-if (stray.left.length) console.error("a server of an earlier run would not stop:", JSON.stringify(stray.left));
+// A server this app started does not outlive it: its stdin is a pipe this
+// process holds, and the server stops when it ends (server.ts), so there is
+// nothing from an earlier run to stop before a file is opened.
 startMenu();
 
 let opened = false;
 if (__TESTABLE__) {
 	const hooks = await import("./testhooks.ts");
-	if (stray.reaped.length || stray.left.length) hooks.report("reaped-strays", { strays: stray.reaped, left: stray.left });
 	opened = await hooks.boot();
 }
 // A launch from Finder with a file arrives as `open-url` a moment after the

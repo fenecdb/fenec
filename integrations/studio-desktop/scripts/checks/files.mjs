@@ -22,7 +22,7 @@ log('studio loaded, signed in, orders 50; server pid', started.pid);
 step('an edit through the studio\'s own New row form');
 // What the page runs reaches it as one line: no // comments in it, and every statement ends in a ;.
 // `ask` reads the row back through the server, as the page itself would, with the token it was handed.
-const ASK = `const session = JSON.parse(sessionStorage.getItem('fenec-studio')); const ask = async () => { const r = await fetch('/query', {method: 'POST', headers: {'content-type': 'application/json', authorization: 'Bearer ' + session.token}, body: JSON.stringify({query: 'get orders where customer = $1', params: ['desktop']})}); return r.json(); };`;
+const ASK = `const session = window.fenecHost.session; const ask = async () => { const r = await fetch('/query', {method: 'POST', headers: {'content-type': 'application/json', authorization: 'Bearer ' + session.token}, body: JSON.stringify({query: 'get orders where customer = $1', params: ['desktop']})}); return r.json(); };`;
 const ins = await evalIn(KEY, `${ASK}
 const until = async (f) => { for (let i = 0; i < 200; i++) { const v = await f(); if (v) return v; await new Promise(r => setTimeout(r, 50)); } throw new Error('timed out: ' + document.body.innerText.slice(0, 200)); };
 const btn = t => [...document.querySelectorAll('button')].find(b => b.textContent.trim() === t);

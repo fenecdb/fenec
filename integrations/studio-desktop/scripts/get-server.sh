@@ -4,13 +4,15 @@
 #
 #   scripts/get-server.sh           build it from this checkout
 #                                   (cargo build --release -p fenec-server)
-#   scripts/get-server.sh 0.1.11    download release v0.1.11's asset for this
+#   scripts/get-server.sh 0.1.12    download release v0.1.12's asset for this
 #                                   machine and check its SHA-256 against the
 #                                   release's own SHA256SUMS
 #
-# Either way the server must have --studio, which the app starts it with: a
-# release older than fenec studio has none, and is refused here, not found out
-# by a window that never opens.
+# Either way the server must have the two flags the app starts it with:
+# --studio, and --exit-on-stdin-close, by which it stops when the app that holds
+# the pipe on its stdin is gone, however it ended. A release older than those
+# is refused here, not found out by a window that never opens: the first with
+# --studio is 0.1.11, and the first with both is 0.1.12.
 #
 #   CARGO               the cargo to build with (the Makefile's: ~/.cargo/bin/cargo
 #                       where it exists, which has the wasm32 target the repository's
@@ -54,7 +56,7 @@ if [ -z "$version" ]; then
 else
   # The version goes into a URL and a file name: only what a release is called.
   case "$version" in
-    *[!0-9A-Za-z.-]* | "" | .* | -*) die "\"$version\" is not a release version (0.1.11, or v0.1.11)" ;;
+    *[!0-9A-Za-z.-]* | "" | .* | -*) die "\"$version\" is not a release version (0.1.12, or v0.1.12)" ;;
   esac
   triple=${TARGET_TRIPLE:-}
   if [ -z "$triple" ]; then
@@ -87,7 +89,10 @@ else
 fi
 
 chmod +x "$stage"
-"$stage" --help 2>&1 | grep -q -- '--studio' ||
-  die "this fenec-server has no --studio, which the app starts it with (releases before fenec studio have none): build the one in this checkout with scripts/get-server.sh, or name a release that has it"
+help=$("$stage" --help 2>&1 || true)
+for flag in --studio --exit-on-stdin-close; do
+  printf '%s\n' "$help" | grep -q -- "$flag" ||
+    die "this fenec-server has no $flag, which the app starts it with (the first release with --studio is 0.1.11, and with both flags 0.1.12): build the one in this checkout with scripts/get-server.sh, or name a release that has both"
+done
 mv "$stage" "$out"
 ls -l "$out"

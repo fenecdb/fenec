@@ -1,27 +1,48 @@
 // One fenec-server per open file.
 //
-//   fenec-server --file <path> --studio --http 127.0.0.1:0
+//   fenec-server --file <path> --studio --http 127.0.0.1:0 --exit-on-stdin-close
 //
 // with a random token in FENEC_HTTP_TOKEN (the environment, not argv: `ps`
 // shows argv to every user), found by the `listening on: http://<address>`
 // line on stderr, which is how every harness of the repository finds a server
-// that listens on port 0. On a window's close it gets SIGTERM, which syncs and
-// writes the checkpoint (the HNSW graphs) on the way down.
+// that listens on port 0.
 //
-// `spawnServer` is the one place a server is started. When fenec-server
-// learns to exit when its stdin closes (`--exit-on-stdin-close`), that is
-// where the flag goes and the stdin becomes a pipe this process holds open,
-// and strays.ts goes away.
+// Its stdin is a pipe this process holds open for as long as the server runs
+// (`FileServer.stdin`). A process that is killed sends its children no signal,
+// but the system closes every descriptor it held, so the server sees the pipe
+// end however the app ended -- `kill -9` too -- and shuts down as on SIGTERM:
+// sync, checkpoint, `<file>.lock` let go, exit 0. That is why no server is left
+// holding a file with nobody to answer. On a window's close it is stopped the
+// same way a signal does it: SIGTERM.
+//
+// `spawnServer` is the one place a server is started. Two things about it are
+// not obvious. The pipe's write end must stay in this process alone: a child
+// that inherited it (a descriptor not marked close-on-exec) would hold the
+// server's stdin open after this process has gone, and `checks/orphan.mjs`
+// kills the app with two servers up to see both end. And stderr is read for
+// the server's whole life, since a pipe nobody reads fills, and the server's
+// next log line waits for room.
 
 import { PATHS } from "electrobun/main";
 import { join } from "node:path";
 import { serverEnvironment } from "./env.ts";
-import { strays } from "./registry.ts";
 
 /** The file is open in another process: the server refused its `<file>.lock`. */
 export class AlreadyOpen extends Error {}
-/** The server never said where it listens. */
-export class StartFailed extends Error {}
+/**
+ * The server never said where it listens. `exit` is how it ended, the codes
+ * site/content/docs/server.html lists: 1, it could not start (its file could
+ * not be opened, which a held lock is the usual reason for, and is
+ * AlreadyOpen); 2, a flag was refused -- here, a server that does not know
+ * what the app asks of it. `null`: killed, or never ended in time.
+ */
+export class StartFailed extends Error {
+	exit: number | null;
+	constructor(message: string, exit: number | null) {
+		super(message);
+		this.exit = exit;
+	}
+}
 
 /**
  * The bundled server. Only the test variant lets the environment name another
@@ -42,6 +63,8 @@ function randomToken(): string {
 
 export type FileServer = {
 	file: string;
+	/** The pipe on its stdin, which the server watches for its end; kept so it is not let go while the server runs. */
+	stdin: unknown;
 	origin: string;
 	token: string;
 	pid: number;
@@ -57,9 +80,10 @@ const LISTENING = /listening on: (http:\/\/\S+)/;
 const START_TIMEOUT_MS = 30_000;
 
 function spawnServer(file: string, token: string) {
-	return Bun.spawn([serverBinary(), "--file", file, "--studio", "--http", "127.0.0.1:0"], {
+	return Bun.spawn([serverBinary(), "--file", file, "--studio", "--http", "127.0.0.1:0", "--exit-on-stdin-close"], {
 		env: serverEnvironment(process.env, token),
-		stdin: "ignore",
+		// The server's way to know the app is gone, held by the FileServer for its whole life.
+		stdin: "pipe",
 		stdout: "ignore",
 		stderr: "pipe",
 	});
@@ -68,9 +92,6 @@ function spawnServer(file: string, token: string) {
 export async function startFileServer(file: string): Promise<FileServer> {
 	const token = randomToken();
 	const proc = spawnServer(file, token);
-	// Noted at once, not once it listens: an app killed while a server is
-	// still starting leaves one the next launch has to know of.
-	strays.remember(proc.pid, file);
 	const tail: string[] = [];
 	const note = (line: string) => {
 		tail.push(line);
@@ -99,22 +120,22 @@ export async function startFileServer(file: string): Promise<FileServer> {
 	})();
 
 	const exited = proc.exited.then((code) => code as number | null);
-	void exited.then(() => strays.forget(proc.pid));
 	const timeout = new Promise<"timeout">((r) => setTimeout(() => r("timeout"), START_TIMEOUT_MS));
 	const first = await Promise.race([listening, exited.then(() => "exited" as const), timeout]);
 	if (first === "exited" || first === "timeout") {
 		if (first === "timeout") proc.kill("SIGKILL");
-		await exited;
+		const code = await exited;
 		// The last line it wrote is the reason: the stream's end says it is all here.
 		await reading;
 		const text = tail.join("\n");
 		if (text.includes("it is open already")) throw new AlreadyOpen(text);
-		throw new StartFailed(text || `fenec-server ${first === "timeout" ? "did not start in time" : "exited"}`);
+		throw new StartFailed(text || `fenec-server ${first === "timeout" ? "did not start in time" : "exited"}`, first === "timeout" ? null : code);
 	}
 
 	let stopping: Promise<number | null> | null = null;
 	return {
 		file,
+		stdin: proc.stdin,
 		origin: first,
 		token,
 		pid: proc.pid,

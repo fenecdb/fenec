@@ -130,12 +130,29 @@ checkpoint. A saved server is a window on that server's own studio, same
 origin, so no CORS, its token in the Keychain (`Bun.secrets`, service the app's
 identifier, name `connection:<id>`: Electrobun has no keychain API, and the
 `security` command-line fallback was dropped because `add-generic-password -w`
-puts the secret in argv). The server is started in `server.ts` and a token
-reaches a page in `session.ts`, each the one place, because two changes are
-waiting on them: `--exit-on-stdin-close` (a server whose app was killed sees
-its stdin close, and `strays.ts`, which stops what an earlier run left by the
-arguments of the pid it noted, goes) and a frozen `window.fenecHost.session`
-the studio reads before storage.
+puts the secret in argv). The server is started in `server.ts` and a token reaches a page in
+`session.ts`, each the one place. The server is given `--exit-on-stdin-close`
+and a pipe on its stdin that the app holds for its life: a killed process sends
+its children no signal, but the system closes every descriptor it held, so the
+server sees the pipe end however the app ended and shuts down as on SIGTERM
+(sync, checkpoint, `<file>.lock` let go, exit 0). The first design noted each
+server in a file and stopped the strays at the next launch (SIGTERM, a wait,
+SIGKILL, what survived kept): it went when this passed, and with it the file,
+since no release of the app ever had a server that needed it. The write end must
+stay in the app alone: `checks/orphan.mjs` opens two files one after the other,
+kills the app, and needs both servers to end and both files to be free (a
+descriptor not marked close-on-exec would have the second hold the first's pipe).
+The exit codes (server.html: 0 stopped as asked, 1 could not start, 2 a flag
+refused) are the notices': a held lock is "open in another program", 2 is "out of
+step", the rest "could not open", and `get-server.sh` refuses a server without
+both flags (the first release with `--studio` is 0.1.11, with both 0.1.12). The
+session is a frozen `window.fenecHost` that the studio reads before storage,
+defined by the preload only where `location.origin` is the server's (a preload
+runs in every page the window loads, and a page of another origin that found
+`fenecHost` would read the token) and never stored: `test/session.test.ts` runs
+the script and then the studio's own `connect.js` on what it made,
+`checks/sandbox.mjs` asks the running window (Electrobun's preload runs in the
+page's world: an isolated one would show the studio no session).
 
 The server's environment is an allowlist (`HOME`, `PATH`, `TMPDIR`, `LANG`,
 `LC_*`, `USER`, `LOGNAME`, `TZ`, and the token), not "everything but ours": the
@@ -143,14 +160,11 @@ server reads `OTEL_EXPORTER_OTLP_*` (which turns trace export on) and
 `FENEC_JWT_SECRET`, and an app started from a shell must not hand a database it
 opens whatever that shell exported (`env.ts`; `checks/environment.mjs` starts
 the app with such variables and reads the server's own environment back through
-a wrapper script). A server is noted in `servers.json` the moment it is
-spawned, not when it listens, and a launch stops what an earlier run left by
-SIGTERM, a wait for each to be gone (the event: the file's lock is free),
-SIGKILL after ten seconds, and what survives even that stays noted. A quit waits
-for every server, one being started and one whose window closed a moment ago
-included (`serversBusy`, `stopAll`), and an open of a file waits for that file's
-server to finish stopping: a second server started over the first's checkpoint
-would be refused, and the user told the file is open elsewhere.
+a wrapper script). A quit waits for every server, one being started and one whose
+window closed a moment ago included (`serversBusy`, `stopAll`), and an open of a
+file waits for that file's server to finish stopping: a second server started
+over the first's checkpoint would be refused, and the user told the file is open
+elsewhere.
 
 Windows. A studio window is `sandbox: true` (no call into Bun, only the
 event-only `__electrobunSendToHost`, which `checks/sandbox.mjs` holds to the
@@ -169,9 +183,7 @@ folder (`holdTo`; the constructor's `navigationRules` option did not take in
 and `checks/pages.mjs` fails, as the launcher goes to example.com, if the rule is
 taken away. A `file:` address is not even asked about: WebKit refuses it from a
 page of another scheme. An origin that holds a `*` or a `?` is refused: it is
-the rule's glob. The preload writes `sessionStorage["fenec-studio"]` only where
-`location.origin` is the server's; `test/session.test.ts` runs it as a page
-would, including a token that tries to leave its string. Failures are windows of
+the rule's glob. Failures are windows of
 the app's own (`messages.ts`, a bundled sandboxed page that draws with
 `textContent`), never `Utils.showMessageBox`: that is a synchronous native call
 in an `async` function, so the main process's JavaScript, every server's
