@@ -5,7 +5,10 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 from conftest import TOKEN, URL, fresh
+from fenecdb import FenecError
 
 
 def mine(writes, name):
@@ -53,11 +56,42 @@ def test_a_cursor_moves_only_when_committed(client):
         # Where the writes end: at or past the page's last.
         assert first.seq >= first.next
         assert client.changes(consumer=consumer, wait=1).writes[0] == first.writes[0]
-        client.consumer(consumer, first.next)
+        assert client.move_consumer(consumer, first.next)["since"] == first.next
         listed = {c["name"]: c for c in client.consumers()}
         assert listed[consumer]["since"] == first.next
         # From a cursor it names itself, the stream goes on from there.
         assert client.changes(since=first.next - 1, limit=1).writes[0]["seq"] == first.next
+    finally:
+        client.forget_consumer(consumer)
+        client.query(f"drop collection if exists {name}")
+
+
+def test_a_consumer_made_again_goes_on_from_where_it_stood(client):
+    """A program that makes its consumer each time it starts, as `follow`
+    and the relay do, goes on from where it committed: made again, a
+    consumer stays where it stands, whatever start is asked, and the writes
+    made while the program was stopped come next."""
+    name, consumer = fresh("cdc"), fresh("consumer")
+    client.consumer(consumer)
+    client.query(f"create collection {name} (t text)")
+    try:
+        first = client.changes(consumer=consumer, wait=5)
+        assert client.move_consumer(consumer, first.next)["since"] == first.next
+        client.query(f'put {name} {{t: "while stopped"}}')
+        for start in (None, 0):
+            assert client.consumer(consumer, start)["since"] == first.next
+        # On disk once an fsync covers it: read from where the consumer
+        # stands until it is there.
+        for _ in range(20):
+            got = mine(client.changes(consumer=consumer, wait=5).writes, name)
+            if got:
+                break
+        assert [(w["op"], w["doc"]["t"]) for w in got] == [("put", "while stopped")]
+        # A consumer that is not there is not moved into being.
+        client.forget_consumer(consumer)
+        with pytest.raises(FenecError) as refused:
+            client.move_consumer(consumer, first.next)
+        assert refused.value.status == 404
     finally:
         client.forget_consumer(consumer)
         client.query(f"drop collection if exists {name}")

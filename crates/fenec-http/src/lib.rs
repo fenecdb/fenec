@@ -986,7 +986,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             };
             // A consumer's commit is a tenant's write: asked of the lease
             // again as it is answered, and refused by it 503 to come back.
-            let consumer = matches!(req.method, Method::Post | Method::Delete)
+            let consumer = matches!(req.method, Method::Post | Method::Patch | Method::Delete)
                 && matches!(req.segments().as_slice(), ["_changes", "consumers", _]);
             let resp = match &tenant {
                 Some(t) if consumer => answered_under_lease(t, &req, resp),

@@ -895,6 +895,81 @@ fn a_sweep_on_the_primary_reaches_its_replica() {
     }
 }
 
+/// A consumer's place is a row of `_consumers`, replicated as any write
+/// is: a replica reads from where the primary's consumer stands and makes,
+/// moves or lets go of none -- its consumers are its primary's -- and once
+/// promoted it goes on from that place, its relay making the consumer
+/// again as it starts without moving it.
+#[test]
+fn a_consumer_goes_on_from_its_place_on_a_promoted_replica() {
+    let d = dir("consumer-failover");
+    let p = primary(&d.join("p.fenec"), replication::DEFAULT_BUFFER);
+    let r = replica(&d.join("r.fenec"), p.port);
+    assert_eq!(query(&p, SCHEMA).0, 200);
+    let (status, body) = http(p.port, "POST", "/_changes/consumers/relay", None, "");
+    assert_eq!(status, 201, "{body}");
+    write_some(&p, 0, 2);
+    let (status, head, page) = raw(p.port, "GET", "/_changes?consumer=relay", "", "");
+    assert_eq!(status, 200, "{page}");
+    assert!(page.contains("item 1"), "{page}");
+    let next = header_of(&head, "Fenec-Next").unwrap().to_string();
+    let commit = format!("{{\"since\": {next}}}");
+    let (status, body) = http(p.port, "PATCH", "/_changes/consumers/relay", None, &commit);
+    assert_eq!(status, 200, "{body}");
+    // Written after the commit: what the consumer reads next, wherever.
+    write_some(&p, 2, 2);
+    caught_up(&r, &p);
+
+    // Read from where the consumer stands, until the last write is on the
+    // replica's disk: the stream hands over only what an fsync covered.
+    let unread = |port: u16| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let (status, page) = http(port, "GET", "/_changes?consumer=relay&wait=5000", None, "");
+            assert_eq!(status, 200, "{page}");
+            if page.contains("item 3") {
+                return page;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the writes after the commit never came: {page}"
+            );
+        }
+    };
+    let page = unread(r.port);
+    assert!(
+        page.contains("item 2") && !page.contains("item 1"),
+        "{page}"
+    );
+    for (method, body) in [("POST", ""), ("PATCH", commit.as_str()), ("DELETE", "")] {
+        let (status, answer) = http(r.port, method, "/_changes/consumers/relay", None, body);
+        assert_eq!(status, 403, "{method} on a replica: {answer}");
+    }
+
+    let (status, body) = http(r.port, "POST", "/_replication/promote", Some(TOKEN), "");
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = http(r.port, "POST", "/_changes/consumers/relay", None, "");
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(&format!("\"since\":{next}")), "{body}");
+    let page = unread(r.port);
+    assert!(
+        page.contains("item 2") && !page.contains("item 1"),
+        "{page}"
+    );
+    let (_, head, _) = raw(r.port, "GET", "/_changes?consumer=relay", "", "");
+    let end = header_of(&head, "Fenec-Next").unwrap().to_string();
+    let (status, body) = http(
+        r.port,
+        "PATCH",
+        "/_changes/consumers/relay",
+        None,
+        &format!("{{\"since\": {end}}}"),
+    );
+    assert_eq!(status, 200, "{body}");
+    let (status, page) = http(r.port, "GET", "/_changes?consumer=relay", None, "");
+    assert_eq!((status, page.as_str()), (200, ""));
+}
+
 /// A primary and its replica each compact their file on their own, again
 /// and again, while the primary takes updates: the replica follows across
 /// every one -- the writes made during a compact reach it numbered on --

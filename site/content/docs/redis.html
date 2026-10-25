@@ -672,9 +672,14 @@ server, as a consumer group's last delivered id does:</p>
 
 curl -X POST http://127.0.0.1:8080/_changes/consumers/mailer                  # XGROUP CREATE … $
 curl -i 'http://127.0.0.1:8080/_changes?consumer=mailer&amp;wait=10000'          # XREADGROUP … BLOCK 10000
-# Fenec-Next: 42 -- handle the lines, then XACK up to there:
-curl -X POST http://127.0.0.1:8080/_changes/consumers/mailer -d '{"since": 42}'
+# Fenec-Next: 42 -- handle the lines, then XACK up to there
+# (an earlier since goes back, as XGROUP SETID does):
+curl -X PATCH http://127.0.0.1:8080/_changes/consumers/mailer -d '{"since": 42}'
 </pre>
+
+<p>Unlike <code>XGROUP CREATE</code>, creating a consumer that already
+exists is no error (no <code>BUSYGROUP</code>): it answers 200 and stays
+where it is, so a worker can create its consumer every time it starts.</p>
 
 <ul>
   <li><b>At least once</b> where the server keeps the place: a consumer

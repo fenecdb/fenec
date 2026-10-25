@@ -124,6 +124,45 @@ impl Node {
     fn changes(&self, query: &str) -> Answer {
         self.call(Some(ROOT), "GET", &format!("/_changes?{query}"), "")
     }
+
+    /// `POST /_changes/consumers/<name>`: makes it, or answers where it is.
+    fn make(&self, name: &str, body: &str) -> Answer {
+        self.call(
+            Some(ROOT),
+            "POST",
+            &format!("/_changes/consumers/{name}"),
+            body,
+        )
+    }
+
+    /// `PATCH /_changes/consumers/<name>` to `since`.
+    fn commit(&self, name: &str, since: u64) -> Answer {
+        self.call(
+            Some(ROOT),
+            "PATCH",
+            &format!("/_changes/consumers/{name}"),
+            &format!("{{\"since\": {since}}}"),
+        )
+    }
+
+    /// The `t` of each write `name` reads from where it stands.
+    fn read(&self, name: &str) -> (Vec<Option<String>>, Answer) {
+        let a = self.changes(&format!("consumer={name}"));
+        assert_eq!(a.status, 200, "{}", a.body);
+        (events(&a.body).into_iter().map(|e| e.4).collect(), a)
+    }
+
+    fn seq(&self) -> u64 {
+        self.db.read().unwrap().change_seq()
+    }
+}
+
+/// An answer's `"since"`, as a `POST` or a `PATCH` of a consumer gives it.
+fn since(a: &Answer) -> u64 {
+    field(&a.body, "since")
+        .unwrap_or_else(|| panic!("no since in {}", a.body))
+        .parse()
+        .unwrap()
 }
 
 /// The raw value of `"key":` in a line of JSON the server wrote: a number,
@@ -332,6 +371,22 @@ fn what_is_refused() {
     assert_eq!(n.call(None, "GET", "/_changes", "").status, 401);
     assert_eq!(n.changes("since=x").status, 400);
     assert_eq!(n.call(Some(ROOT), "POST", "/_changes", "").status, 404);
+    // Nor does a scoped token make, move, list or let go of a consumer:
+    // the consumer reads what the stream holds.
+    for (method, path, body) in [
+        ("POST", "/_changes/consumers/idx", ""),
+        ("PATCH", "/_changes/consumers/idx", "{\"since\": 1}"),
+        ("DELETE", "/_changes/consumers/idx", ""),
+        ("GET", "/_changes/consumers", ""),
+        ("GET", "/_changes?consumer=idx", ""),
+    ] {
+        let a = n.call(Some(&scoped), method, path, body);
+        assert_eq!(a.status, 403, "{method} {path}: {}", a.body);
+    }
+    assert_eq!(
+        n.call(Some(ROOT), "GET", "/_changes/consumers", "").body,
+        "[]"
+    );
     // Without a feed there is nothing to read from.
     let plain = start("plain", 0);
     assert_eq!(plain.changes("since=0").status, 409);
@@ -350,11 +405,9 @@ fn a_consumer_reads_from_where_it_committed_and_again_what_it_did_not() {
     n.run("create collection a (t text)");
     // Made first, at the last write on disk; unmade, it is not read.
     assert_eq!(n.changes("consumer=idx").status, 404);
-    assert_eq!(
-        n.call(Some(ROOT), "POST", "/_changes/consumers/idx", "")
-            .status,
-        200
-    );
+    let made = n.make("idx", "");
+    assert_eq!(made.status, 201, "{}", made.body);
+    assert_eq!(since(&made), 1);
     assert_eq!(n.changes("consumer=idx").body, "");
     n.run("put a [{t: \"one\"}, {t: \"two\"}]");
     let first = n.changes("consumer=idx");
@@ -363,13 +416,9 @@ fn a_consumer_reads_from_where_it_committed_and_again_what_it_did_not() {
     // Not committed: read again, as after a crash before the commit.
     assert_eq!(n.changes("consumer=idx").body, first.body);
     let next = first.next.unwrap();
-    let c = n.call(
-        Some(ROOT),
-        "POST",
-        "/_changes/consumers/idx",
-        &format!("{{\"since\": {next}}}"),
-    );
+    let c = n.commit("idx", next);
     assert_eq!(c.status, 200, "{}", c.body);
+    assert_eq!(since(&c), next);
     assert_eq!(n.changes("consumer=idx").body, "");
     n.run("put a {t: \"three\"}");
     let later = n.changes("consumer=idx");
@@ -393,26 +442,12 @@ fn a_consumer_reads_from_where_it_committed_and_again_what_it_did_not() {
     assert_eq!(field(&list.body, "since"), Some(next.to_string().as_str()));
     assert!(field(&list.body, "behind").unwrap().parse::<u64>().unwrap() >= 1);
     // Refused: past the last write on disk, a body without `since`.
-    assert_eq!(
-        n.call(
-            Some(ROOT),
-            "POST",
-            "/_changes/consumers/idx",
-            "{\"since\": 99999}"
-        )
-        .status,
-        409
-    );
-    assert_eq!(
-        n.call(
-            Some(ROOT),
-            "POST",
-            "/_changes/consumers/idx",
-            "{\"since\": \"x\"}"
-        )
-        .status,
-        400
-    );
+    assert_eq!(n.commit("idx", 99999).status, 409);
+    for body in ["{\"since\": \"x\"}", "{\"since\": -1}", "{}", ""] {
+        let a = n.call(Some(ROOT), "PATCH", "/_changes/consumers/idx", body);
+        assert_eq!(a.status, 400, "{body}: {}", a.body);
+    }
+    assert_eq!(n.make("idx", "{\"since\": \"x\"}").status, 400);
     // Let go of, it is unseen again.
     assert_eq!(
         n.call(Some(ROOT), "DELETE", "/_changes/consumers/idx", "")
@@ -443,16 +478,16 @@ fn a_consumer_s_commit_marked_as_a_read_is_refused() {
         made.body
     );
     assert_eq!(n.changes("consumer=idx").status, 404, "nothing was made");
-    assert_eq!(
-        n.call(Some(ROOT), "POST", "/_changes/consumers/idx", "")
-            .status,
-        200
-    );
+    assert_eq!(n.make("idx", "").status, 201);
+    // Made already, a marked make writes nothing, and is refused all the
+    // same: it is a write's route.
+    let again = n.call_with(Some(ROOT), "POST", "/_changes/consumers/idx", "", marked);
+    assert_eq!(again.status, 403, "{}", again.body);
     n.run("put a {t: \"one\"}");
     let next = n.changes("consumer=idx").next.unwrap();
     let c = n.call_with(
         Some(ROOT),
-        "POST",
+        "PATCH",
         "/_changes/consumers/idx",
         &format!("{{\"since\": {next}}}"),
         marked,
@@ -475,17 +510,12 @@ fn a_consumer_s_commit_marked_as_a_read_is_refused() {
 fn a_sink_that_commits_every_answer_stays_idle() {
     let n = start("idle", replication::DEFAULT_BUFFER);
     n.run("create collection a (t text)");
-    let made = n.call(Some(ROOT), "POST", "/_changes/consumers/sink", "");
-    assert_eq!(made.status, 200, "{}", made.body);
+    let made = n.make("sink", "");
+    assert_eq!(made.status, 201, "{}", made.body);
     n.run("put a {t: \"one\"}");
-    let seq = || n.db.read().unwrap().change_seq();
+    let seq = || n.seq();
     let commit = |next: u64| {
-        let c = n.call(
-            Some(ROOT),
-            "POST",
-            "/_changes/consumers/sink",
-            &format!("{{\"since\": {next}}}"),
-        );
+        let c = n.commit("sink", next);
         assert_eq!(c.status, 200, "{}", c.body);
     };
     let first = n.changes("consumer=sink&wait=5000");
@@ -543,27 +573,148 @@ fn a_consumers_cursor_is_on_disk_before_it_is_answered() {
     };
     n.run("create collection a (t text)");
     n.run("put a {t: \"x\"}");
-    let c = n.call(None, "POST", "/_changes/consumers/idx", "{\"since\": 2}");
-    assert_eq!(c.status, 200, "{}", c.body);
-    // What the file holds now, read as a tool that only looks reads it.
-    let on_disk = fenec_core::fs::open_read_only(path.to_str().unwrap()).unwrap();
-    let rows = on_disk
-        .query(
-            &fenec_ql::parse_one("get _consumers select name, since").unwrap(),
-            &[],
-        )
-        .unwrap();
-    let fenec_core::query::Response::Rows(rs) = rows else {
-        panic!()
+    // What the file holds, read as a tool that only looks reads it.
+    let on_disk = || {
+        let db = fenec_core::fs::open_read_only(path.to_str().unwrap()).unwrap();
+        let rows = db
+            .query(
+                &fenec_ql::parse_one("get _consumers select name, since").unwrap(),
+                &[],
+            )
+            .unwrap();
+        let fenec_core::query::Response::Rows(rs) = rows else {
+            panic!()
+        };
+        rs.rows.into_iter().map(|r| r.values).collect::<Vec<_>>()
     };
-    assert_eq!(rs.rows.len(), 1);
-    assert_eq!(
-        rs.rows[0].values,
-        [
+    let row = |since| {
+        vec![
             fenec_core::value::Value::Text("idx".into()),
-            fenec_core::value::Value::Int(2)
+            fenec_core::value::Value::Int(since),
         ]
+    };
+    let c = n.call(None, "POST", "/_changes/consumers/idx", "{\"since\": 1}");
+    assert_eq!(c.status, 201, "{}", c.body);
+    assert_eq!(on_disk(), [row(1)]);
+    let c = n.call(None, "PATCH", "/_changes/consumers/idx", "{\"since\": 2}");
+    assert_eq!(c.status, 200, "{}", c.body);
+    assert_eq!(on_disk(), [row(2)]);
+}
+
+/// A relay or a follower makes its consumer each time it starts. Made
+/// again, the consumer stays where it was committed -- whatever start the
+/// `POST` names, which is a new consumer's -- and reads the writes made
+/// while its relay was stopped. A `POST` of one that was there moved it to
+/// the last write on disk, and the relay skipped every one of them.
+#[test]
+fn a_consumer_made_again_stays_where_it_was_and_reads_what_came_between() {
+    let n = start("made-again", replication::DEFAULT_BUFFER);
+    n.run("create collection a (t text)");
+    let made = n.make("relay", "");
+    assert_eq!(made.status, 201, "{}", made.body);
+    n.run("put a {t: \"one\"}");
+    let (seen, first) = n.read("relay");
+    assert_eq!(seen, [Some("one".into())]);
+    let committed = first.next.unwrap();
+    assert_eq!(n.commit("relay", committed).status, 200);
+
+    // The relay is stopped; writes go on.
+    n.run("put a [{t: \"two\"}, {t: \"three\"}]");
+    let before = n.seq();
+    // It starts again, and makes its consumer as it did the first time --
+    // with no body, with `{}`, and asking for the first write: each a
+    // start for a consumer not there, none a move of this one.
+    for body in [
+        "",
+        "{}",
+        "{\"since\": null}",
+        "{\"since\": 0}",
+        "{\"since\": 1}",
+    ] {
+        let again = n.make("relay", body);
+        assert_eq!(again.status, 200, "{body}: {}", again.body);
+        assert_eq!(since(&again), committed, "{body}");
+    }
+    assert_eq!(n.seq(), before, "a consumer made again wrote nothing");
+    let (seen, between) = n.read("relay");
+    assert_eq!(seen, [Some("two".into()), Some("three".into())]);
+    let list = n.call(Some(ROOT), "GET", "/_changes/consumers", "");
+    assert_eq!(
+        field(&list.body, "since"),
+        Some(committed.to_string().as_str())
     );
+    assert_eq!(n.commit("relay", between.next.unwrap()).status, 200);
+    assert_eq!(n.read("relay").0, Vec::<Option<String>>::new());
+
+    // Past the last write on disk, a start is refused whether or not the
+    // consumer is there: it is another database's cursor, or this one's
+    // before a restore.
+    assert_eq!(n.make("relay", "{\"since\": 99999}").status, 409);
+    assert_eq!(n.make("other", "{\"since\": 99999}").status, 409);
+    assert_eq!(n.changes("consumer=other").status, 404);
+}
+
+/// A consumer moves by a `PATCH` alone: on, once it has done with what it
+/// read, or back, to read again. A `POST` naming a start makes a consumer
+/// there; a `PATCH` makes none, even one let go a moment before.
+#[test]
+fn a_patch_moves_a_consumer_and_a_post_makes_one_where_it_says() {
+    let n = start("moved", replication::DEFAULT_BUFFER);
+    n.run("create collection a (t text)");
+    assert_eq!(n.commit("idx", 1).status, 404);
+    assert_eq!(n.changes("consumer=idx").status, 404, "a PATCH made none");
+    // Made at the first write: every write is read.
+    let made = n.make("idx", "{\"since\": 0}");
+    assert_eq!((made.status, since(&made)), (201, 0), "{}", made.body);
+    n.run("put a [{t: \"one\"}, {t: \"two\"}]");
+    let (seen, all) = n.read("idx");
+    assert_eq!(seen, [None, Some("one".into()), Some("two".into())]);
+    let end = all.next.unwrap();
+    assert_eq!(since(&n.commit("idx", end)), end);
+    assert!(n.read("idx").0.is_empty());
+    // Back to after the create: read again from there.
+    let back = n.commit("idx", 1);
+    assert_eq!((back.status, since(&back)), (200, 1), "{}", back.body);
+    assert_eq!(n.read("idx").0, [Some("one".into()), Some("two".into())]);
+    // Let go of, it is not moved back into being.
+    assert_eq!(
+        n.call(Some(ROOT), "DELETE", "/_changes/consumers/idx", "")
+            .status,
+        204
+    );
+    assert_eq!(n.commit("idx", end).status, 404);
+    assert_eq!(n.changes("consumer=idx").status, 404);
+}
+
+/// A consumer further behind than the feed keeps is answered 410 with the
+/// first `since` it does, as a cursor is, and a `PATCH` there goes on from
+/// it. Made again in between, it stays as far behind: moved to the last
+/// write on disk, it would have been answered as if nothing were missing.
+#[test]
+fn a_consumer_behind_the_feed_is_told_so_and_moves_on_by_a_patch() {
+    let n = start("consumer-behind", 4096);
+    n.run("create collection a (t text)");
+    assert_eq!(n.make("idx", "{\"since\": 1}").status, 201);
+    for i in 0..200 {
+        n.run(&format!("put a {{t: \"{}\"}}", "x".repeat(40 + i % 7)));
+    }
+    let last = n.seq();
+    let old = n.changes("consumer=idx");
+    assert_eq!(old.status, 410, "{}", old.body);
+    let from: u64 = field(&old.body, "since").unwrap().parse().unwrap();
+    assert!(from > 1 && from < last, "{from}");
+    let again = n.make("idx", "");
+    assert_eq!((again.status, since(&again)), (200, 1), "{}", again.body);
+    assert_eq!(n.changes("consumer=idx").status, 410);
+    // A few writes on from the first the feed holds: the commit is a write
+    // of its own, which may push that one out of a feed this small.
+    let on = from + 3;
+    assert_eq!(n.commit("idx", on).status, 200);
+    let a = n.changes("consumer=idx&limit=10000");
+    assert_eq!(a.status, 200, "{}", a.body);
+    let got = events(&a.body);
+    assert_eq!(got.first().map(|e| e.0), Some(on + 1));
+    assert_eq!(got.last().map(|e| e.0), Some(last));
 }
 
 /// The sweep's deletes of rows past their time (`@ttl`) are ordinary
