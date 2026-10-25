@@ -681,9 +681,6 @@ code:not(.code code) {
 /* =================================================================== tables */
 
 .tbl { margin: 26px 0; overflow-x: auto; }
-/* A table of code side by side: a call is read whole, so it never breaks
-   inside a word; the table scrolls sideways instead. */
-.tbl.code-grid td code { white-space: nowrap; word-break: normal; }
 /* A table of flags: the flag is read whole, never broken inside its name, and
    on a phone it sits over what it does rather than beside it. */
 .tbl.flags td:first-child code { white-space: nowrap; word-break: normal; }

@@ -1,10 +1,10 @@
 // Written by site/builder_tabs.py (make docs-builder): do not edit.
 
-// The code of each builder tab on the site's FenecQL pages, as the page
-// shows it, run against a transport that records and held to the statement
-// its case of integrations/builder-golden.json makes: a tab shows code this
-// SDK runs. make docs-builder writes the file again as the pages' tabs
-// change, and site/builder_tabs.py --check fails while it is behind them.
+// The code of each builder tab on the site, as the page shows it, run
+// against a transport that records and held to the statement its case of
+// integrations/builder-golden.json makes: a tab shows code this SDK runs.
+// make docs-builder writes the file again as the pages' tabs change, and
+// site/builder_tabs.py --check fails while it is behind them.
 
 package com.fenecdb
 
@@ -202,6 +202,68 @@ class DocsBuilderTest {
         db.sends("get articles where published >= \$1 near embed \$2 limit \$3", "[\"2026-01-01\", [0.9, 0.1, 0], 10]")
     }
 
+    /** docs: an owner's newest posts */
+    @Test
+    fun anOwnerSNewestPosts() = runBlocking {
+        val db = Recording()
+        db.from("posts")
+            .where("owner", 7)
+            .order("created", "desc")
+            .limit(20)
+            .rows()
+        db.sends("get posts where owner = \$1 order created desc limit \$2", "[7, 20]")
+    }
+
+    /** docs: three owners' newest posts */
+    @Test
+    fun threeOwnersNewestPosts() = runBlocking {
+        val db = Recording()
+        db.from("posts")
+            .where("owner", "in", listOf(7, 8, 9))
+            .order("created", "desc")
+            .limit(20)
+            .rows()
+        db.sends("get posts where owner in [\$1, \$2, \$3] order created desc limit \$4", "[7, 8, 9, 20]")
+    }
+
+    /** docs: an owner's posts counted since a time */
+    @Test
+    fun anOwnerSPostsCountedSinceATime() = runBlocking {
+        val db = Recording()
+        db.from("posts")
+            .where("owner", 7)
+            .where("created", ">=", "2026-10-01")
+            .count()
+        db.sends("get posts where owner = \$1 and created >= \$2 count", "[7, \"2026-10-01\"]")
+    }
+
+    /** docs: a session seen */
+    @Test
+    fun aSessionSeen() = runBlocking {
+        val db = Recording()
+        db.from("sessions")
+            .insert(mapOf("user" to "ada", "seen" to Computed.expr("now()")))
+        db.sends("put sessions {user: \$1, seen: now()}", "[\"ada\"]")
+    }
+
+    /** docs: a session seen again */
+    @Test
+    fun aSessionSeenAgain() = runBlocking {
+        val db = Recording()
+        db.from("sessions")
+            .where("user", "ada")
+            .update(mapOf("seen" to Computed.expr("now()")))
+        db.sends("set sessions {seen: now()} where user = \$1", "[\"ada\"]")
+    }
+
+    /** docs: a user's sessions */
+    @Test
+    fun aUserSSessions() = runBlocking {
+        val db = Recording()
+        db.from("sessions").where("user", "ada").rows()
+        db.sends("get sessions where user = \$1", "[\"ada\"]")
+    }
+
     /** docs: products with their newest reviews */
     @Test
     fun productsWithTheirNewestReviews() = runBlocking {
@@ -218,6 +280,40 @@ class DocsBuilderTest {
         db.sends("get products limit \$1 lookup reviews on product_id order created desc limit \$2", "[20, 3]")
     }
 
+    /** docs: products with their reviews */
+    @Test
+    fun productsWithTheirReviews() = runBlocking {
+        val db = Recording()
+        db.from("products").lookup("reviews", on = "product_id").rows()
+        db.sends("get products lookup reviews on product_id", "[]")
+    }
+
+    /** docs: the names of dear products with their good reviews */
+    @Test
+    fun theNamesOfDearProductsWithTheirGoodReviews() = runBlocking {
+        val db = Recording()
+        db.from("products")
+            .select("name")
+            .where("price", ">=", 10000)
+            .lookup(
+                "reviews",
+                on = "product_id",
+                select = listOf("body"),
+                where = Cond.cmp("stars", "gte", 4),
+                limit = 3
+            )
+            .rows()
+        db.sends("get products select name where price >= \$1 lookup reviews on product_id select body where stars >= \$2 limit \$3", "[10000, 4, 3]")
+    }
+
+    /** docs: products with their tags by sku */
+    @Test
+    fun productsWithTheirTagsBySku() = runBlocking {
+        val db = Recording()
+        db.from("products").lookup("tags", on = "sku", parentKey = "sku").rows()
+        db.sends("get products lookup tags on sku = sku", "[]")
+    }
+
     /** docs: shops, their orders and the orders' lines */
     @Test
     fun shopsTheirOrdersAndTheOrdersLines() = runBlocking {
@@ -228,6 +324,93 @@ class DocsBuilderTest {
             .lookup("lines", on = "order_id", limit = 5)
             .rows()
         db.sends("get shops limit \$1 lookup orders on shop_id limit \$2 lookup lines on order_id limit \$3", "[20, 3, 5]")
+    }
+
+    /** docs: orders with their lines by a key of two fields */
+    @Test
+    fun ordersWithTheirLinesByAKeyOfTwoFields() = runBlocking {
+        val db = Recording()
+        db.from("orders")
+            .where("org", 7)
+            .limit(20)
+            .lookup(
+                "lines",
+                on = listOf("org", "order"),
+                parentKey = listOf("org", "id"),
+                order = listOf(SortKey("line")),
+                limit = 5
+            )
+            .rows()
+        db.sends("get orders where org = \$1 limit \$2 lookup lines on (org, order) = (org, id) order line asc limit \$3", "[7, 20, 5]")
+    }
+
+    /** docs: shops with their orders folded */
+    @Test
+    fun shopsWithTheirOrdersFolded() = runBlocking {
+        val db = Recording()
+        db.from("shops")
+            .limit(20)
+            .lookup(
+                "orders",
+                on = "shop",
+                select = listOf(Computed.expr("count(*)").alias("n"), Computed.expr("sum(total)").alias("revenue"))
+            )
+            .rows()
+        db.sends("get shops limit \$1 lookup orders on shop select count(*) as n, sum(total) as revenue", "[20]")
+    }
+
+    /** docs: couriers with their latest fifty deliveries folded */
+    @Test
+    fun couriersWithTheirLatestFiftyDeliveriesFolded() = runBlocking {
+        val db = Recording()
+        db.from("couriers")
+            .limit(20)
+            .lookup(
+                "deliveries",
+                on = "courier",
+                select = listOf(Computed.expr("count(*)").alias("n"), Computed.expr("avg(km)").alias("km")),
+                order = listOf(SortKey("at", "desc")),
+                limit = 50
+            )
+            .rows()
+        db.sends("get couriers limit \$1 lookup deliveries on courier select count(*) as n, avg(km) as km order at desc limit \$2", "[20, 50]")
+    }
+
+    /** docs: each shop's three best sellers */
+    @Test
+    fun eachShopSThreeBestSellers() = runBlocking {
+        val db = Recording()
+        db.from("shops")
+            .lookup(
+                "lines",
+                on = "shop",
+                select = listOf("product", Computed.expr("sum(qty)").alias("sold")),
+                group = listOf("product"),
+                order = listOf(SortKey("sold", "desc")),
+                limit = 3
+            )
+            .rows()
+        db.sends("get shops lookup lines on shop select product, sum(qty) as sold group product order sold desc limit \$1", "[3]")
+    }
+
+    /** docs: the busiest couriers with their names */
+    @Test
+    fun theBusiestCouriersWithTheirNames() = runBlocking {
+        val db = Recording()
+        db.from("orders")
+            .select("courier", Computed.expr("count(*)").alias("n"))
+            .where("at", ">=", "2026-10-01")
+            .group("courier")
+            .order("n", "desc")
+            .limit(10)
+            .lookup(
+                "couriers",
+                on = "user",
+                parentKey = "courier",
+                select = listOf("name")
+            )
+            .rows()
+        db.sends("get orders select courier, count(*) as n where at >= \$1 group courier order n desc limit \$2 lookup couriers on user = courier select name", "[\"2026-10-01\", 10]")
     }
 
     /** docs: products with a five-star review */
@@ -261,12 +444,248 @@ class DocsBuilderTest {
         db.sends("get products count lookup reviews on product_id required where stars = \$1", "[5]")
     }
 
+    /** docs: articles a page at a time */
+    @Test
+    fun articlesAPageAtATime() = runBlocking {
+        val db = Recording()
+        db.from("articles")
+            .where("year", 2024)
+            .order("published", "desc")
+            .limit(20)
+            .offset(40)
+            .rows()
+        db.sends("get articles where year = \$1 order published desc limit \$2 offset \$3", "[2024, 20, 40]")
+    }
+
+    /** docs: a page of matches with its brands counted */
+    @Test
+    fun aPageOfMatchesWithItsBrandsCounted() = runBlocking {
+        val db = Recording()
+        db.from("products")
+            .match("title", "tent")
+            .limit(20)
+            .facet("brand", top = 10)
+            .rows()
+        db.sends("get products match title \$1 limit \$2 facet brand top \$3", "[\"tent\", 20, 10]")
+    }
+
+    /** docs: ready jobs claimed a page at a time */
+    @Test
+    fun readyJobsClaimedAPageAtATime() = runBlocking {
+        val db = Recording()
+        db.from("jobs")
+            .where(Cond.raw("run_at <= now()"))
+            .order("run_at")
+            .limit(10)
+            .updateReturning(mapOf("owner" to "w1"))
+        db.sends("set jobs {owner: \$1} where run_at <= now() order run_at asc limit \$2 returning *", "[\"w1\", 10]")
+    }
+
+    /** docs: a column worked out */
+    @Test
+    fun aColumnWorkedOut() = runBlocking {
+        val db = Recording()
+        db.from("ticks")
+            .select("sym", Computed.expr("px * qty").alias("notional"))
+            .where("qty", ">", 100)
+            .rows()
+        db.sends("get ticks select sym, px * qty as notional where qty > \$1", "[100]")
+    }
+
+    /** docs: columns named and worked out */
+    @Test
+    fun columnsNamedAndWorkedOut() = runBlocking {
+        val db = Recording()
+        db.from("ticks")
+            .select(
+                Computed.expr("px").alias("price"),
+                Computed.bucket("at", "1m").alias("minute"),
+                Computed.expr("greatest(px, ?)", 100).alias("floor")
+            )
+            .rows()
+        db.sends("get ticks select px as price, bucket(at, 1m) as minute, greatest(px, \$1) as floor", "[100]")
+    }
+
+    /** docs: a column of a case */
+    @Test
+    fun aColumnOfACase() = runBlocking {
+        val db = Recording()
+        db.from("orders")
+            .select(
+                "id",
+                Computed.expr("case when total >= ? then ? else ? end", 100, "large", "small").alias("size")
+            )
+            .rows()
+        db.sends("get orders select id, case when total >= \$1 then \$2 else \$3 end as size", "[100, \"large\", \"small\"]")
+    }
+
     /** docs: articles counted since a year */
     @Test
     fun articlesCountedSinceAYear() = runBlocking {
         val db = Recording()
         db.from("articles").where("year", ">=", 2024).count()
         db.sends("get articles where year >= \$1 count", "[2024]")
+    }
+
+    /** docs: a document with a json field */
+    @Test
+    fun aDocumentWithAJsonField() = runBlocking {
+        val db = Recording()
+        db.from("docs")
+            .insert(mapOf("title" to "a", "meta" to mapOf("lang" to "tr", "source" to mapOf("site" to "x", "rank" to 3))))
+        db.sends("put docs {title: \$1, meta: \$2}", "[\"a\", {\"lang\": \"tr\", \"source\": {\"site\": \"x\", \"rank\": 3}}]")
+    }
+
+    /** docs: documents by paths */
+    @Test
+    fun documentsByPaths() = runBlocking {
+        val db = Recording()
+        db.from("docs")
+            .where("meta.lang", "tr")
+            .where("meta.source.rank", ">=", 2)
+            .rows()
+        db.sends("get docs where meta.lang = \$1 and meta.source.rank >= \$2", "[\"tr\", 2]")
+    }
+
+    /** docs: a path selected and ordered by */
+    @Test
+    fun aPathSelectedAndOrderedBy() = runBlocking {
+        val db = Recording()
+        db.from("docs")
+            .select("title", "meta.source.site")
+            .order("meta.source.rank", "desc")
+            .rows()
+        db.sends("get docs select title, meta.source.site order meta.source.rank desc", "[]")
+    }
+
+    /** docs: a path set */
+    @Test
+    fun aPathSet() = runBlocking {
+        val db = Recording()
+        db.from("docs").where("title", "a").update(mapOf("meta.lang" to "en"))
+        db.sends("set docs {meta.lang: \$1} where title = \$2", "[\"en\", \"a\"]")
+    }
+
+    /** docs: an event at a time written out */
+    @Test
+    fun anEventAtATimeWrittenOut() = runBlocking {
+        val db = Recording()
+        db.from("events")
+            .insert(mapOf("name" to "login", "t" to "2026-09-19T12:34:56Z"))
+        db.sends("put events {name: \$1, t: \$2}", "[\"login\", \"2026-09-19T12:34:56Z\"]")
+    }
+
+    /** docs: an event at epoch milliseconds */
+    @Test
+    fun anEventAtEpochMilliseconds() = runBlocking {
+        val db = Recording()
+        db.from("events")
+            .insert(mapOf("name" to "logout", "t" to 1758285296000))
+        db.sends("put events {name: \$1, t: \$2}", "[\"logout\", 1758285296000]")
+    }
+
+    /** docs: events between a day and now */
+    @Test
+    fun eventsBetweenADayAndNow() = runBlocking {
+        val db = Recording()
+        db.from("events")
+            .where("t", ">=", "2026-01-01")
+            .where(Cond.raw("t < now()"))
+            .rows()
+        db.sends("get events where t >= \$1 and t < now()", "[\"2026-01-01\"]")
+    }
+
+    /** docs: people in the root collation */
+    @Test
+    fun peopleInTheRootCollation() = runBlocking {
+        val db = Recording()
+        db.from("people").order("name", "asc", collate = "und").limit(20).rows()
+        db.sends("get people order name collate und asc limit \$1", "[20]")
+    }
+
+    /** docs: people in Turkish order */
+    @Test
+    fun peopleInTurkishOrder() = runBlocking {
+        val db = Recording()
+        db.from("people")
+            .order("city", "desc", collate = "tr")
+            .order("name", "asc", collate = "tr")
+            .rows()
+        db.sends("get people order city collate tr desc, name collate tr asc", "[]")
+    }
+
+    /** docs: people counted by city in order */
+    @Test
+    fun peopleCountedByCityInOrder() = runBlocking {
+        val db = Recording()
+        db.from("people")
+            .select("city", "count(*)")
+            .group("city")
+            .order("city", "asc", collate = "und")
+            .rows()
+        db.sends("get people select city, count(*) group city order city collate und asc", "[]")
+    }
+
+    /** docs: the page of people after a name */
+    @Test
+    fun thePageOfPeopleAfterAName() = runBlocking {
+        val db = Recording()
+        db.from("people")
+            .where("name", ">", "Ada")
+            .order("name")
+            .limit(20)
+            .rows()
+        db.sends("get people where name > \$1 order name asc limit \$2", "[\"Ada\", 20]")
+    }
+
+    /** docs: a user */
+    @Test
+    fun aUser() = runBlocking {
+        val db = Recording()
+        db.from("users")
+            .insert(mapOf("email" to "Alice@Example.com", "name" to "İsmail"))
+        db.sends("put users {email: \$1, name: \$2}", "[\"Alice@Example.com\", \"İsmail\"]")
+    }
+
+    /** docs: a user by an email in any case */
+    @Test
+    fun aUserByAnEmailInAnyCase() = runBlocking {
+        val db = Recording()
+        db.from("users").where("email", "alice@example.COM").rows()
+        db.sends("get users where email = \$1", "[\"alice@example.COM\"]")
+    }
+
+    /** docs: a user whose email is taken */
+    @Test
+    fun aUserWhoseEmailIsTaken() = runBlocking {
+        val db = Recording()
+        db.from("users").insert(mapOf("email" to "ALICE@example.com"))
+        db.sends("put users {email: \$1}", "[\"ALICE@example.com\"]")
+    }
+
+    /** docs: a user unless the email is taken */
+    @Test
+    fun aUserUnlessTheEmailIsTaken() = runBlocking {
+        val db = Recording()
+        db.from("users")
+            .insert(mapOf("email" to "alice@example.com"), ifAbsent = true)
+        db.sends("put users {email: \$1} if absent", "[\"alice@example.com\"]")
+    }
+
+    /** docs: a user by a name in any case */
+    @Test
+    fun aUserByANameInAnyCase() = runBlocking {
+        val db = Recording()
+        db.from("users").where("name", "ismail").rows()
+        db.sends("get users where name = \$1", "[\"ismail\"]")
+    }
+
+    /** docs: users in Turkish order */
+    @Test
+    fun usersInTurkishOrder() = runBlocking {
+        val db = Recording()
+        db.from("users").select("name").order("name").limit(20).rows()
+        db.sends("get users select name order name asc limit \$1", "[20]")
     }
 
     /** docs: articles matching words */
@@ -351,6 +770,66 @@ class DocsBuilderTest {
             .limit(10)
             .rows()
         db.sends("get articles select title, snippet(body, 20, \$1, \$2, \$3) match body \$4 limit \$5", "[\"…\", \"<b>\", \"</b>\", \"ownership\", 10]")
+    }
+
+    /** docs: a page of products with brands and colours counted */
+    @Test
+    fun aPageOfProductsWithBrandsAndColoursCounted() = runBlocking {
+        val db = Recording()
+        db.from("products")
+            .where("price", "<", 500)
+            .limit(20)
+            .facet("brand")
+            .facet("color")
+            .rows()
+        db.sends("get products where price < \$1 limit \$2 facet brand, color", "[500, 20]")
+    }
+
+    /** docs: a page of matches with brands and tags counted */
+    @Test
+    fun aPageOfMatchesWithBrandsAndTagsCounted() = runBlocking {
+        val db = Recording()
+        db.from("products")
+            .where("price", "<", 500)
+            .match("title", "tent")
+            .limit(20)
+            .facet("brand", top = 10)
+            .facet("tags")
+            .rows()
+        db.sends("get products where price < \$1 match title \$2 limit \$3 facet brand top \$4, tags", "[500, \"tent\", 20, 10]")
+    }
+
+    /** docs: phones counted by brand */
+    @Test
+    fun phonesCountedByBrand() = runBlocking {
+        val db = Recording()
+        db.from("products").where("category", "phones").facet("brand").count()
+        db.sends("get products where category = \$1 count facet brand", "[\"phones\"]")
+    }
+
+    /** docs: products counted by origin alone */
+    @Test
+    fun productsCountedByOriginAlone() = runBlocking {
+        val db = Recording()
+        db.from("products").limit(0).facet("meta.origin", top = 5).rows()
+        db.sends("get products limit \$1 facet meta.origin top \$2", "[0, 5]")
+    }
+
+    /** docs: red tents of two brands with their facets */
+    @Test
+    fun redTentsOfTwoBrandsWithTheirFacets() = runBlocking {
+        val db = Recording()
+        db.from("products")
+            .where("category", "tents")
+            .where("brand", "in", listOf("acme", "nova"))
+            .where("color", "red")
+            .order("price")
+            .limit(24)
+            .facet("brand", disjunctive = true)
+            .facet("color", disjunctive = true)
+            .facet("material")
+            .rows()
+        db.sends("get products where category = \$1 and brand in [\$2, \$3] and color = \$4 order price asc limit \$5 facet brand disjunctive, color disjunctive, material", "[\"tents\", \"acme\", \"nova\", \"red\", 24]")
     }
 
     /** docs: tents counted by price range */
@@ -456,6 +935,47 @@ class DocsBuilderTest {
         db.sends("get holds where order_ref = \$1 and state = \$2 require 0", "[\"o-17\", \"held\"]")
     }
 
+    /** docs: two jobs queued */
+    @Test
+    fun twoJobsQueued() = runBlocking {
+        val db = Recording()
+        db.from("jobs")
+            .insert(listOf(mapOf("payload" to mapOf("to" to "ada"), "run_at" to Computed.expr("now()"), "attempts" to 0), mapOf("payload" to mapOf("to" to "bo"), "run_at" to Computed.expr("now()"), "attempts" to 0)))
+        db.sends("put jobs [{payload: \$1, run_at: now(), attempts: \$2}, {payload: \$3, run_at: now(), attempts: \$4}]", "[{\"to\": \"ada\"}, 0, {\"to\": \"bo\"}, 0]")
+    }
+
+    /** docs: the ten oldest ready jobs claimed */
+    @Test
+    fun theTenOldestReadyJobsClaimed() = runBlocking {
+        val db = Recording()
+        db.from("jobs")
+            .where(Cond.raw("run_at <= now()"))
+            .order("run_at")
+            .limit(10)
+            .updateReturning(mapOf("owner" to "w1", "run_at" to Computed.expr("now() + ?", 30000), "attempts" to Computed.expr("attempts + 1")))
+        db.sends("set jobs {owner: \$1, run_at: now() + \$2, attempts: attempts + 1} where run_at <= now() order run_at asc limit \$3 returning *", "[\"w1\", 30000, 10]")
+    }
+
+    /** docs: a job acknowledged */
+    @Test
+    fun aJobAcknowledged() = runBlocking {
+        val db = Recording()
+        db.from("jobs").where("id", 1).where("owner", "w1").delete(require = 1)
+        db.sends("del jobs where id = \$1 and owner = \$2 require 1", "[1, \"w1\"]")
+    }
+
+    /** docs: ready jobs popped */
+    @Test
+    fun readyJobsPopped() = runBlocking {
+        val db = Recording()
+        db.from("jobs")
+            .where(Cond.raw("run_at <= now()"))
+            .order("run_at")
+            .limit(10)
+            .deleteReturning(returning = listOf("id", "payload.to"))
+        db.sends("del jobs where run_at <= now() order run_at asc limit \$1 returning id, payload.to", "[10]")
+    }
+
     /** docs: an article set by id */
     @Test
     fun anArticleSetById() = runBlocking {
@@ -480,6 +1000,87 @@ class DocsBuilderTest {
         val db = Recording()
         db.from("articles").where("year", "<", 2000).delete()
         db.sends("del articles where year < \$1", "[2000]")
+    }
+
+    /** docs: a page of documents with their comments */
+    @Test
+    fun aPageOfDocumentsWithTheirComments() = runBlocking {
+        val db = Recording()
+        db.from("docs")
+            .where("year", ">=", 2024)
+            .where(Cond.or(mapOf("lang" to "tr"), Cond.cmp("tags", "has", "rust")))
+            .order("title", "asc", collate = "tr")
+            .limit(20)
+            .lookup("comments", on = "doc_id", limit = 3)
+            .rows()
+        db.sends("get docs where year >= \$1 and (lang = \$2 or tags has \$3) order title collate tr asc limit \$4 lookup comments on doc_id limit \$5", "[2024, \"tr\", \"rust\", 20, 3]")
+    }
+
+    /** docs: documents matching a misspelt word */
+    @Test
+    fun documentsMatchingAMisspeltWord() = runBlocking {
+        val db = Recording()
+        db.from("docs")
+            .where("year", ">=", 2024)
+            .match("title", "databse", fuzzy = 2)
+            .limit(10)
+            .rows()
+        db.sends("get docs where year >= \$1 match title \$2 fuzzy 2 limit \$3", "[2024, \"databse\", 10]")
+    }
+
+    /** docs: the document of a slug */
+    @Test
+    fun theDocumentOfASlug() = runBlocking {
+        val db = Recording()
+        db.from("docs").where("slug", "intro").first()
+        db.sends("get docs where slug = \$1 limit \$2", "[\"intro\", 1]")
+    }
+
+    /** docs: documents counted since a year */
+    @Test
+    fun documentsCountedSinceAYear() = runBlocking {
+        val db = Recording()
+        db.from("docs").where("year", ">=", 2024).count()
+        db.sends("get docs where year >= \$1 count", "[2024]")
+    }
+
+    /** docs: a document inserted */
+    @Test
+    fun aDocumentInserted() = runBlocking {
+        val db = Recording()
+        db.from("docs")
+            .insert(mapOf("slug" to "intro", "title" to "Ownership in Rust", "year" to 2026))
+        db.sends("put docs {slug: \$1, title: \$2, year: \$3}", "[\"intro\", \"Ownership in Rust\", 2026]")
+    }
+
+    /** docs: a document inserted unless its slug is held */
+    @Test
+    fun aDocumentInsertedUnlessItsSlugIsHeld() = runBlocking {
+        val db = Recording()
+        db.from("docs")
+            .insert(
+                mapOf("slug" to "intro", "title" to "Ownership in Rust"),
+                ifAbsent = true
+            )
+        db.sends("put docs {slug: \$1, title: \$2} if absent", "[\"intro\", \"Ownership in Rust\"]")
+    }
+
+    /** docs: a document's views counted */
+    @Test
+    fun aDocumentSViewsCounted() = runBlocking {
+        val db = Recording()
+        db.from("docs")
+            .where("slug", "intro")
+            .update(mapOf("views" to Computed.inc(1)))
+        db.sends("set docs {views: coalesce(views, 0) + \$1} where slug = \$2", "[1, \"intro\"]")
+    }
+
+    /** docs: the documents before a year deleted */
+    @Test
+    fun theDocumentsBeforeAYearDeleted() = runBlocking {
+        val db = Recording()
+        db.from("docs").where("year", "<", 2000).delete()
+        db.sends("del docs where year < \$1", "[2000]")
     }
 
     /** escapes: every character a literal escapes, in a filter */

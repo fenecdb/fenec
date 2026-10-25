@@ -504,47 +504,32 @@ the same chain, to the byte, and refuse the same mistakes with the same
 message. Python's builder starts with <code>collection</code>, since
 <code>from</code> is a keyword there.</p>
 
-<div class="tbl code-grid">
-<table>
-<thead><tr><th>Python</th><th>JavaScript</th><th>Go</th><th>.NET</th></tr></thead>
-<tbody>
-<tr><td><code>db.collection("docs")</code></td><td><code>db.from('docs')</code></td><td><code>db.From("docs")</code></td><td><code>db.From("docs")</code></td></tr>
-<tr><td><code>.where("year", "&gt;=", 2024)</code></td><td><code>.where('year', '&gt;=', 2024)</code></td><td><code>.Where("year", "&gt;=", 2024)</code></td><td><code>.Where("year", "&gt;=", 2024)</code></td></tr>
-<tr><td><code>.where(or_({"lang": "tr"}, {"tags": {"has": "rust"}}))</code></td><td><code>.where(or({ lang: 'tr' }, { tags: { has: 'rust' } }))</code></td><td><code>.WhereCond(fenecdb.Or(fenecdb.Fields("lang", "tr"), fenecdb.Fields("tags", fenecdb.Ops("has", "rust"))))</code></td><td><code>.Where(Cond.Or(Cond.Cmp("lang", "=", "tr"), Cond.Cmp("tags", "has", "rust")))</code></td></tr>
-<tr><td><code>.match("title", q, fuzzy=True)</code></td><td><code>.match('title', q, { fuzzy: true })</code></td><td><code>.Match("title", q, fenecdb.Fuzzy(2))</code></td><td><code>.Match("title", q, fuzzy: 2)</code></td></tr>
-<tr><td><code>.near("embed", v, ef=64)</code></td><td><code>.near('embed', v, { ef: 64 })</code></td><td><code>.Near("embed", v, fenecdb.Ef(64))</code></td><td><code>.Near("embed", v, ef: 64)</code></td></tr>
-<tr><td><code>.lookup("reviews", on="product_id", limit=3)</code></td><td><code>.lookup('reviews', { on: 'product_id', limit: 3 })</code></td><td><code>.Lookup("reviews", fenecdb.On("product_id"), fenecdb.Limit(3))</code></td><td><code>.Lookup("reviews", on: "product_id", limit: 3)</code></td></tr>
-<tr><td><code>.order("title", "desc", collate="tr")</code></td><td><code>.order('title', 'desc', { collate: 'tr' })</code></td><td><code>.Order("title", "desc", fenecdb.Collate("tr"))</code></td><td><code>.Order("title", "desc", collate: "tr")</code></td></tr>
-<tr><td><code>.rows()</code>, <code>.first()</code>, <code>.count()</code></td><td><code>.rows()</code>, <code>.first()</code>, <code>.count()</code></td><td><code>.Rows(ctx)</code>, <code>.First(ctx)</code>, <code>.Count(ctx)</code>, <code>RowsAs[T]</code></td><td><code>.RowsAsync()</code>, <code>.FirstAsync()</code>, <code>.CountAsync()</code>, <code>.RowsAsync&lt;T&gt;()</code></td></tr>
-<tr><td><code>.insert(doc)</code>, <code>.update(patch)</code>, <code>.delete()</code></td><td><code>.insert(doc)</code>, <code>.update(patch)</code>, <code>.delete()</code></td><td><code>.Insert(ctx, doc)</code>, <code>.Update(ctx, patch)</code>, <code>.Delete(ctx)</code></td><td><code>.InsertAsync(doc)</code>, <code>.UpdateAsync(patch)</code>, <code>.DeleteAsync()</code></td></tr>
-<tr><td><code>.update({"n": inc(1)})</code>, <code>.insert(doc, if_absent=True)</code></td><td><code>.update({ n: inc(1) })</code>, <code>.insert(doc, { ifAbsent: true })</code></td><td><code>.Update(ctx, fenecdb.D("n", fenecdb.Inc(1)))</code>, <code>.Insert(ctx, doc, fenecdb.IfAbsent())</code></td><td><code>.UpdateAsync(new { n = Computed.Inc(1) })</code>, <code>.InsertAsync(doc, ifAbsent: true)</code></td></tr>
-</tbody>
-</table>
-</div>
+<p>A short tour, the same in every tab, over two collections:</p>
 
-<div class="tbl code-grid">
-<table>
-<thead><tr><th>Swift</th><th>Kotlin</th><th>Dart</th></tr></thead>
-<tbody>
-<tr><td><code>try db.from("docs")</code></td><td><code>db.from("docs")</code></td><td><code>db.from('docs')</code></td></tr>
-<tr><td><code>.where("year", "&gt;=", 2024)</code></td><td><code>.where("year", "&gt;=", 2024)</code></td><td><code>.where('year', '&gt;=', 2024)</code></td></tr>
-<tr><td><code>.where(.or(["lang": "tr"], ["tags": ["has": "rust"]]))</code></td><td><code>.where(Cond.or(mapOf("lang" to "tr"), mapOf("tags" to mapOf("has" to "rust"))))</code></td><td><code>.where(Cond.or([{'lang': 'tr'}, {'tags': {'has': 'rust'}}]))</code></td></tr>
-<tr><td><code>.match("title", q, fuzzy: 2)</code></td><td><code>.match("title", q, fuzzy = 2)</code></td><td><code>.match('title', q, fuzzy: true)</code></td></tr>
-<tr><td><code>.near("embed", v, ef: 64)</code></td><td><code>.near("embed", v, ef = 64)</code></td><td><code>.near('embed', v, ef: 64)</code></td></tr>
-<tr><td><code>.lookup("reviews", on: "product_id", limit: 3)</code></td><td><code>.lookup("reviews", on = "product_id", limit = 3)</code></td><td><code>.lookup('reviews', on: 'product_id', limit: 3)</code></td></tr>
-<tr><td><code>.order("title", "desc", collate: "tr")</code></td><td><code>.order("title", "desc", collate = "tr")</code></td><td><code>.order('title', 'desc', 'tr')</code></td></tr>
-<tr><td><code>.rows()</code>, <code>.first()</code>, <code>.count()</code>, <code>.rows(as: T.self)</code></td><td><code>.rows()</code>, <code>.first()</code>, <code>.count()</code>, <code>.rowsBlocking()</code></td><td><code>.rows()</code>, <code>.first()</code>, <code>.count()</code></td></tr>
-<tr><td><code>.insert(doc)</code>, <code>.update(patch)</code>, <code>.delete()</code></td><td><code>.insert(doc)</code>, <code>.update(patch)</code>, <code>.delete()</code></td><td><code>.insert(doc)</code>, <code>.update(patch)</code>, <code>.delete()</code></td></tr>
-<tr><td><code>.update(["n": .inc(1)])</code>, <code>.insert(doc, ifAbsent: true)</code></td><td><code>.update(mapOf("n" to Computed.inc(1)))</code>, <code>.insert(doc, ifAbsent = true)</code></td><td><code>.update({'n': Computed.inc(1)})</code>, <code>.insert(doc, ifAbsent: true)</code></td></tr>
-</tbody>
-</table>
-</div>
+<pre data-lang="fenecql">create collection docs (slug text @unique, title text @text, year int,
+  lang text, tags [text], views int)
+create collection comments (doc_id int @hash, body text)
+</pre>
+
+<p>A page of documents, filtered by a comparison and an <code>or</code>, in
+Turkish order, each with its first three comments; a search that forgives a
+misspelt word; one document and a count; then the writes — an insert, an
+insert passed over because its slug is held (<code>slug</code> is
+<code>@unique</code>), a counter moved and a delete by a filter.
+<code>db</code> is the client each language's section above connects, and
+Go's <code>ctx</code> a context. The FenecQL tab is what each chain writes;
+the block under the tabs is what it sends, its parameters apart.</p>
+
+{{builder "docs: a page of documents with their comments" "docs: documents matching a misspelt word" "docs: the document of a slug" "docs: documents counted since a year" "docs: a document inserted" "docs: a document inserted unless its slug is held" "docs: a document's views counted" "docs: the documents before a year deleted"}}
 
 <p>Each has <code>select</code> with aggregates and <code>group</code>,
 <code>where</code> with every operator, <code>in</code>, <code>null</code>,
 paths into a json field and <code>or</code>, <code>and</code>,
-<code>not</code> and <code>raw</code>; <code>match</code>, <code>near</code>,
-<code>fuse</code> and <code>rerank</code>; <code>highlight</code>,
+<code>not</code> and <code>raw</code>; <code>match</code>; <code>near</code>,
+a vector's nearest rows (<code>near('embed', v, { ef: 64 })</code> in
+JavaScript, <a href="fenecql-vector.html">Vector search</a>), and
+<code>fuse</code> and <code>rerank</code>, which rank by the words and a
+vector together; <code>highlight</code>,
 <code>snippet</code> and <code>facet</code>, the facets beside the rows;
 <code>lookup</code> and its chains; <code>order</code> with a collation; <code>limit</code> and
 <code>offset</code>; and the writes, an <code>update</code> or
@@ -553,6 +538,14 @@ a value worked out over the row with <code>inc</code> and <code>expr</code>
 (<a href="/docs/fenecql-writing#writes">Writes that read the row</a>), and an
 insert <code>if absent</code>.
 A query is immutable, so a base query can be kept and branched from.</p>
+
+<p>Rows come back as each language holds a document, and three builders
+also decode them into a type of the app's: Go's
+<code>fenecdb.RowsAs[T](ctx, q)</code>, .NET's <code>RowsAsync&lt;T&gt;()</code>
+and Swift's <code>rows(as: T.self)</code>. Go's endpoints take the
+<code>ctx</code> that bounds the request, .NET's are <code>…Async</code>,
+and Kotlin's suspend, with <code>rowsBlocking()</code> and
+<code>countBlocking()</code> for code outside a coroutine.</p>
 
 <details class="deep"><summary>How one golden file holds every builder</summary>
 <p><code>integrations/builder-golden.json</code> is the contract: each case a
@@ -567,11 +560,11 @@ each operator and kind of value, parameter numbering across
 <code>where</code>, <code>near</code>, <code>match</code> and the levels of
 a lookup chain, and the names and combinations each builder refuses. Each
 SDK's tests also run builder queries against a real server and hold their
-answers to the same statements sent as text. The tabs of the FenecQL
-reference's examples are cases of the file written in each language
-(<a href="fenecql-search.html#the-text-clause">Text search</a> has some): the
-JavaScript and Python tabs run as the page shows them, and each other
-language's tests hold a copy of its tabs' code, so a tab is code that
+answers to the same statements sent as text. The tour above and the tabs
+of the FenecQL reference's examples are cases of the file written in each
+language (<a href="fenecql-search.html#the-text-clause">Text search</a> has
+some): the JavaScript and Python tabs run as the page shows them, and each
+other language's tests hold a copy of its tabs' code, so a tab is code that
 sends the statement beside it.</p>
 <p>What a language has no word for is written its own way: Go's object
 conditions are <code>Fields</code> and <code>Ops</code>, names and values
