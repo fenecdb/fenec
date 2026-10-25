@@ -62,7 +62,8 @@ a thumbnail's worth or a hash.</p>
   <li><b>Done.</b> The client calls the backend. It reads the row as the person,
     asks the store for the object's size and, if it is the size announced,
     copies it to <code>files/&lt;id&gt;</code> and moves the row to
-    <code>ready</code> with a token of its own. A copy, because the upload URL is
+    <code>ready</code> with a token of its own (a <code>done</code> sent again is
+    answered 200). A copy, because the upload URL is
     good for minutes and can send other bytes to <code>pending/&lt;id&gt;</code>
     after this: the key that is downloaded is one the client never held a URL
     for.</li>
@@ -91,15 +92,17 @@ files         insert                  where owner = $jwt.sub and state = "pendin
 # ... and renames it.
 files         update(name)            where owner = $jwt.sub
 
-# The backend's own token. Its identity is its `sub`, which a provider assigns
-# and a person does not choose: a `role` claim would be the provider's to
-# fill, and one a person may set (Supabase's user_metadata, Clerk's
-# unsafe_metadata) would be theirs. The backend reads rows to check them, and
-# moves a pending one to ready, a transition because one filter asked of the
-# row before and after would refuse the move it grants (`new.` is the row as
-# the write leaves it).
-files         read                    where $jwt.sub = 'files-backend'
-files         update(state)           where state = "pending" and new.state = "ready" and $jwt.sub = 'files-backend'</pre>
+# The backend's own token. Its identity is its `sub` and an `iss` that only
+# your services sign (service-token.mjs): a `sub` alone is the provider's to
+# assign, and a provider's token (a Firebase project's owner picks the uid of a
+# custom token) can say `files-backend`; a `role` claim would be the
+# provider's to fill, and one a person may set (Supabase's user_metadata,
+# Clerk's unsafe_metadata) would be theirs. The backend reads rows to check
+# them, and moves a pending one to ready, a transition because one filter asked
+# of the row before and after would refuse the move it grants (`new.` is the
+# row as the write leaves it).
+files         read                    where $jwt.sub = 'files-backend' and $jwt.iss = 'urn:fenec:services'
+files         update(state)           where state = "pending" and new.state = "ready" and $jwt.sub = 'files-backend' and $jwt.iss = 'urn:fenec:services'</pre>
 
 <ul>
   <li><b>A person adds what is theirs and pending, up to 10 MiB.</b> The
@@ -111,14 +114,17 @@ files         update(state)           where state = "pending" and new.state = "r
     rule that names <code>new.</code> is a transition: a plain
     <code>where state = "pending"</code> would refuse the very write it grants,
     because the row after it is not pending (<a href="/docs/http-access#scoped-access">Transitions</a>).</li>
-  <li><b>The backend is its <code>sub</code>, <code>files-backend</code>, and no
-    <code>role</code>.</b> A provider assigns a <code>sub</code> and a person
-    does not choose it; a role claim in the provider's namespace would be one a
-    provider's settings (or a user's own attributes) might fill. The backend
-    signs a five-minute token with a key of its own, whose public half is in the
-    server's keys file (<a href="/docs/auth#services">Tokens your own services
-    call with</a>); a hand-minted long-lived token would be refused by
-    <code>--jwt-max-age</code>.</li>
+  <li><b>The backend is <code>files-backend</code> of the issuer
+    <code>urn:fenec:services</code>, and no <code>role</code>.</b> Both are in the
+    rule: a <code>sub</code> alone is what a provider's token can say too (a
+    Firebase project's owner picks the uid of a custom token), and a role claim in
+    the provider's namespace would be one a provider's settings, or a user's own
+    attributes, might fill. The backend signs a five-minute token with a key of its
+    own, whose public half is in the server's keys file (<a href="/docs/auth#services">Tokens
+    your own services call with</a>, which also says how to keep that key and rotate
+    it: the server binds no key to an identity, so whoever holds one can sign any
+    identity the policy has a rule for). A hand-minted long-lived token would be
+    refused by <code>--jwt-max-age</code>.</li>
   <li><b>The key is the id</b>, not the name a person typed. The change stream
     names a deleted row by its id alone, and a key made from it needs no lookup
     to delete. The name is a column, and <code>Content-Disposition</code> carries
@@ -221,11 +227,16 @@ export function backend({ fenec, appToken, s3, bucket, prefix = '', expiresIn = 
       if (req.method === 'POST' &amp;&amp; verb === 'done') {
         const file = await me.from('files').where('id', id).first(); // a row this person may read
         if (!file) return reply(404, { error: 'no such file' });
+        // A retry after the answer was lost: it is done, and said to be.
+        if (file.state === 'ready') return reply(200, { id: file.id, state: 'ready' });
         let held;
         try {
           held = await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: keys.pending(file.id) }));
-        } catch {
-          return reply(409, { error: 'the bytes are not in the bucket yet' });
+        } catch (e) {
+          // No such object is the one answer that means "not yet"; a store that
+          // cannot be reached or refuses us is the backend's to log, not the client's to be told.
+          if (e.$metadata?.httpStatusCode === 404) return reply(409, { error: 'the bytes are not in the bucket yet' });
+          throw e;
         }
         if (held.ContentLength !== file.size) {
           await me.from('files').where('id', file.id).delete(); // blobs.mjs removes the object
@@ -235,10 +246,17 @@ export function backend({ fenec, appToken, s3, bucket, prefix = '', expiresIn = 
         // to the upload URL after this point do not reach what is downloaded.
         // `CopySourceIfMatch` makes it that object, the one measured, and not
         // one that replaced it between the two calls.
-        await s3.send(new CopyObjectCommand({
-          Bucket: bucket, Key: keys.live(file.id), CopySource: `${bucket}/${keys.pending(file.id)}`,
-          CopySourceIfMatch: held.ETag,
-        }));
+        try {
+          await s3.send(new CopyObjectCommand({
+            Bucket: bucket, Key: keys.live(file.id), CopySource: `${bucket}/${keys.pending(file.id)}`,
+            CopySourceIfMatch: held.ETag,
+          }));
+        } catch (e) {
+          // 412: the upload was replaced between the check and the copy (the SDK's
+          // error carries the status in its metadata, whatever it names the error).
+          if (e.$metadata?.httpStatusCode === 412) return reply(409, { error: 'the upload changed while it was checked; send it again' });
+          throw e;
+        }
         const app = as(await appToken());
         await app.from('files').where('id', file.id).update({ state: 'ready' }, { require: 1 });
         await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: keys.pending(file.id) })).catch(() =&gt; {});
@@ -307,7 +325,9 @@ if (isMain(import.meta.url)) {
   const env = process.env;
   const server = backend({
     fenec: env.FENEC_URL,
-    appToken: serviceTokens({ pem: readFileSync(env.SERVICE_KEY), sub: 'files-backend' }),
+    // The key as a PEM file, whose path is SERVICE_KEY_FILE (a Worker keeps its key
+    // in a secret instead, as base64 of the DER: the two forms are not the same).
+    appToken: serviceTokens({ pem: readFileSync(env.SERVICE_KEY_FILE), sub: 'files-backend' }),
     s3: s3From(env),
     bucket: env.BUCKET,
     prefix: env.KEY_PREFIX ?? '',
@@ -430,26 +450,51 @@ import { reconcile } from './reconcile.mjs';
 import { keysOf, s3From } from './store.mjs';
 import { isMain } from './main.mjs';
 
+const RETRIES = 8; // answers of the server missed one after another
+const pause = (ms, signal) =&gt; new Promise((resolve) =&gt; {
+  const t = setTimeout(resolve, ms);
+  signal?.addEventListener('abort', () =&gt; (clearTimeout(t), resolve()), { once: true });
+});
+
 export async function follow({ fenec, adminToken, s3, bucket, prefix = '', name = 'blobs', wait = 10_000, signal, log = console.log }) {
   const headers = { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' };
   const keys = keysOf(prefix);
-  const commit = (since) =&gt; fetch(`${fenec}/_changes/consumers/${name}`, { method: 'POST', headers, body: JSON.stringify({ since }) });
+  const move = (since) =&gt; fetch(`${fenec}/_changes/consumers/${name}`, { method: 'POST', headers, body: JSON.stringify({ since }) });
+  const commit = async (since) =&gt; {
+    const res = await move(since);
+    if (!res.ok) throw new Error(`commit of ${name} at ${since}: ${res.status}`);
+  };
   // Made once, where there is none. A POST to a consumer that exists moves it
   // to the last write on disk, and every deletion since it was stopped is lost.
-  const listed = await (await fetch(`${fenec}/_changes/consumers`, { headers })).json();
-  if (!listed.some((c) =&gt; c.name === name)) await fetch(`${fenec}/_changes/consumers/${name}`, { method: 'POST', headers });
+  const listing = await fetch(`${fenec}/_changes/consumers`, { headers });
+  if (!listing.ok) throw new Error(`/_changes/consumers: ${listing.status}`);
+  if (!(await listing.json()).some((c) =&gt; c.name === name)) {
+    const made = await fetch(`${fenec}/_changes/consumers/${name}`, { method: 'POST', headers });
+    if (!made.ok) throw new Error(`/_changes/consumers/${name}: ${made.status}`);
+  }
+  // A server restarted, or not answering for a while, is waited for with a back-off;
+  // after RETRIES answers missed the follower ends with an error, so that whatever
+  // supervises it starts it again. It ends with a zero only at its own signal.
+  let missed = 0;
   while (!signal?.aborted) {
     const page = await fetch(`${fenec}/_changes?consumer=${name}&amp;wait=${wait}`, { headers, signal }).catch(() =&gt; null);
-    if (!page) break;
+    if (!page) {
+      if (signal?.aborted) break;
+      if (++missed &gt;= RETRIES) throw new Error(`/_changes: no answer ${missed} times`);
+      await pause(Math.min(500 * 2 ** missed, 30_000), signal);
+      continue;
+    }
+    missed = 0;
     if (page.status === 410) {
       const { since } = await page.json();
       log(`blobs: behind what the server keeps; reconciling, then on from ${since}`);
       const gone = await reconcile({ fenec, adminToken, s3, bucket, prefix });
       log(`blobs: reconciled, ${gone.length} deleted: ${gone.join(', ') || 'none'}`);
-      await commit(since);
-      // The first write the server keeps can move on while writes are not yet on
-      // disk, and a read can be answered 410 again: not at once, then.
-      await new Promise((r) =&gt; setTimeout(r, 500));
+      // The first write the server keeps can be past what is on disk yet (a commit
+      // there is 409), and can move on while writes are not: not at once, then.
+      const moved = await move(since);
+      if (!moved.ok &amp;&amp; moved.status !== 409) throw new Error(`commit of ${name} at ${since}: ${moved.status}`);
+      await pause(500, signal);
       continue;
     }
     if (!page.ok) throw new Error(`/_changes: ${page.status}`);
@@ -498,9 +543,19 @@ if (isMain(import.meta.url)) {
     deletes those with no row to be there. A short URL lifetime shortens the
     window. The lifecycle rule is the store's and was not run here; the reconcile
     was.</li>
+  <li><b>The reconcile deletes, so it checks itself first.</b> <code>--dry-run</code>
+    says what would go. It refuses a database with no file row at all over a bucket
+    that holds objects (the wrong server, a restore not yet done), and more than half
+    of the objects going once there are ten to go (a table emptied, another tenant's
+    prefix); <code>--force</code> goes on. The listing is read before the rows, so an
+    upload that lands in between is not taken for an orphan. And an id is not given to
+    a second row until a restore to a backup older than some ids hands them out again:
+    reconcile before the first upload after a restore, not after, or an object of the
+    lost rows would pass for the new ones'.</li>
   <li><b>A consumer past the buffer must reconcile.</b> One further behind than
     <code>--replication-buffer</code> keeps is answered 410, with the first
-    <code>since</code> the server does have. "Start over from a read" cannot
+    <code>since</code> the server does have (a commit there can be 409 for a moment,
+    while that write is not yet on disk, and is tried again). "Start over from a read" cannot
     find the objects of rows already deleted, since a deletion is in no read of
     the table; the reconcile can. So the consumer reconciles on a 410 and goes
     on from that <code>since</code> (below).</li>
@@ -534,7 +589,17 @@ if (isMain(import.meta.url)) {
 // The objects are listed first and the rows read after: a row is made before
 // its URL, so an object listed has a row made earlier, and a row deleted since
 // is what makes it an orphan. Read the other way round, an upload that landed
-// between the two would look like one. An id is never given to a second row.
+// between the two would look like one. An id is not given to a second row --
+// until the database is restored to a backup older than some of its ids, which
+// hands those ids out again: reconcile before the restore's first upload, not
+// after, or an object of the lost rows becomes the object of the new ones.
+//
+// It deletes, so it refuses what looks like a mistake before it does:
+//   --dry-run            says what it would delete and deletes nothing
+//   a database with no file row at all, over a bucket that has objects: the
+//     wrong server, a file not yet restored (--force goes on)
+//   more than --max-delete-percent N (50) of the objects, once there are ten to
+//     go: a table emptied, a prefix of another tenant's (--force goes on)
 import { DeleteObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { keysOf, s3From } from './store.mjs';
 import { isMain } from './main.mjs';
@@ -565,31 +630,50 @@ async function states(fenec, adminToken) {
   }
 }
 
-/** The keys deleted, in order. `prefix` is the tenant on a `--dir` node, and `fenec` that tenant's address. */
-export async function reconcile({ fenec, adminToken, s3, bucket, prefix = '' }) {
+/**
+ * The keys deleted, in order (with `dryRun`, the keys that would be). `prefix`
+ * is the tenant on a `--dir` node, and `fenec` that tenant's address.
+ */
+export async function reconcile({ fenec, adminToken, s3, bucket, prefix = '', dryRun = false, maxDeletePercent = 50, force = false }) {
   const keys = keysOf(prefix);
   const listed = [];
   for await (const key of objects(s3, bucket, prefix)) if (keys.parse(key)) listed.push(key);
   const rows = await states(fenec, adminToken);
-  const deleted = [];
-  for (const key of listed.sort()) {
+  const doomed = listed.sort().filter((key) =&gt; {
     const { kind, id } = keys.parse(key);
     // An upload belongs to a pending row; what a ready row left under pending/
     // (the copy was made, the delete failed) and what has no row go.
-    const kept = kind === 'pending' ? rows.get(id) === 'pending' : rows.has(id);
-    if (kept) continue;
-    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
-    deleted.push(key);
+    return !(kind === 'pending' ? rows.get(id) === 'pending' : rows.has(id));
+  });
+  if (!force) {
+    if (rows.size === 0 &amp;&amp; listed.length &gt; 0) {
+      throw new Error(`reconcile: the database holds no file rows and the bucket ${listed.length} objects; the wrong server, or a restore not done? (--force goes on)`);
+    }
+    if (doomed.length &gt;= 10 &amp;&amp; doomed.length * 100 &gt; listed.length * maxDeletePercent) {
+      throw new Error(`reconcile: ${doomed.length} of ${listed.length} objects would go, more than ${maxDeletePercent}%; --force goes on`);
+    }
   }
-  return deleted;
+  if (dryRun) return doomed;
+  for (const Key of doomed) await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key }));
+  return doomed;
 }
 
 if (isMain(import.meta.url)) {
   const env = process.env;
-  const gone = await reconcile({
-    fenec: env.FENEC_URL, adminToken: env.ADMIN_TOKEN, s3: s3From(env), bucket: env.BUCKET, prefix: env.KEY_PREFIX ?? '',
-  });
-  console.log(`reconcile: ${gone.length} objects with no row deleted${gone.length ? `: ${gone.join(', ')}` : ''}`);
+  const args = process.argv.slice(2);
+  const percent = args.indexOf('--max-delete-percent');
+  try {
+    const gone = await reconcile({
+      fenec: env.FENEC_URL, adminToken: env.ADMIN_TOKEN, s3: s3From(env), bucket: env.BUCKET, prefix: env.KEY_PREFIX ?? '',
+      dryRun: args.includes('--dry-run'), force: args.includes('--force'),
+      ...(percent &gt;= 0 &amp;&amp; { maxDeletePercent: Number(args[percent + 1]) }),
+    });
+    const verb = args.includes('--dry-run') ? 'would be deleted' : 'deleted';
+    console.log(`reconcile: ${gone.length} objects with no row ${verb}${gone.length ? `: ${gone.join(', ')}` : ''}`);
+  } catch (e) {
+    console.error(e.message);
+    process.exit(1);
+  }
 }</pre>
 
 <h2 id="run">A run</h2>
@@ -597,7 +681,8 @@ if (isMain(import.meta.url)) {
 <p>Two people, a real fenec-server with <code>files-policy.txt</code>, the
 backend above, the consumer, and an S3-compatible server in Docker
 (<code>npm install</code> in <code>examples/recipes</code>, then <code>node
-files-demo.mjs</code>, which starts and removes the container; give
+files-demo.mjs</code>, which pulls the image quietly (and again, if Docker Hub
+answers with a limit), starts the container and removes it; give
 <code>S3_ENDPOINT</code>, <code>S3_KEY</code>, <code>S3_SECRET</code> and
 <code>BUCKET</code> to use a store of your own). The signed URLs are
 shortened here. The store was SeaweedFS's S3 gateway, release 4.50: MinIO's
@@ -617,6 +702,7 @@ the row the server holds: [{"id":1,"owner":"alice","name":"hello.txt","type":"te
 PUT &lt;presigned&gt;         200
 GET /files/1 before done 409 {"error":"not uploaded yet"}
 POST /files/1/done    200 {"id":1,"state":"ready"}
+POST /files/1/done again 200 {"id":1,"state":"ready"}
 the upload copied to files/1, pending/1 gone
 
 -- she downloads it; bob is told there is no such file
@@ -630,6 +716,10 @@ alice's total, for a quota   200 [{"sum(size)":17}]
 -- a name that is not ASCII, and what a download is saved as
 Content-Disposition: attachment; filename="r_sum_ _final_.pdf"; filename*=UTF-8''r%C3%A9sum%C3%A9%20%22final%22.pdf
 Content-Type: application/pdf
+
+-- a token of the provider that says it is the backend
+provider token, sub files-backend: read files    200 []
+provider token, sub files-backend: mark ready    200 {"affected":0}
 
 -- what the rules and the bucket refuse
 POST /files, 20 MiB     403 {"error":"not allowed"}
@@ -659,7 +749,7 @@ blobs: row 5 deleted, so its objects too
 -- the follower is stopped, a file is deleted, and the stream moves past what the server keeps
 files/6 is still in the bucket, its row deleted
 files/6: gone
-blobs: behind what the server keeps; reconciling, then on from 25
+blobs: behind what the server keeps; reconciling, then on from 27
 blobs: reconciled, 1 deleted: files/6</pre>
 
 <ul>
@@ -669,6 +759,11 @@ blobs: reconciled, 1 deleted: files/6</pre>
   <li><b>Another person's file is no file.</b> Bob's request for alice's is a
     404, whether it is hers or nobody's, and so is his delete: his
     <code>del</code> with <code>require 1</code> found no row of his.</li>
+  <li><b>A token that says it is the backend is not.</b> A token of the provider
+    with <code>sub: files-backend</code> reads no file and marks none ready: it lacks
+    the issuer the backend's rules ask for.</li>
+  <li><b>A retry is answered as the first was.</b> <code>done</code> sent again, as
+    after an answer that was lost, is 200 for a file that is ready.</li>
   <li><b>A URL signed for 5 bytes does not take 20.</b> The store refused (403,
     <code>SignatureDoesNotMatch</code>) because the length is part of what was
     signed. That is this store; the check at <code>done</code> deletes the row and

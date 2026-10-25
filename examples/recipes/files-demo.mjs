@@ -57,11 +57,23 @@ try {
     writeFileSync(join(dir, 's3.json'), JSON.stringify({ identities: [{ name: 'recipes',
       credentials: [{ accessKey: 'recipes-key', secretKey: 'recipes-secret-key' }],
       actions: ['Admin', 'Read', 'Write', 'List', 'Tagging'] }] }));
+    // Pulled first, quietly, and tried again: a run that pulls as it starts writes its progress
+    // to stderr, which is the output the golden holds, and Docker Hub answers an anonymous
+    // runner now and then with a limit or a reset.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        execFileSync('docker', ['pull', '-q', SEAWEEDFS], { stdio: 'ignore' });
+        break;
+      } catch (e) {
+        if (attempt === 3) throw new Error(`docker pull ${SEAWEEDFS} failed ${attempt} times`);
+        await new Promise((r) => setTimeout(r, 2000 * attempt));
+      }
+    }
     container = execFileSync('docker', ['run', '-d', '--rm', '--name', `fenec-recipes-s3-${process.pid}`,
       '-p', '127.0.0.1:0:8333', '-v', `${join(dir, 's3.json')}:/etc/seaweedfs/s3.json:ro`,
       SEAWEEDFS, 'server', '-s3', '-s3.config=/etc/seaweedfs/s3.json', '-dir=/data'],
-      { encoding: 'utf8' }).trim().slice(0, 12);
-    const port = execFileSync('docker', ['port', container, '8333/tcp'], { encoding: 'utf8' }).trim().split(':').pop();
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim().slice(0, 12); // stderr kept off ours, and on the error
+    const port = execFileSync('docker', ['port', container, '8333/tcp'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim().split(':').pop();
     Object.assign(env, { S3_ENDPOINT: `http://127.0.0.1:${port}`, S3_REGION: 'us-east-1', S3_KEY: 'recipes-key',
       S3_SECRET: 'recipes-secret-key', S3_PATH_STYLE: '1', BUCKET: 'recipes' });
     await until('the object store', async () => (await fetch(env.S3_ENDPOINT)).status === 403, 60_000);
@@ -92,7 +104,10 @@ try {
   const waitSaid = (re) => until(`the follower to say ${re}`, async () => said.some((l) => re.test(l)));
   const startFollower = () => {
     const ctl = new AbortController();
-    return { ctl, done: follow({ fenec: url, adminToken: 'root', s3, bucket: env.BUCKET, signal: ctl.signal, wait: 500, log: (m) => said.push(m) }) };
+    const done = follow({ fenec: url, adminToken: 'root', s3, bucket: env.BUCKET, signal: ctl.signal, wait: 500, log: (m) => said.push(m) });
+    // A follower that ends with an error fails the run, with the container removed.
+    done.catch((e) => cleanup().then(() => { console.error(e); process.exit(1); }));
+    return { ctl, done };
   };
   let follower = startFollower();
 
@@ -110,6 +125,8 @@ try {
   say(`GET /files/${made.id} before done ${res.status} ${JSON.stringify(await json(res))}`);
   res = await call(alice, 'POST', `/files/${made.id}/done`);
   say(`POST /files/${made.id}/done    ${res.status} ${JSON.stringify(await json(res))}`);
+  res = await call(alice, 'POST', `/files/${made.id}/done`);
+  say(`POST /files/${made.id}/done again ${res.status} ${JSON.stringify(await json(res))}`);
   say(`the upload copied to ${keys.live(made.id)}, ${keys.pending(made.id)} ${(await there(keys.pending(made.id))) ? 'still there' : 'gone'}`);
 
   say('\n-- she downloads it; bob is told there is no such file');
@@ -137,6 +154,13 @@ try {
   say(`Content-Disposition: ${pdfDownload.headers.get('content-disposition')}`);
   say(`Content-Type: ${pdfDownload.headers.get('content-type')}`);
   await pdfDownload.arrayBuffer();
+
+  say('\n-- a token of the provider that says it is the backend');
+  const forged = token(dir, { ...shapes.plain('files-backend') });
+  res = await post(forged, '/query', { query: 'get files select id, owner' });
+  say(`provider token, sub files-backend: read files    ${res.status} ${JSON.stringify(await res.json())}`);
+  res = await post(forged, '/query', { query: 'set files {state: "ready"} where state = "pending"' });
+  say(`provider token, sub files-backend: mark ready    ${res.status} ${JSON.stringify(await res.json())}`);
 
   say('\n-- what the rules and the bucket refuse');
   res = await call(alice, 'POST', '/files', { name: 'big.bin', type: 'application/octet-stream', size: 20 * 1024 * 1024 });
@@ -196,7 +220,9 @@ try {
   await follower.done;
   await call(alice, 'DELETE', `/files/${second.id}`);
   for (let i = 0; i < 4; i++) await query(url, 'root', 'put junk {body: $1}', ['x'.repeat(400_000)]);
-  await new Promise((r) => setTimeout(r, 500)); // the junk is on disk, and the first write kept is settled
+  // The junk is on disk and the follower's place is outrun: what the follower will be answered.
+  await until('the stream to move past the follower', async () =>
+    (await fetch(`${url}/_changes?consumer=blobs&wait=0`, { headers: { authorization: 'Bearer root' } })).status === 410);
   say(`${keys.live(second.id)} is ${(await there(keys.live(second.id))) ? 'still in the bucket' : 'gone'}, its row deleted`);
   follower = startFollower();
   await gone(keys.live(second.id));

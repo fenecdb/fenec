@@ -20,26 +20,51 @@ import { reconcile } from './reconcile.mjs';
 import { keysOf, s3From } from './store.mjs';
 import { isMain } from './main.mjs';
 
+const RETRIES = 8; // answers of the server missed one after another
+const pause = (ms, signal) => new Promise((resolve) => {
+  const t = setTimeout(resolve, ms);
+  signal?.addEventListener('abort', () => (clearTimeout(t), resolve()), { once: true });
+});
+
 export async function follow({ fenec, adminToken, s3, bucket, prefix = '', name = 'blobs', wait = 10_000, signal, log = console.log }) {
   const headers = { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' };
   const keys = keysOf(prefix);
-  const commit = (since) => fetch(`${fenec}/_changes/consumers/${name}`, { method: 'POST', headers, body: JSON.stringify({ since }) });
+  const move = (since) => fetch(`${fenec}/_changes/consumers/${name}`, { method: 'POST', headers, body: JSON.stringify({ since }) });
+  const commit = async (since) => {
+    const res = await move(since);
+    if (!res.ok) throw new Error(`commit of ${name} at ${since}: ${res.status}`);
+  };
   // Made once, where there is none. A POST to a consumer that exists moves it
   // to the last write on disk, and every deletion since it was stopped is lost.
-  const listed = await (await fetch(`${fenec}/_changes/consumers`, { headers })).json();
-  if (!listed.some((c) => c.name === name)) await fetch(`${fenec}/_changes/consumers/${name}`, { method: 'POST', headers });
+  const listing = await fetch(`${fenec}/_changes/consumers`, { headers });
+  if (!listing.ok) throw new Error(`/_changes/consumers: ${listing.status}`);
+  if (!(await listing.json()).some((c) => c.name === name)) {
+    const made = await fetch(`${fenec}/_changes/consumers/${name}`, { method: 'POST', headers });
+    if (!made.ok) throw new Error(`/_changes/consumers/${name}: ${made.status}`);
+  }
+  // A server restarted, or not answering for a while, is waited for with a back-off;
+  // after RETRIES answers missed the follower ends with an error, so that whatever
+  // supervises it starts it again. It ends with a zero only at its own signal.
+  let missed = 0;
   while (!signal?.aborted) {
     const page = await fetch(`${fenec}/_changes?consumer=${name}&wait=${wait}`, { headers, signal }).catch(() => null);
-    if (!page) break;
+    if (!page) {
+      if (signal?.aborted) break;
+      if (++missed >= RETRIES) throw new Error(`/_changes: no answer ${missed} times`);
+      await pause(Math.min(500 * 2 ** missed, 30_000), signal);
+      continue;
+    }
+    missed = 0;
     if (page.status === 410) {
       const { since } = await page.json();
       log(`blobs: behind what the server keeps; reconciling, then on from ${since}`);
       const gone = await reconcile({ fenec, adminToken, s3, bucket, prefix });
       log(`blobs: reconciled, ${gone.length} deleted: ${gone.join(', ') || 'none'}`);
-      await commit(since);
-      // The first write the server keeps can move on while writes are not yet on
-      // disk, and a read can be answered 410 again: not at once, then.
-      await new Promise((r) => setTimeout(r, 500));
+      // The first write the server keeps can be past what is on disk yet (a commit
+      // there is 409), and can move on while writes are not: not at once, then.
+      const moved = await move(since);
+      if (!moved.ok && moved.status !== 409) throw new Error(`commit of ${name} at ${since}: ${moved.status}`);
+      await pause(500, signal);
       continue;
     }
     if (!page.ok) throw new Error(`/_changes: ${page.status}`);

@@ -134,13 +134,19 @@ JWKS_PROTO='=http' sh "$here/refresh-jwks.sh" "$idpurl/.well-known/jwks.json" "$
 poll 5 accepts "$token"
 call "the same token" "$token" 'get notes select title'
 echo "-- a key of your own service goes into the file beside the provider's"
-node "$here/idp.mjs" service-key "$idp"
+openssl genrsa -out "$idp/svc-1.pem" 2048 2>/dev/null
+node "$here/idp.mjs" jwk "$idp/svc-1.pem" svc-1 >"$idp/service-jwks.json"
 JWKS_PROTO='=http' sh "$here/refresh-jwks.sh" "$idpurl/.well-known/jwks.json" "$dir/jwks.json" "$idp/service-jwks.json"
 jq -c '[.keys[].kid]' "$dir/jwks.json"
 service=$(node "$here/idp.mjs" service-token "$idp" files-backend)
 poll 5 serves "$service"
 printf '%-42s ' "the server's view of the service's token"
 curl -s "$url/_whoami" -H "Authorization: Bearer $service" | jq -c '{kind, sub}'
+echo "-- a key whose kid is the provider's, and a file of own keys with none in it, are refused"
+echo '{"keys":[{"kid":"idp-1","kty":"RSA"}]}' >"$dir/dup.json"
+JWKS_PROTO='=http' sh "$here/refresh-jwks.sh" "$idpurl/.well-known/jwks.json" "$dir/jwks.json" "$dir/dup.json" 2>&1 | sed "s#$dir/##g; s#$idpurl#<provider>#" || true
+echo '{"keys":[]}' >"$dir/none.json"
+JWKS_PROTO='=http' sh "$here/refresh-jwks.sh" "$idpurl/.well-known/jwks.json" "$dir/jwks.json" "$dir/none.json" 2>&1 | sed "s#$dir/##g" || true
 echo "-- the job asks for a page that is not there one night"
 JWKS_PROTO='=http' sh "$here/refresh-jwks.sh" "$idpurl/nothing" "$dir/jwks.json" 2>&1 || echo "(the job failed, rc $?)"
 call "the same token" "$token" 'get notes select title'

@@ -7,6 +7,7 @@ signups [{"email":"ada@example.test"}]  jobs [{"kind":"welcome","owner":null,"at
 with the Worker's token, read signups    403
 with the Worker's token, delete jobs     {"affected":0}
 with the Worker's token, insert a signup {"affected":1}
+with a provider's token, sub signup-function: insert a signup 404 {"error":"collection `signups`"}
 
 == 2. a worker of the jobs the signups leave
 a worker took [{"id":1,"payload.email":"ada@example.test"}] and died
@@ -35,6 +36,11 @@ dead_letters [{"seq":N,"collection":"orders","op":"put","status":400}]
    replayed at once: 200
    receiver: rejected: stale
    replayed an hour later: 401
+-- a signature of accents, as long in characters as a real one, and a body of three-byte characters
+   receiver: rejected: bad signature
+   a signature of 64 accents: 401
+   receiver: a note of 70000 characters, 210000 bytes
+   receiver: seq N orders put: done
 -- the relay stopped; an order is written meanwhile; a new relay carries on from the place the server kept
    receiver: seq N orders put: done
 -- the receiver rotates its secret before the relay has heard
@@ -43,7 +49,7 @@ ALERT: seq N: http://127.0.0.1:PORT/hook answers 401; stopped, nothing committed
 -- the relay is given both secrets for a while, and the same change goes out
    receiver: seq N orders put: done
 -- only ids, for a receiver that has no business with the rest
-   receiver: it was sent {"seq":N,"collection":"orders","op":"del","id":4}
+   receiver: it was sent {"seq":N,"collection":"orders","op":"del","id":5}
    receiver: seq N orders del: done
 -- a receiver whose address has moved: a redirect is not followed
 ALERT: seq N: http://127.0.0.1:PORT/moved redirects (302), and a signed body is not sent on

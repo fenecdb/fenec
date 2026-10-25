@@ -8,6 +8,7 @@ the row the server holds: [{"id":1,"owner":"alice","name":"hello.txt","type":"te
 PUT <presigned>         200
 GET /files/1 before done 409 {"error":"not uploaded yet"}
 POST /files/1/done    200 {"id":1,"state":"ready"}
+POST /files/1/done again 200 {"id":1,"state":"ready"}
 the upload copied to files/1, pending/1 gone
 
 -- she downloads it; bob is told there is no such file
@@ -21,6 +22,10 @@ alice's total, for a quota   200 [{"sum(size)":17}]
 -- a name that is not ASCII, and what a download is saved as
 Content-Disposition: attachment; filename="r_sum_ _final_.pdf"; filename*=UTF-8''r%C3%A9sum%C3%A9%20%22final%22.pdf
 Content-Type: application/pdf
+
+-- a token of the provider that says it is the backend
+provider token, sub files-backend: read files    200 []
+provider token, sub files-backend: mark ready    200 {"affected":0}
 
 -- what the rules and the bucket refuse
 POST /files, 20 MiB     403 {"error":"not allowed"}

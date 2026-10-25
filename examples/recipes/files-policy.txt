@@ -10,12 +10,14 @@ files         insert                  where owner = $jwt.sub and state = "pendin
 # ... and renames it.
 files         update(name)            where owner = $jwt.sub
 
-# The backend's own token. Its identity is its `sub`, which a provider assigns
-# and a person does not choose: a `role` claim would be the provider's to
-# fill, and one a person may set (Supabase's user_metadata, Clerk's
-# unsafe_metadata) would be theirs. The backend reads rows to check them, and
-# moves a pending one to ready, a transition because one filter asked of the
-# row before and after would refuse the move it grants (`new.` is the row as
-# the write leaves it).
-files         read                    where $jwt.sub = 'files-backend'
-files         update(state)           where state = "pending" and new.state = "ready" and $jwt.sub = 'files-backend'
+# The backend's own token. Its identity is its `sub` and an `iss` that only
+# your services sign (service-token.mjs): a `sub` alone is the provider's to
+# assign, and a provider's token (a Firebase project's owner picks the uid of a
+# custom token) can say `files-backend`; a `role` claim would be the
+# provider's to fill, and one a person may set (Supabase's user_metadata,
+# Clerk's unsafe_metadata) would be theirs. The backend reads rows to check
+# them, and moves a pending one to ready, a transition because one filter asked
+# of the row before and after would refuse the move it grants (`new.` is the
+# row as the write leaves it).
+files         read                    where $jwt.sub = 'files-backend' and $jwt.iss = 'urn:fenec:services'
+files         update(state)           where state = "pending" and new.state = "ready" and $jwt.sub = 'files-backend' and $jwt.iss = 'urn:fenec:services'

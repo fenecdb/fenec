@@ -10,18 +10,16 @@
 import { spawn } from 'node:child_process';
 import { createPrivateKey } from 'node:crypto';
 import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:http';
-import { createServer as listener } from 'node:net';
+import { createServer, request as httpRequest } from 'node:http';
 import { join } from 'node:path';
 import { cleanup, dir, here, query, server, until } from './harness.mjs';
-import { addServiceKey, init, merge } from './idp.mjs';
+import { addServiceKey, init, merge, shapes, token } from './idp.mjs';
 import { serviceTokens } from './service-token.mjs';
 import { Alert, relay } from './webhook.mjs';
 import { receiver } from './webhook-verify.mjs';
 import { work } from './welcome-worker.mjs';
 
 const say = (...a) => console.log(...a);
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const text = async (res) => JSON.stringify(await res.json());
 
 // The services' keys: the public halves in the file the server reads, the
@@ -59,13 +57,25 @@ try {
     for (const f of ['index.mjs', 'wrangler.jsonc']) copyFileSync(join(here, 'worker', f), join(wdir, f));
     const der = createPrivateKey(pem).export({ type: 'pkcs8', format: 'der' }).toString('base64');
     writeFileSync(join(wdir, '.dev.vars'), `SERVICE_KEY=${der}\nFENEC_URL=${url}\n`);
-    const port = await new Promise((resolve) => {
-      const s = listener().listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); });
+    // On port 0, and the inspector's too, and the address read off the line wrangler says it is
+    // ready on: a port found free and handed over is free only until another process takes it.
+    // In a process group of its own, so that stopping it stops the workerd it starts.
+    const dev = spawn(wrangler, ['dev', '--port', '0', '--inspector-port', '0', '--ip', '127.0.0.1', '--show-interactive-dev-session=false'], {
+      cwd: wdir, stdio: ['ignore', 'pipe', 'pipe'], detached: true,
+      env: { ...process.env, WRANGLER_SEND_METRICS: 'false', FORCE_COLOR: '0', NO_COLOR: '1' },
     });
-    const dev = spawn(wrangler, ['dev', '--port', String(port), '--ip', '127.0.0.1'], { cwd: wdir, stdio: 'ignore' });
+    const ended = new Promise((done) => dev.once('exit', done));
+    let log = '';
+    const ready = new Promise((found, failed) => {
+      const read = (d) => { log += d; const m = /Ready on (http:\/\/\S+)\s/.exec(log); if (m) found(m[1]); };
+      dev.stdout.on('data', read);
+      dev.stderr.on('data', read);
+      dev.once('error', (e) => failed(new Error(`wrangler dev did not start: ${e.message}`)));
+      ended.then(() => failed(new Error(`wrangler dev ended before it was ready:\n${log}`)));
+    });
     try {
-      const fn = `http://127.0.0.1:${port}`;
-      await until('wrangler dev', () => fetch(`${fn}/nothing`).then((r) => r.status === 404), 60_000);
+      const fn = await Promise.race([ready, new Promise((_, no) => setTimeout(() => no(new Error(`wrangler dev not ready:\n${log}`)), 90_000))]);
+      await until('the Worker to answer', () => fetch(`${fn}/nothing`).then((r) => r.status === 404), 60_000);
       const signup = async (body, key) => {
         const res = await fetch(`${fn}/signup`, {
           method: 'POST', body: JSON.stringify(body),
@@ -79,13 +89,18 @@ try {
       say('POST /signup  not an address    ', await signup({ email: 'ada', name: 'Ada' }));
       say('signups', await text(await query(url, 'root', 'get signups select email')),
         ' jobs', await text(await query(url, 'root', 'get jobs select kind, owner, attempts')));
-      // What a leaked SERVICE_KEY can do: add rows, and nothing else.
-      const stolen = await tokenFor('signup-function')();
-      say('with the Worker\'s token, read signups   ', String((await query(url, stolen, 'get signups')).status));
-      say('with the Worker\'s token, delete jobs    ', await text(await query(url, stolen, 'del jobs')));
-      say('with the Worker\'s token, insert a signup', await text(await query(url, stolen, 'put signups {email: "x@example.test", name: "X"}')));
+      // What the Worker's own token is answered: the rules of its identity, and no more.
+      const own = await tokenFor('signup-function')();
+      say('with the Worker\'s token, read signups   ', String((await query(url, own, 'get signups')).status));
+      say('with the Worker\'s token, delete jobs    ', await text(await query(url, own, 'del jobs')));
+      say('with the Worker\'s token, insert a signup', await text(await query(url, own, 'put signups {email: "x@example.test", name: "X"}')));
+      // A token of the provider that says it is the Worker: the same sub, and no issuer of the services'.
+      const forged = token(dir, { ...shapes.plain('signup-function') });
+      const forgery = await query(url, forged, 'put signups {email: "y@example.test", name: "Y"}');
+      say('with a provider\'s token, sub signup-function: insert a signup', String(forgery.status), await text(forgery));
     } finally {
-      dev.kill();
+      if (dev.exitCode === null && dev.signalCode === null) process.kill(-dev.pid, 'SIGINT');
+      await ended;
     }
   }
 
@@ -116,9 +131,12 @@ try {
       },
       log: say,
     });
-    const dead = async () => (await (await query(url, 'root', 'get jobs where run_at is null select id, error')).json()).length === 1;
-    await until('both mails and the dead letter', async () => sent.length === 2 && (await dead()), 20_000);
-    await sleep(300);
+    // Both mails sent and acked, and the one job left the dead letter.
+    const settled = async () => {
+      const left = await (await query(url, 'root', 'get jobs select id, run_at')).json();
+      return sent.length === 2 && left.length === 1 && left[0].run_at === null;
+    };
+    await until('both mails and the dead letter', settled, 20_000);
     say('jobs left', await text(await query(url, 'root', 'get jobs select id, run_at, attempts, error')).then((t) => t.replace(/"run_at":"[^"]*"/, '"run_at":…')));
     stop.abort();
     await working;
@@ -127,7 +145,7 @@ try {
   // ---- 3. a webhook
   if (want(3)) {
     say('\n== 3. a webhook for orders');
-    const url = await fresh('hook', ['create collection orders (customer text, total int)',
+    const url = await fresh('hook', ['create collection orders (customer text, total int, note text)',
       'create collection dead_letters (seq int, collection text, op text, status int, change json, at timestamp)']);
     let secrets = ['whsec-1'];
     let skew = 0; // seconds the receiver's clock is ahead, to show a replay an hour late
@@ -140,6 +158,7 @@ try {
         if (change.doc?.total === 40 && !failedOnce.has(change.seq)) { failedOnce.add(change.seq); throw Object.assign(new Error('x'), { status: 500 }); }
         if (change.doc?.total === 13) throw Object.assign(new Error('x'), { status: 400 });
         if (!change.doc) say(`   receiver: it was sent ${JSON.stringify(change)}`);
+        if (change.doc?.note) say(`   receiver: a note of ${change.doc.note.length} characters, ${Buffer.byteLength(change.doc.note)} bytes`);
       },
     });
     const receiverServer = createServer((req, res) =>
@@ -155,8 +174,11 @@ try {
       return { stop: async () => (ctl.abort(), finished), finished };
     };
 
+    // A relay has made its consumer when the server lists it: a write before that is before its place.
+    const consumerMade = (name) => until(`consumer ${name}`, async () =>
+      (await (await fetch(`${url}/_changes/consumers`, { headers: { authorization: 'Bearer root' } })).json()).some((c) => c.name === name));
     let relayer = run();
-    await sleep(300);
+    await consumerMade('webhook');
     await query(url, 'root', 'put orders {customer: "ada", total: 40}');
     await until('the first order', async () => done.size >= 1);
     await query(url, 'root', 'put orders {customer: "bo", total: 13}');
@@ -171,11 +193,22 @@ try {
     say(`   replayed an hour later: ${(await resend()).status}`);
     skew = 0;
 
+    say('-- a signature of accents, as long in characters as a real one, and a body of three-byte characters');
+    const accents = await new Promise((resolve) => {
+      const req = httpRequest(hook, { method: 'POST', headers: {
+        'x-webhook-timestamp': String(Math.floor(Date.now() / 1000)), 'x-webhook-signature': `v1=${'é'.repeat(64)}`,
+      } }, (res) => { res.resume(); resolve(res.statusCode); });
+      req.end('{}');
+    });
+    say(`   a signature of 64 accents: ${accents}`);
+    await query(url, 'root', 'put orders {customer: "fa", total: 5, note: $1}', ['€'.repeat(70_000)]);
+    await until('the large order', async () => done.size >= 2);
+
     say('-- the relay stopped; an order is written meanwhile; a new relay carries on from the place the server kept');
     await relayer.stop();
     await query(url, 'root', 'put orders {customer: "cy", total: 7}');
     relayer = run();
-    await until('the third order', async () => done.size >= 2);
+    await until('the third order', async () => done.size >= 3);
     await relayer.stop();
 
     say('-- the receiver rotates its secret before the relay has heard');
@@ -186,19 +219,19 @@ try {
     say(`${alert instanceof Alert ? 'ALERT' : 'error'}: ${alert.message}`);
     say('-- the relay is given both secrets for a while, and the same change goes out');
     relayer = run({ secrets: ['whsec-2', 'whsec-1'] });
-    await until('the fourth order', async () => done.size >= 3);
+    await until('the fourth order', async () => done.size >= 4);
     await relayer.stop();
 
     say('-- only ids, for a receiver that has no business with the rest');
     relayer = run({ name: 'webhook-ids', shape: 'ids', collections: ['orders'], ops: ['del', 'put'], secrets: ['whsec-2'] });
-    await sleep(300);
+    await consumerMade('webhook-ids');
     await query(url, 'root', 'del orders where customer = "di"');
-    await until('the ids', async () => done.size >= 4);
+    await until('the ids', async () => done.size >= 5);
     await relayer.stop();
 
     say('-- a receiver whose address has moved: a redirect is not followed');
     relayer = run({ name: 'webhook-moved', url: hook.replace('/hook', '/moved'), secrets: ['whsec-2'] });
-    await sleep(300);
+    await consumerMade('webhook-moved');
     await query(url, 'root', 'put orders {customer: "ed", total: 9}');
     const moved = await relayer.finished;
     say(`${moved instanceof Alert ? 'ALERT' : 'error'}: ${moved.message}`);

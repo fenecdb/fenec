@@ -30,6 +30,9 @@ the same token                             [{"title":"clerk note"}] [200]
 -- a key of your own service goes into the file beside the provider's
 ["idp-1","idp-2","svc-1"]
 the server's view of the service's token   {"kind":"scoped","sub":"files-backend"}
+-- a key whose kid is the provider's, and a file of own keys with none in it, are refused
+refresh-jwks: a kid is in both <provider>/.well-known/jwks.json and dup.json; jwks.json left as it was
+refresh-jwks: none.json holds no key; jwks.json left as it was
 -- the job asks for a page that is not there one night
 curl: (22) The requested URL returned error: 404
 (the job failed, rc 22)

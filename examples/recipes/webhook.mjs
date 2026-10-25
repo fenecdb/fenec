@@ -39,6 +39,7 @@ const sleep = (ms, signal) => new Promise((resolve) => {
 });
 
 const STOP = new Set([401, 403, 404, 405, 410]);
+const RETRIES = 8; // answers of the server missed one after another
 const RETRY = (status) => status === 408 || status === 429 || status >= 500;
 
 /**
@@ -53,8 +54,12 @@ export async function relay({
   const server = (path, init) => fetch(`${fenec}${path}`, { headers, ...init });
   // Made once, where there is none. A POST to a consumer that exists moves it
   // to the last write on disk, and every change since it was stopped is lost.
-  const listed = await (await server('/_changes/consumers')).json();
-  if (!listed.some((c) => c.name === name)) await server(`/_changes/consumers/${name}`, { method: 'POST' });
+  const listing = await server('/_changes/consumers');
+  if (!listing.ok) throw new Error(`/_changes/consumers: ${listing.status}`);
+  if (!(await listing.json()).some((c) => c.name === name)) {
+    const made = await server(`/_changes/consumers/${name}`, { method: 'POST' });
+    if (!made.ok) throw new Error(`/_changes/consumers/${name}: ${made.status}`);
+  }
 
   async function deliver(change) {
     const sent = shape === 'ids' ? { seq: change.seq, collection: change.collection, op: change.op, id: change.id ?? change.doc?.id } : change;
@@ -79,11 +84,13 @@ export async function relay({
       if (STOP.has(status)) throw new Alert(`seq ${change.seq}: ${url} answers ${status}; stopped, nothing committed`);
       if (res && !RETRY(status)) {
         log(`relay: seq ${change.seq} refused (${status})`);
-        await server('/query', {
+        const kept = await server('/query', {
           method: 'POST',
           body: JSON.stringify({ query: 'put dead_letters {seq: $1, collection: $2, op: $3, status: $4, change: $5, at: now()}',
             params: [change.seq, change.collection, change.op, status, sent] }),
-        });
+        }).catch(() => null);
+        // Kept, or not said to be: a change put away nowhere is a change lost.
+        if (!kept?.ok) throw new Alert(`seq ${change.seq}: could not be kept in dead_letters (${kept ? kept.status : 'no answer'}); stopped, nothing committed`);
         log(`relay: seq ${change.seq} kept in dead_letters`);
         return;
       }
@@ -93,9 +100,20 @@ export async function relay({
     throw new Alert(`seq ${change.seq}: ${url} did not answer ${tries} times; stopped, nothing committed`);
   }
 
+  // A server that is restarted, or not answering for a while, is waited for with a
+  // back-off, and after `RETRIES` answers missed the relay ends with an error, so
+  // that whatever supervises it (systemd's Restart=on-failure) starts it again.
+  // It never ends quietly with a zero: that is only for its own signal.
+  let missed = 0;
   while (!signal?.aborted) {
     const page = await server(`/_changes?consumer=${name}&wait=${wait}`, { signal }).catch(() => null);
-    if (!page) break;
+    if (!page) {
+      if (signal?.aborted) break;
+      if (++missed >= RETRIES) throw new Error(`/_changes: no answer ${missed} times`);
+      await sleep(Math.min(500 * 2 ** missed, 30_000), signal);
+      continue;
+    }
+    missed = 0;
     if (!page.ok) throw new Error(`/_changes: ${page.status} ${await page.text()}`);
     const next = Number(page.headers.get('fenec-next'));
     for (const line of (await page.text()).split('\n').filter(Boolean)) {
@@ -109,7 +127,8 @@ export async function relay({
       }
     }
     // After every delivery of the page was answered, not before.
-    await server(`/_changes/consumers/${name}`, { method: 'POST', body: JSON.stringify({ since: next }) });
+    const committed = await server(`/_changes/consumers/${name}`, { method: 'POST', body: JSON.stringify({ since: next }) });
+    if (!committed.ok) throw new Error(`commit of ${name} at ${next}: ${committed.status}`);
   }
 }
 

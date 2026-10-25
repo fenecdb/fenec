@@ -28,8 +28,8 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 failed=0
 skipped=""
 
-missing() { # missing <tool> <what needs it>
-    echo "$1 not found -- $2 skipped"
+missing() { # missing <why> <what needs it>
+    echo "$1 -- $2 skipped"
     [ -z "${CI:-}" ] || failed=1
     skipped="$skipped $2"
 }
@@ -71,7 +71,7 @@ held() {
 }
 
 for tool in node curl jq python3; do
-    has "$tool" || { missing "$tool" "the recipes"; exit "$failed"; }
+    has "$tool" || { missing "$tool not found" "the recipes"; exit "$failed"; }
 done
 [ -x "$FENEC_SERVER" ] || { echo "no $FENEC_SERVER: cargo build -p fenec-server"; exit 1; }
 [ -d "$here/node_modules/@aws-sdk" ] || { echo "no node_modules: npm install (examples/run-tests.sh does)"; exit 1; }
@@ -81,16 +81,20 @@ sh "$here/auth.sh" >"$tmp/auth.out" 2>&1 || { cat "$tmp/auth.out"; exit 1; }
 held auth "$tmp/auth.out" auth
 
 echo "== files"
-if has docker && docker info >/dev/null 2>&1; then
+if ! has docker; then
+    missing "docker not found" "the files recipe"
+elif ! docker info >/dev/null 2>&1; then
+    missing "docker is not usable (docker info fails)" "the files recipe"
+else
     node "$here/files-demo.mjs" >"$tmp/files.out" 2>&1 || { cat "$tmp/files.out"; exit 1; }
     held files "$tmp/files.out" files
-else
-    missing docker "the files recipe"
 fi
 
 echo "== functions"
 if [ -z "${WRANGLER:-}" ] && ! has wrangler && [ -n "${CI:-}" ]; then
-    # What the site's deploy and integrations/cloudflare pin.
+    # 4.149.0 is what integrations/cloudflare's lockfile resolves, which that job's
+    # tests run the example Worker under in CI (its package.json says ^4.144.0, and
+    # site.yml pins 4.135.0 for the deploy action, which only has to serve assets).
     npm install --prefix "$tmp/wrangler" --no-audit --no-fund --loglevel=error wrangler@4.149.0 >&2
     WRANGLER="$tmp/wrangler/node_modules/.bin/wrangler"
     export WRANGLER

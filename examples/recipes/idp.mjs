@@ -15,6 +15,8 @@
 //   node idp.mjs service-key <dir> [kid]    a key of your own service, kept
 //                                            apart from the provider's: its
 //                                            public half in service-jwks.json
+//   node idp.mjs jwk <key.pem> <kid>        the public half of a key you made
+//                                            (openssl genrsa), as a JWKS on stdout
 //   node idp.mjs merge <dir> <out>           the provider's keys and your
 //                                            service's in one JWKS, as
 //                                            refresh-jwks.sh makes the file
@@ -26,7 +28,7 @@
 //                                            /.well-known/jwks.json, as a
 //                                            provider serves it; says where
 import { createServer } from 'node:http';
-import { createPrivateKey, createSign, generateKeyPairSync, sign as signRaw } from 'node:crypto';
+import { createPrivateKey, createPublicKey, createSign, generateKeyPairSync, sign as signRaw } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isMain } from './main.mjs';
@@ -65,15 +67,21 @@ export function addServiceKey(dir, kid = 'svc-1') {
   writeFileSync(join(dir, 'service-jwks.json'), JSON.stringify({ keys: [jwk] }, null, 2));
 }
 
+/** The public half of an RSA key in a PEM file, as a one-key JWKS: what the keys file takes of a service's key. */
+export function jwkOf(pemPath, kid) {
+  const publicKey = createPublicKey(createPrivateKey(readFileSync(pemPath)));
+  return { keys: [{ ...publicKey.export({ format: 'jwk' }), kid, alg: 'RS256', use: 'sig' }] };
+}
+
 /** The provider's keys and the service's, as the server's file holds them. */
 export function merge(dir, out) {
   const own = existsSync(join(dir, 'service-jwks.json')) ? JSON.parse(readFileSync(join(dir, 'service-jwks.json'), 'utf8')).keys : [];
   writeFileSync(out, JSON.stringify({ keys: [...readJwks(dir).keys, ...own] }, null, 2));
 }
 
-/** A token the service signs for itself: `sub` is its name, 5 minutes long. */
+/** A token the service signs for itself: `iss` the services', `sub` its name, 5 minutes long. */
 export function serviceToken(dir, sub, claims = {}, { kid = 'svc-1', ttl = 300 } = {}) {
-  return token(dir, { sub, ...claims }, { kid, ttl });
+  return token(dir, { iss: 'urn:fenec:services', sub, ...claims }, { kid, ttl });
 }
 
 /** An RS256 token for `claims`, signed with the newest key, an hour long. */
@@ -166,6 +174,7 @@ if (isMain(import.meta.url)) {
   else if (cmd === 'serve') serve(a);
   else if (cmd === 'service-key') addServiceKey(a, b);
   else if (cmd === 'merge') merge(a, b);
+  else if (cmd === 'jwk') console.log(JSON.stringify(jwkOf(a, b), null, 2));
   else if (cmd === 'service-token') console.log(serviceToken(a, b, c ? JSON.parse(c) : {}));
-  else throw new Error('usage: node idp.mjs init|add-key|token|ec-token|serve|service-key|merge|service-token ...');
+  else throw new Error('usage: node idp.mjs init|add-key|token|ec-token|serve|service-key|jwk|merge|service-token ...');
 }

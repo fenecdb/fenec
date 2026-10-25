@@ -83,11 +83,16 @@ export function backend({ fenec, appToken, s3, bucket, prefix = '', expiresIn = 
       if (req.method === 'POST' && verb === 'done') {
         const file = await me.from('files').where('id', id).first(); // a row this person may read
         if (!file) return reply(404, { error: 'no such file' });
+        // A retry after the answer was lost: it is done, and said to be.
+        if (file.state === 'ready') return reply(200, { id: file.id, state: 'ready' });
         let held;
         try {
           held = await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: keys.pending(file.id) }));
-        } catch {
-          return reply(409, { error: 'the bytes are not in the bucket yet' });
+        } catch (e) {
+          // No such object is the one answer that means "not yet"; a store that
+          // cannot be reached or refuses us is the backend's to log, not the client's to be told.
+          if (e.$metadata?.httpStatusCode === 404) return reply(409, { error: 'the bytes are not in the bucket yet' });
+          throw e;
         }
         if (held.ContentLength !== file.size) {
           await me.from('files').where('id', file.id).delete(); // blobs.mjs removes the object
@@ -97,10 +102,17 @@ export function backend({ fenec, appToken, s3, bucket, prefix = '', expiresIn = 
         // to the upload URL after this point do not reach what is downloaded.
         // `CopySourceIfMatch` makes it that object, the one measured, and not
         // one that replaced it between the two calls.
-        await s3.send(new CopyObjectCommand({
-          Bucket: bucket, Key: keys.live(file.id), CopySource: `${bucket}/${keys.pending(file.id)}`,
-          CopySourceIfMatch: held.ETag,
-        }));
+        try {
+          await s3.send(new CopyObjectCommand({
+            Bucket: bucket, Key: keys.live(file.id), CopySource: `${bucket}/${keys.pending(file.id)}`,
+            CopySourceIfMatch: held.ETag,
+          }));
+        } catch (e) {
+          // 412: the upload was replaced between the check and the copy (the SDK's
+          // error carries the status in its metadata, whatever it names the error).
+          if (e.$metadata?.httpStatusCode === 412) return reply(409, { error: 'the upload changed while it was checked; send it again' });
+          throw e;
+        }
         const app = as(await appToken());
         await app.from('files').where('id', file.id).update({ state: 'ready' }, { require: 1 });
         await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: keys.pending(file.id) })).catch(() => {});
@@ -169,7 +181,9 @@ if (isMain(import.meta.url)) {
   const env = process.env;
   const server = backend({
     fenec: env.FENEC_URL,
-    appToken: serviceTokens({ pem: readFileSync(env.SERVICE_KEY), sub: 'files-backend' }),
+    // The key as a PEM file, whose path is SERVICE_KEY_FILE (a Worker keeps its key
+    // in a secret instead, as base64 of the DER: the two forms are not the same).
+    appToken: serviceTokens({ pem: readFileSync(env.SERVICE_KEY_FILE), sub: 'files-backend' }),
     s3: s3From(env),
     bucket: env.BUCKET,
     prefix: env.KEY_PREFIX ?? '',

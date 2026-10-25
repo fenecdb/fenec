@@ -231,6 +231,14 @@ curl -fsS --proto "${JWKS_PROTO:-=https}" --proto-redir "${JWKS_PROTO:-=https}" 
 jq -e '[.keys[]? | select(.kty == "RSA")] | length &gt; 0' "$tmp" &gt;/dev/null ||
     { echo "refresh-jwks: $url holds no RSA key; $file left as it was" &gt;&amp;2; exit 1; }
 if [ -n "$own" ]; then
+    # A file of your own keys with none in it is a mistake that would drop them
+    # from the server's file, and a kid on both sides is one key claiming
+    # another's name: a token that names it is checked against both.
+    jq -e '(.keys | type == "array") and (.keys | length &gt; 0)' "$own" &gt;/dev/null ||
+        { echo "refresh-jwks: $own holds no key; $file left as it was" &gt;&amp;2; exit 1; }
+    jq -s -e '([.[0].keys[].kid, .[1].keys[].kid] | map(select(. != null))) as $k | ($k | length) == ($k | unique | length)' \
+        "$tmp" "$own" &gt;/dev/null ||
+        { echo "refresh-jwks: a kid is in both $url and $own; $file left as it was" &gt;&amp;2; exit 1; }
     jq -s '{keys: (.[0].keys + .[1].keys)}' "$tmp" "$own" &gt;"$tmp.merged"
     mv "$tmp.merged" "$tmp"
 fi
@@ -256,6 +264,9 @@ the same token                             [{"title":"clerk note"}] [200]
 -- a key of your own service goes into the file beside the provider's
 ["idp-1","idp-2","svc-1"]
 the server's view of the service's token   {"kind":"scoped","sub":"files-backend"}
+-- a key whose kid is the provider's, and a file of own keys with none in it, are refused
+refresh-jwks: a kid is in both &lt;provider&gt;/.well-known/jwks.json and dup.json; jwks.json left as it was
+refresh-jwks: none.json holds no key; jwks.json left as it was
 -- the job asks for a page that is not there one night
 curl: (22) The requested URL returned error: 404
 (the job failed, rc 22)
@@ -306,30 +317,55 @@ of five minutes whenever one is wanted. The provider's JWKS never holds it,
 and a token naming its <code>kid</code> is checked against that key alone.</p>
 
 <pre data-lang="bash">openssl genrsa -out svc-1.pem 2048
-# the public half as a JWK, kid svc-1, into service-jwks.json -- examples/recipes/idp.mjs service-key does both
+node idp.mjs jwk svc-1.pem svc-1 &gt; service-jwks.json     # the public half as a JWKS, kid svc-1
 
 refresh-jwks.sh https://acme.us.auth0.com/.well-known/jwks.json /etc/fenec/jwks.json /etc/fenec/service-jwks.json
+
+# a Worker's secret is the same key as base64 of the PKCS#8 DER, on one line
+openssl pkcs8 -topk8 -nocrypt -in svc-1.pem -outform DER | base64 | tr -d '\n'
 </pre>
 
-<p>The refresh job above ran it, and the server took the service's token:</p>
+<p>The refresh job above ran it with a key made as shown, and the server took the
+service's token. The job refuses a <code>kid</code> that is on both sides and an
+own-keys file with no key in it, which would leave the server without the service's
+key at the next fetch:</p>
 
 <pre data-lang="text">-- a key of your own service goes into the file beside the provider's
 ["idp-1","idp-2","svc-1"]
 the server's view of the service's token   {"kind":"scoped","sub":"files-backend"}
--- the job asks for a page that is not there one night</pre>
+-- a key whose kid is the provider's, and a file of own keys with none in it, are refused</pre>
 
 <ul>
-  <li><b>The service is its <code>sub</code>, not a <code>role</code>.</b> A
-    provider decides what a <code>sub</code> is and a person cannot choose it,
-    where a <code>role</code> claim that a provider lets people set (Supabase's
-    <code>user_metadata</code>, Clerk's <code>unsafe_metadata</code>) would be
-    theirs to claim. Name it so that no provider's form is it (<code>user_…</code>,
-    <code>auth0|…</code>, a UUID): <code>files-backend</code>, and a policy line
-    <code>where $jwt.sub = 'files-backend'</code> (<a href="/docs/files">Files</a>
-    and <a href="/docs/functions">Functions</a> use it).</li>
-  <li><b>Scoped to what the service does.</b> A Worker that adds signups is given
-    <code>insert</code> on two collections and nothing else, so that a leaked
-    key adds rows and reads none.</li>
+  <li><b>A service is an <code>iss</code> and a <code>sub</code>, never a
+    <code>role</code>.</b> A rule that means a service says
+    <code>$jwt.sub = 'files-backend' and $jwt.iss = 'urn:fenec:services'</code>
+    (<a href="/docs/files">Files</a> and <a href="/docs/functions">Functions</a>
+    use it). A <code>sub</code> alone is not enough: a provider assigns one, but
+    a provider's token can say <code>files-backend</code> too (a Firebase
+    project's owner picks the uid of a custom token), and a rule that asked for
+    the <code>sub</code> only would take it for the service. No provider's token
+    carries the issuer of your services. A <code>role</code> claim in the
+    provider's namespace would be one the provider's settings, or a user's own
+    attributes, might fill.</li>
+  <li><b>The server binds no key to an identity.</b> Whoever holds a signing key
+    the file holds, <code>svc-1</code> or the provider's own, can sign any
+    <code>sub</code>, <code>iss</code> or <code>role</code> a rule of the policy
+    asks for: a Worker that leaked its key leaked every identity the policy has a
+    rule for, not only its own. So the key is the secret: a Worker secret
+    (<code>wrangler secret put</code>) or a file only its service reads, never in
+    a repository or a <code>.dev.vars</code> that is committed; one key for each
+    service, so that one can be dropped without the others. Checking the issuer
+    for the whole server is coming (<a href="#checks">What the server checks</a>);
+    binding a key to an issuer, so that a key signs only for its own, is a known gap
+    and future work.</li>
+  <li><b>Rotating it:</b> add <code>svc-2</code> to <code>service-jwks.json</code>
+    (the job puts both in the file), deploy the service with the new key and its
+    <code>kid</code>, and once the tokens it signed with <code>svc-1</code> have
+    lapsed (five minutes) take <code>svc-1</code> out of the file.</li>
+  <li><b>One form of the key to a service.</b> The backend reads a PEM from a path
+    (<code>SERVICE_KEY_FILE</code>), a Worker the PKCS#8 DER as base64
+    (<code>SERVICE_KEY</code>); the names differ so that the one is not given the
+    other's form.</li>
 </ul>
 
 <h3 id="legacy">A legacy HS256 secret</h3>
@@ -566,6 +602,10 @@ supabase, a person                         [{"title":"ada note"}] [200]
 supabase, an anonymous sign-in             [] [200]</pre>
 
 <ul>
+  <li><b>The rules that mean a service are pinned on the issuer of your
+    services</b> (<code>files-policy.txt</code>, <code>functions-policy.txt</code>),
+    since a provider's token can carry any <code>sub</code>: see
+    <a href="#services">Tokens your own services call with</a>.</li>
   <li><b>Every rule of the Auth0 section carries the pin</b>, the owner's, the
     <code>permissions</code> one, the one that reads <code>staff</code> and the one
     that reads <code>profiles</code>: a token for another API reads nothing from any

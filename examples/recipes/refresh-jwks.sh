@@ -30,6 +30,14 @@ curl -fsS --proto "${JWKS_PROTO:-=https}" --proto-redir "${JWKS_PROTO:-=https}" 
 jq -e '[.keys[]? | select(.kty == "RSA")] | length > 0' "$tmp" >/dev/null ||
     { echo "refresh-jwks: $url holds no RSA key; $file left as it was" >&2; exit 1; }
 if [ -n "$own" ]; then
+    # A file of your own keys with none in it is a mistake that would drop them
+    # from the server's file, and a kid on both sides is one key claiming
+    # another's name: a token that names it is checked against both.
+    jq -e '(.keys | type == "array") and (.keys | length > 0)' "$own" >/dev/null ||
+        { echo "refresh-jwks: $own holds no key; $file left as it was" >&2; exit 1; }
+    jq -s -e '([.[0].keys[].kid, .[1].keys[].kid] | map(select(. != null))) as $k | ($k | length) == ($k | unique | length)' \
+        "$tmp" "$own" >/dev/null ||
+        { echo "refresh-jwks: a kid is in both $url and $own; $file left as it was" >&2; exit 1; }
     jq -s '{keys: (.[0].keys + .[1].keys)}' "$tmp" "$own" >"$tmp.merged"
     mv "$tmp.merged" "$tmp"
 fi

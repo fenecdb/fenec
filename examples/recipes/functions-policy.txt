@@ -1,12 +1,13 @@
 # collection  access                                       rows
 
 # The signup function (worker/index.mjs) adds a signup and the job that welcomes
-# it, and reads and changes nothing. Each service is its `sub`, which a
-# provider assigns and a person does not choose (service-token.mjs).
-signups       insert                                       where $jwt.sub = 'signup-function'
-jobs          insert                                       where $jwt.sub = 'signup-function'
+# it, and reads and changes nothing. Each service is its `sub` and the `iss`
+# that only your services sign (service-token.mjs): a `sub` alone is what a
+# provider's token can say too.
+signups       insert                                       where $jwt.sub = 'signup-function' and $jwt.iss = 'urn:fenec:services'
+jobs          insert                                       where $jwt.sub = 'signup-function' and $jwt.iss = 'urn:fenec:services'
 
 # The welcome worker (welcome-worker.mjs) claims a job, writes its lease and
 # its failures, and deletes what it has done.
-jobs          read,delete                                  where $jwt.sub = 'welcome-worker'
-jobs          update(owner, run_at, attempts, error)       where $jwt.sub = 'welcome-worker'
+jobs          read,delete                                  where $jwt.sub = 'welcome-worker' and $jwt.iss = 'urn:fenec:services'
+jobs          update(owner, run_at, attempts, error)       where $jwt.sub = 'welcome-worker' and $jwt.iss = 'urn:fenec:services'
