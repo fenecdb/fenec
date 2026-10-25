@@ -148,14 +148,15 @@ nearest ten at 99.1% recall in 0.141 ms, against pgvector's 98.6% in 2.076
 
 ## Install
 
+A first query in a few commands, from a release, a package or an image:
+**[Quickstart](https://fenecdb.com/docs/quickstart)**. From a clone
+instead ([Build from source](https://fenecdb.com/docs/build)):
+
 ```bash
 git clone https://github.com/fenecdb/fenec && cd fenec
 make test     # the Rust suite, then the JS suite
 make serve    # builds the wasm and serves the browser console on :8787
 ```
-
-Five minutes from clone to your first query:
-**[Quickstart](https://fenecdb.com/docs/quickstart)**.
 
 **[Examples](examples/)**: one small app, Notes, in every language -- the
 browser, React, Node, Python, Go, .NET, Rust, SwiftUI, Jetpack Compose and
@@ -329,7 +330,8 @@ query; it is not a join and is not trying to be one.
 
 | | |
 |---|---|
-| [Quickstart](https://fenecdb.com/docs/quickstart) | Build it, open a file, write a row and query it |
+| [Quickstart](https://fenecdb.com/docs/quickstart) | Install a release, a package or the image, write a row and query it: in a browser tab, on a server from your language, or in the shell |
+| [Build from source](https://fenecdb.com/docs/build) | Clone, build the shell, the server and the browser module, run the tests and build the site |
 | [How it works](https://fenecdb.com/docs/concepts) | Segments, the offset index, the mapped file, why there is no page cache and exactly one writer, and HNSW with a filter |
 | [FenecQL](https://fenecdb.com/docs/fenecql) | Statements, types, indexes, operators, parameters, functions |
 | [From SQL](https://fenecdb.com/docs/sql) | The SQL FenecQL reads as written — tables, joins, subqueries, pgvector's distances — what it refuses and what to write instead, where the meaning is not SQL's: nulls, double quotes, text, joins |
