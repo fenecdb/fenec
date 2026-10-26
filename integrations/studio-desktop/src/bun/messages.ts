@@ -141,6 +141,32 @@ export function remoteNotice(name: string, origin: string, probe: Exclude<Probe,
 	}
 }
 
+/** A served database's port is another program's. */
+export function portTakenNotice(name: string, port: number, serverSaid: string): Notice {
+	return {
+		title: `Port ${port} is taken`,
+		message: `Another program listens on port ${port}, so ${name} was not served.`,
+		hint: "Pick another port, or leave it empty for any free port.",
+		detail: tail(serverSaid, 4),
+		actions: [{ id: "settings", label: "Change the port" }],
+	};
+}
+
+/** A served database's server exited without being asked to. */
+export function servedDiedNotice(name: string, exit: number | null, serverSaid: string): Notice {
+	return {
+		title: "A database server stopped",
+		message: `The fenec-server serving ${name} exited (${exit === null ? "killed by a signal" : `code ${exit}`}). Apps connected to it get no answer now.`,
+		hint: "Nothing written before it stopped is lost. Start it again with the same settings, or look at its output in Servers.",
+		detail: tail(serverSaid),
+		actions: [{ id: "start", label: "Start again" }],
+	};
+}
+
+/** What a backup of a database whose writes the system syncs says: its server serves no stream. */
+export const SYNC_OFF_BACKUP =
+	"Its writes are synced when the system decides (When the system writes), and a backup is taken from what is on disk, which such a server does not promise. Choose Every 250 ms or Every write in its server's settings, or stop it: a database nothing serves is backed up by a server started for that alone.";
+
 export function gone(what: string): Notice {
 	return { title: "That is gone", message: `${what} does not exist any more.` };
 }

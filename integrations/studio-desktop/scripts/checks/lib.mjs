@@ -142,8 +142,17 @@ export async function waitNotice(title, ms = 15000, after = 0) {
   await waitFor((l) => l.what === 'notice-ready' && l.key === shown.key, ms, `${shown.key} drawn`);
   return shown;
 }
-/** Presses a notice's button, as a click would. */
-export const pressNotice = (notice, id) => evalIn(notice.key, `document.getElementById("notice-${id}").click()`);
+/**
+ * Presses a notice's button, as a click would. Every button closes the notice,
+ * and the main process closes it on the click's own message: what a script in
+ * it would report after the click may not leave the window before it goes (a
+ * `serve` run lost it), so the notice's closing is what is waited for.
+ */
+export async function pressNotice(notice, id) {
+  const n = lines().length;
+  cmd({ cmd: 'eval', key: notice.key, js: `document.getElementById(${JSON.stringify(`notice-${id}`)}).click()` });
+  await waitFor((l, i) => i >= n && l.what === 'notice-closed' && l.key === notice.key, 15000, `${notice.key} closed by ${id}`);
+}
 
 /**
  * The test variant, started with `env` added to the hooks' own. Its output
@@ -228,6 +237,21 @@ export function data(name, rows = 50) {
   });
   if (r.status !== 0) throw new Error(`could not make ${path}: ${r.stderr}`);
   return path;
+}
+
+/**
+ * The Keychain items of the databases a check served (`serve:<id>`, under the
+ * test variant's own service), deleted: a check that ends with one served
+ * leaves its token behind otherwise, and the next run's ids are new ones.
+ */
+export function forgetServeItems() {
+  let databases = [];
+  try {
+    databases = JSON.parse(readFileSync(`${USER_DATA}/state.json`, 'utf8')).databases ?? [];
+  } catch {
+    return;
+  }
+  for (const d of databases) spawnSync('security', ['delete-generic-password', '-s', IDENTIFIER, '-a', `serve:${d.id}`], { stdio: 'ignore' });
 }
 
 /** Every process of the app and of the servers on this run's files must be gone before a check starts. */

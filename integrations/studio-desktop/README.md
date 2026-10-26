@@ -1,11 +1,14 @@
 # fenec studio, desktop (beta)
 
 [fenec studio](../../site/content/docs/studio.html) as a Mac app: open a
-`.fenec` file with nothing to start, make a new database, or keep saved
+`.fenec` file with nothing to start, make a new database, serve one to the
+apps on this Mac or your network, back it up and restore it, or keep saved
 connections to servers. It is **a window on a studio a `fenec-server`
-serves**, not a second implementation of it: the app bundles `fenec-server`,
-starts one per open file, and shows its own `/_studio/` page, so what the
-window does is what the studio does in a browser.
+serves**, not a second implementation of it: the app bundles `fenec-server`
+and the `fenec` shell, starts a server per open or served file, and shows its
+own `/_studio/` page, so what the window does is what the studio does in a
+browser. Nothing of a database is written by the app itself: a server makes a
+new file, `fenec backup` takes an image, `fenec restore` makes a file of one.
 
 Beta, macOS on Apple silicon only. The shell is [Electrobun](https://electrobun.dev)
 2.0.4 (a Bun main process and the system's WKWebView); its build tool ships no
@@ -20,11 +23,14 @@ System Settings.
 ```
  fenec studio.app
  ├─ Bun main process ── src/bun/*   windows, menu, servers, Keychain
- │    ├─ launcher window            recent files, saved servers   (bundled page, RPC)
- │    ├─ new-database window        folder, name                  (bundled page, RPC)
+ │    ├─ main window                databases, servers, connections, backups, serve sheet  (bundled page, RPC)
+ │    ├─ new-database window        name, folder, first collection, sync, from a backup    (bundled page, RPC)
  │    ├─ notice windows             every failure, in words       (bundled page, event bridge only)
  │    └─ one window per open thing  <server>/_studio/             (the server's page, event bridge only)
- └─ fenec-server --file F --studio --http 127.0.0.1:0     one per open file, token in its environment
+ ├─ fenec-server --file F --http H:P --sync S ... --exit-on-stdin-close
+ │       one a file at most: a window's (127.0.0.1:0), a served database's (its port and
+ │       reach), or one for a backup alone; its tokens in its environment
+ └─ fenec backup | verify | restore | key     backups; the replication token in its environment
 ```
 
 ## Build, run, test
@@ -38,27 +44,29 @@ make studio-desktop        # the unsigned .app and .dmg
 make studio-desktop-test   # type check, unit tests, every scripted check
 ```
 
-`make studio-desktop` builds `fenec-server` from this checkout
-(`scripts/get-server.sh`), makes the icon, and builds. The results:
+`make studio-desktop` builds `fenec-server` and the `fenec` shell from this
+checkout (`scripts/get-server.sh`), makes the icon, and builds. The results:
 
 ```
 integrations/studio-desktop/build/stable-macos-arm64/fenec studio.app
 integrations/studio-desktop/artifacts/macos-arm64-fenecstudio.dmg
 ```
 
-`make studio-desktop STUDIO_SERVER=0.1.12` bundles that release's server
-instead: it downloads `fenec-v0.1.12-<target>.tar.gz` and checks its SHA-256
-against the release's own `SHA256SUMS` (the same script, `scripts/get-server.sh
-0.1.12`). Either way a server without the two flags the app starts it with,
-`--studio` and `--exit-on-stdin-close`, is refused with a message saying so:
-the first release with `--studio` is 0.1.11 and the first with both is 0.1.12,
-and every release before them (up to 0.1.10) has neither.
+`make studio-desktop STUDIO_SERVER=0.1.12` bundles that release's server and
+shell instead: it downloads `fenec-v0.1.12-<target>.tar.gz`, which holds both,
+and checks its SHA-256 against the release's own `SHA256SUMS` (the same
+script, `scripts/get-server.sh 0.1.12`). Either way a server without the two
+flags the app starts it with, `--studio` and `--exit-on-stdin-close`, is
+refused with a message saying so: the first release with `--studio` is 0.1.11
+and the first with both is 0.1.12, and every release before them (up to
+0.1.10) has neither. A shell without `fenec verify` and `--key-file`, which the
+backups use, is refused the same way (0.1.12 has both).
 
 By hand, from this directory:
 
 ```bash
 npm ci --ignore-scripts      # electrobun (the bootstrap) and typescript, pinned
-sh scripts/get-server.sh     # bin/fenec-server, built from this checkout
+sh scripts/get-server.sh     # bin/fenec-server and bin/fenec, built from this checkout
 npm run dev                  # the app, from source, in the dev channel
 npm run build                # the stable build, as `make studio-desktop` does
 npm run typecheck && npm run test:unit
@@ -108,12 +116,21 @@ digests, and the script says which hashes a mismatch is.
 `make studio-desktop-test` runs, in order:
 
 1. `tsc` over the sources, the unit tests and the config, then `test/*.test.ts`
-   under `node --test` (names, the remote probe against stand-in servers, a
-   redirect that must not carry a token, the wording of every failure, the
-   token hand-off script run as a page would, the server's environment, what a
-   file is before a server is started on it, the token hand-off run through
-   the studio's own `connect.js`, the signing switches in `electrobun.config.ts`, the pin, `get-server.sh`
-   against a release laid out in a directory).
+   under `node --test` (names and a first collection's statement, the remote
+   probe against stand-in servers, a redirect that must not carry a token, the
+   wording of every failure, the token hand-off script run as a page would, the
+   server's environment, what a file is before a server is started on it, the
+   token hand-off run through the studio's own `connect.js`, the signing
+   switches in `electrobun.config.ts`, the pin, `get-server.sh` against a
+   release laid out in a directory, a server's arguments and the command the
+   serve sheet shows, a served token kept in a stand-in Keychain, the figures
+   read from a server's `/_metrics`), and two that drive **the real binaries
+   in `bin/` through the app's own code**, Node's spawn in place of Bun's:
+   `process.test.ts` (a server on port 0, its token in its environment and not
+   its arguments, a stop that is exit 0, a held file, a port another program
+   answers on) and `backups.test.ts` (a backup, verify, a restore into a new
+   file and never over one, sealed with a key). Where `bin/` is empty they are
+   skipped, saying why.
 2. The **test variant**: the same app built with `FENEC_DESKTOP_TEST_BUILD=1`,
    which adds `src/bun/testhooks.ts` and gives it an identifier of its own
    (`dev.fenecdb.studio.test`), so a run touches none of a real install's
@@ -136,13 +153,15 @@ digests, and the script says which hashes a mismatch is.
    | `warmup` | the first launch of a build (below) |
    | `files` | open, edit through the studio's own form, a second open only shows the window, close stops the server with exit 0, reopen has the edit (also at once, while the first server is still stopping); a file another program holds is a message and **Try again** works once it lets go; a missing file, a folder, a file that is not a database and an empty one are said before any server is started, and nothing is written beside them; a quit right after a close waits for that server, and it ends with exit 0 |
    | `server-dies` | `kill -9` the server under a window: a message, the window closed, **Open again** works |
-   | `orphan` | the app killed with two files open, one opened after the other: **the descriptor tables (lsof), read while the app is alive, say the write end of each server's stdin is the app's alone** (a control starts a process that does hold another's and requires the reading to find it), then both servers end by themselves (the end of their stdin) and both files are free for another program. A process is not stopped: on a hosted macOS runner a SIGSTOPped server made `ps` hang, and the job with it |
+   | `orphan` | the app killed with two files open, one opened after the other, and a third served: **the descriptor tables (lsof), read while the app is alive, say the write end of each server's stdin is the app's alone** (a control starts a process that does hold another's and requires the reading to find it), then every server ends by itself (the end of its stdin), the served one too, and every file is free for another program. A process is not stopped: on a hosted macOS runner a SIGSTOPped server made `ps` hang, and the job with it |
    | `sandbox` | the session is `window.fenecHost`, frozen, in the page's own world, and in no storage; the studio has no sign-in form and no Sign out; only the event bridge in a studio window, no navigating off its origin; **a non-web address is dropped by the app** (the page asked, and nothing reached the system) and the first web link is handed to the browser, which the rate limit of one in three seconds does not explain |
    | `pages` | the launcher, the new-database window and a notice window cannot be navigated anywhere else (a web page, a file, another of the app's pages): without the rule, the launcher goes to example.com |
    | `storage` | what a window keeps (the studio's history, theme) is its own, **read from a second window on the same origin** (`store-window`, a test hook): a window in another store does not see a file window's, one in the same store does (the control); two saved servers on one address do not share it; a saved server's survives its window; **a removed connection's store, opened again under its id, is empty**, whether or not a window was open on it |
    | `environment` | the server is started with the allowlist and its token, whatever the app was started with (`OTEL_*`, `FENEC_JWT_SECRET`, and the checks' own variables stay out) |
-   | `remote` | saved servers: token in the Keychain and in no `state.json` or process argument; the studio signed in; every failure in words (wrong token, no token, studio off, unreachable, a redirect that the token does not follow); an address changed without a token is refused; edit; two clicks open one window; remove deletes the Keychain item |
-   | `newdb` | the folder dialog (answered by the check), a name, the file made and opened; an existing name refused, case-insensitively, the file untouched; bad names; Cancel |
+   | `remote` | saved servers: token in the Keychain and in no `state.json` or process argument; the studio signed in; every failure in words (wrong token, no token, studio off, unreachable, a redirect that the token does not follow); an address changed without a token forgets the saved one, and nothing is sent to the new address; edit; Check now, with no window; two clicks open one window; remove deletes the Keychain item |
+   | `newdb` | the folder dialog (answered by the check), a name, the file made and opened; an existing name refused, case-insensitively, the file untouched; bad names; a first collection and `--sync always`, made by a server; a field list that could close itself, refused with no file made; "Serve it" hands over to the serve sheet, the file a database already; Cancel |
+   | `serve` | the main window draws one section at a time; the serve sheet from the Databases list: its command holds no token, Show shows the Keychain's; Start: any free port, the token from the Keychain and in no argument or `state.json`, 401 without it; Open is a window on that server, not a second one, and closing it leaves the server running; its output and figures; Restart with a port and the network (the same token); New token taken at the next start; a port another program answers on and a file another program serves, each said; a server killed under it, said, and **Start again**; Stop is exit 0 and the file free; a quit stops it; **a relaunch starts nothing** and lists it stopped; Remove deletes the Keychain item |
+   | `backups` | a backup with nothing running (a server for it alone, stopped with exit 0, no window) and one through the window's own server; verify; a restore into a new file that opens with the rows; never over a file there or the open one; a key made with `fenec key` (0600, never written over), a sealed backup that is no database in the clear, verified and restored; a new database from a folder of backups; a database served with `--sync off`, refused with the reason |
    | `finder` | `open -a <app> <file>` with the app not running: the file arrives as `open-url`, spaces and non-ASCII letters included |
 
    `ONLY=files,remote npm run checks` runs a subset (with the test variant
@@ -156,7 +175,8 @@ programs that can open a `.fenec` file (the `finder` check needs the document
 type). `run.mjs` deletes the test variant's own folder in
 `~/Library/Application Support/dev.fenecdb.studio.test` before it starts, and
 its Keychain items (service `dev.fenecdb.studio.test`) are the checks' own,
-removed as they go. Nothing of a real install (`dev.fenecdb.studio`) is read or
+removed as they go (a served database's, `serve:<id>`, by `forgetServeItems`
+at the end of each check that serves one). Nothing of a real install (`dev.fenecdb.studio`) is read or
 written. To take the test variant out of the "Open With" list, delete
 `build-test/`.
 
@@ -178,12 +198,13 @@ thing in the list below that has to be looked at with a real certificate.
 
 | | |
 |---|---|
-| `src/bun/server.ts` | **the one place a server is started**: `fenec-server --file F --studio --http 127.0.0.1:0 --exit-on-stdin-close` with a random 32-byte token in `FENEC_HTTP_TOKEN` and **a pipe on its stdin that the app holds for the server's life**, found by the `fenec-http <version> listening on: http://127.0.0.1:<port>` line on stderr (the whole line, anchored, on the loopback address that was asked for: a line that merely contains the words, or an address that is not 127.0.0.1, is refused and the server stopped; `listening.ts`), which is read for as long as it runs; SIGTERM when the window closes (sync and checkpoint on the way down), SIGKILL after 30 s; given a few variables (`env.ts`: `HOME`, `PATH`, `TMPDIR`, `LANG`, `LC_*`, `USER`, `LOGNAME`, `TZ`) and nothing else of the app's environment |
+| `src/bun/server.ts`, `process.ts` | **the one place a server is started**: `fenec-server --file F --http H:P --sync S [...] --exit-on-stdin-close` (`serving.ts` writes the arguments) with a random 32-byte token in `FENEC_HTTP_TOKEN` (a served database's: the Keychain's) and another in `FENEC_REPLICATION_TOKEN` for backups, and **a pipe on its stdin that the app holds for the server's life**, found by the `fenec-http <version> listening on: http://<host>:<port>` line on stderr (the whole line, anchored, on the host and port that were asked for: a line that merely contains the words, or another address, is refused and the server stopped; `listening.ts`), which is read, with stdout, for as long as it runs into a ring of its last 1 000 lines; SIGTERM to stop it (sync and checkpoint on the way down), SIGKILL after 30 s; given a few variables (`env.ts`: `HOME`, `PATH`, `TMPDIR`, `LANG`, `LC_*`, `USER`, `LOGNAME`, `TZ`) and nothing else of the app's environment. `process.ts` takes the spawn it is handed, so `node --test` drives the real binary through it |
 | `src/bun/session.ts` | **the one place a token reaches a page**: the preload that defines `window.fenecHost` (below) |
 | `src/bun/windows.ts` | what a studio window is held to; the notice window; `holdTo`, which holds every window of the app to its address |
-| `src/bun/app.ts` | open a file or a saved server, make a new database, keep the saved list; one window per `file:<real path>` or `remote:<id>`; one open of a thing at a time; what a quit waits for |
-| `src/bun/pages.ts` | the launcher and the new-database window and what they may ask (`src/shared/rpc.ts`) |
-| `src/bun/messages.ts`, `remote.ts`, `names.ts`, `dbfile.ts`, `env.ts`, `token.ts`, `listening.ts` | every failure in words, the probe of a saved server, the check of a new name, what a file is, the server's environment, a token and the address it is for, the one line of a server's stderr the app acts on: pure, unit-tested |
+| `src/bun/app.ts` | open a file or a saved server, make a new database, serve, stop and restart a database, take and restore backups, keep the lists; **one server a file**, whatever starts or stops one going through the file's lane one after another; one window per `file:<real path>` or `remote:<id>`; one open of a thing at a time; what a quit waits for |
+| `src/bun/serving.ts`, `metrics.ts`, `backups.ts` | a server's arguments, the command the serve sheet shows, a served database's facts and the snippets an app connects with; the figures read from a server's `/_metrics`; `fenec backup`, `verify`, `restore` and `key` run with the app's environment rules, and a restore put in place without writing over a file: pure, or over a runner handed in, unit-tested |
+| `src/bun/pages.ts` | the main window (`launcher` in the code, as it began) and the new-database window and what they may ask (`src/shared/rpc.ts`) |
+| `src/bun/messages.ts`, `remote.ts`, `names.ts`, `dbfile.ts`, `env.ts`, `token.ts`, `listening.ts` | every failure in words, the probe of a saved server, the check of a new name and of a first collection, what a file is, the environment of what the app starts, a token and the address (or the file) it is for, the lines of a server's stderr the app acts on: pure, unit-tested |
 | `src/bun/secrets.ts`, `store.ts` | Keychain (`Bun.secrets`) and `state.json` |
 | `src/launcher`, `src/newdb`, `src/notice`, `src/ui` | the app's own pages |
 
@@ -232,10 +253,112 @@ own view of the window, blank and in the shared store, is removed first.
 **New database…** is a small window of the app's own (Electrobun has no save
 panel): the folder from the folder dialog, a name, and the app creates the
 file with `open(..., "wx")`, which fails if the name exists (so no file is ever
-made over), and starts a server on it, which takes an empty file as a new
-database. A name is checked as a file name (no `/`, `\`, `:`, no leading dot,
-255 bytes), `.fenec` is added once, and a server that then fails to start does
-not leave the empty file behind.
+made over), and starts a server on it for a moment, which takes an empty file
+as a new database and, if one is asked for, runs its first collection's
+`create collection` through `/query` with that server's token. A name is
+checked as a file name (no `/`, `\`, `:`, no leading dot, 255 bytes), `.fenec`
+is added once, and a server that then fails to start does not leave the empty
+file behind. A first collection is held to a narrow grammar (`names.ts`: a
+name, then fields of a known type and an optional index), so nothing typed can
+close the field list and say something else; one the server still refuses (a
+keyword for a name) leaves the database made and says so. The window also
+takes when a write is safe on disk (`--sync`, kept for the file and used by
+every server the app starts on it), a folder of backups to start from instead
+(a restore, below), and **Serve it for my apps**, which hands the new file,
+already a database, to the main window's serve sheet instead of a studio
+window. (SQLite and PostgreSQL, which the design offers here too, are not
+built yet: `fenec import` writes a file itself, and the app would have to hold
+it to the single-writer rule another way.)
+
+## Serving a database
+
+The main window's serve sheet (Databases, **Serve…**) starts a server on a
+file for the apps on this Mac or the network:
+
+* **A port**, empty for any free one (port 0, named by the server's
+  `listening on:` line; the apps then need the address again after each start),
+  and **who can reach it**: 127.0.0.1, or 0.0.0.0 with a warning that plain
+  http crosses the network unencrypted. A port is refused when **anything
+  answers on 127.0.0.1 there**, which a bind does not show: the server binds
+  with SO_REUSEADDR, under which macOS let a second server bind 127.0.0.1:P
+  beside a first's 0.0.0.0:P (`process.test.ts` hit it), and the app and its
+  windows reach every server on 127.0.0.1, with the token. The sheet asks as the
+  port is typed ("Free now", "Taken").
+* **The token** is made once (32 random bytes) and kept in the Keychain under
+  `serve:<id>`, sealed for `file:<real path>` (`token.ts`), before any server
+  is started with it, so the apps that hold it keep working across restarts;
+  a file moved is another file and gets its own. The server gets it in its
+  environment, never in argv, a URL, `state.json` or a log. **Show** asks the
+  main process for it (the main window is the app's own page, held to
+  `views://launcher/`); **Copy** puts it on the clipboard from the main
+  process; **New token** keeps a new one, taken at the next start.
+* **Beside the data**: `--studio`, `--auto-compact off` when compaction is
+  unticked (on by default, 0.5, the server's own), `--mcp`, `--metrics
+  127.0.0.1:0` (on this Mac whoever reaches the data), and **when a write is
+  safe on disk**. "What the app runs" is the command, its secrets as dots.
+* **One server a file.** Serving a file open in a window closes the window
+  (its server stops), starts the served one and opens the window again on it;
+  opening a served file opens a window on its server with its token. A file
+  another program serves is refused by the server's `<file>.lock` and said.
+
+**How long a served server runs, decided:** until it is stopped or the app
+quits. A quit stops every one, the one shutdown (SIGTERM, then the server's
+sync and checkpoint), and its stdin's end stops it if the app is killed, so
+**nothing outlives the app**. After a relaunch the Servers list shows each
+served database **stopped**, with the settings and the port it ran with and
+why it stopped (stopped, the app quit, exited), and **Start** starts it again
+with them; nothing starts by itself. A server that started at launch would
+take a port and a file's lock nobody asked for this time (the file may be open
+in another program now), and one served to the network would be exposed again
+without a decision. The design's **Start it when I log in** is not built: a
+login item outlives the app, so its server would be one with nobody holding its
+stdin, its token would have to sit where launchd reads it (a plist's
+environment, which the token never goes in), and a later app would have to find
+and adopt it, the registry and reaper this app was rid of.
+
+The **Servers** list shows each served database, running or stopped: its
+statements a second and median answer (between two reads of the server's own
+`/_metrics`, every 2 s while it is in view), connections and file size, its
+settings in words, where another machine reaches it and its metrics, how to
+connect from curl, JavaScript, Python or a `.env` (the token left out), and the
+server's output (stderr and stdout, its last lines, all 1 000 on **Show full
+log**). Open studio, Settings (the sheet again: Restart server with what
+changed), Restart, Stop, and for a stopped one Start and Remove (its settings
+and its Keychain item go).
+
+## Backups
+
+Each database's backups go to a folder the user picks (Backups, **Set up**),
+sealed with a key file or not, and are taken by the bundled shell:
+
+* **Back up now**: `fenec backup http://127.0.0.1:<port> <folder>` adds an image
+  of the database, taken while it runs, to the folder (`fenec archive`'s layout,
+  so the shell's `verify`, `restore` and `prune` read it). It speaks the
+  replication stream, so every server the app starts has a replication token in
+  its environment (random, for that start, never stored) and
+  `--replication-buffer 1` (1 MiB: an image needs none of the writes a replica
+  that falls behind is sent, and the default is 64); the shell is given the
+  token in its environment as well. It is taken from the server serving the
+  file, the one behind its window, or one started for the backup alone and
+  stopped after (exit 0), whose `<file>.lock` refuses a file another program
+  has. A server under `--sync off` serves no stream (it refuses a replication
+  token): its backup is refused with the reason.
+* **Sealed**: `--key-file` names a key **Make a new key…** writes with `fenec
+  key` (0600, never over a file); a key in the backups' own folder is refused.
+  Only the key's path is in `state.json`.
+* **Verify**: `fenec verify`, what the folder can restore.
+* **Restore…**: `fenec restore <folder> <new file> [--to-change n]`, from the
+  newest image or any listed. **`fenec restore` writes over whatever is at the
+  name it is given, a file a server is serving included** (tried: it did, exit
+  0), so it is given a name of the app's own beside the new file
+  (`.<name>.restoring-<uuid>`), and the result is put in place with `link`,
+  which fails if the name is taken (a copy with `COPYFILE_EXCL` on a disk
+  without hard links): never over a file. The new file opens in a window. New
+  database's **A backup** is the same restore.
+* Not built, each for a reason: a **continuous archive** (`fenec archive`, the
+  design's "written as the server writes") runs until interrupted and has no
+  `--exit-on-stdin-close`, so killing the app would leave it running; and
+  `prune` from the app.
 
 ## The security model of the token hand-off
 
@@ -246,7 +369,7 @@ it. So a window that shows one gets:
   the app makes 32 random bytes per server start, gives them to that server in
   its environment (`ps` shows every user's processes' arguments, not their
   environment), and hands the page the same token in its preload.
-  For a saved server the token comes from the Keychain. The preload is a user
+  For a saved server, and a served database, the token comes from the Keychain. The preload is a user
   script that runs at document start, in the page's own world and before its
   modules, and defines **`window.fenecHost`**, frozen, with the session
   `{server, token, tenant}` in it, **only if `location.origin` is the server's
@@ -352,6 +475,8 @@ server's supervision, until someone clicks):
 | the server could not start | "Could not open the database", with what it said (exit 1) | Try again |
 | the server refuses how the app starts it (exit 2) | "This app's database server is out of step with it": the app and its server were built apart; rebuild | |
 | the server dies under a window | "The database server stopped; nothing written before it stopped is lost", the exit and its last lines | Open again |
+| a served database's server exits unasked | "A database server stopped", the exit and its last lines; its windows closed | Start again |
+| a port another program answers on | "Port 8080 is taken", before any server is started, or what the server said | Change the port |
 | a saved server is unreachable | "Could not reach the server": nothing is listening, the name does not resolve, no answer in 6 seconds, its certificate is not accepted | Edit connection |
 | it has no studio | "This server has no studio: start it with `--studio`" | |
 | it redirects | "The server sent us somewhere else", and where; the token is not sent on | Edit connection |
@@ -421,6 +546,10 @@ which needs the signing identity and bundle id to stay fixed.
 
 ## Not yet
 
+* From the design: import from SQLite or PostgreSQL, a folder of tenants
+  (`--dir`) served as a node, folders watched for databases, continuous
+  archives and Start it when I log in (both above, for their reasons).
+
 * Updates: Electrobun makes bsdiff patches against a release it can download,
   and nothing is published; a new version is a new DMG.
 * Intel Macs, Windows and Linux. Windows also needs `fenec_abi::lock` to take a
@@ -431,3 +560,8 @@ which needs the signing identity and bundle id to stay fixed.
   history) carries to the next open of the file.
 * A `<file>.lock` (0 bytes) stays beside every file the app opens; that is
   `fenec-server`'s, not the app's.
+* A database served to the network is reached by the app's own windows on
+  127.0.0.1. A program of another user that binds 127.0.0.1 on that port after
+  the server started would take those connections (the check before the start
+  covers the time before it); the Mac's own rules on binding a port another
+  user holds decide whether it can.

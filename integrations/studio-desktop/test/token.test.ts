@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { keychainName, sealToken, tokenFor } from "../src/bun/token.ts";
+import { keychainName, sealToken, serveItemName, servedToken, tokenFor, type KeyStore } from "../src/bun/token.ts";
 
 const prod = "https://prod.example.com";
 const staging = "https://staging.example.com";
@@ -27,4 +27,42 @@ test("a token with any characters survives the round trip", () => {
 
 test("an item names its connection", () => {
 	assert.equal(keychainName("abc"), "connection:abc");
+	assert.equal(serveItemName("abc"), "serve:abc");
+});
+
+/** The Keychain as a map, which a test can look into. */
+function keychain() {
+	const items = new Map<string, string>();
+	const keys: KeyStore = {
+		get: async (n) => items.get(n) ?? null,
+		set: async (n, v) => void items.set(n, v),
+		delete: async (n) => void items.delete(n),
+	};
+	return { items, keys };
+}
+
+test("a served database's token is made once, kept before it is used, and the same at every start", async () => {
+	const { items, keys } = keychain();
+	let made = 0;
+	const make = () => `token-${++made}`;
+	const first = await servedToken(keys, "db1", "/Users/me/shop.fenec", make);
+	assert.equal(first, "token-1");
+	assert.equal(items.get("serve:db1"), sealToken("file:/Users/me/shop.fenec", "token-1"), "kept for its file, before any server has it");
+	assert.equal(await servedToken(keys, "db1", "/Users/me/shop.fenec", make), "token-1", "the apps that hold it keep working");
+	assert.equal(made, 1);
+});
+
+test("New token replaces it; a file moved is another file, and gets a token of its own", async () => {
+	const { keys } = keychain();
+	let made = 0;
+	const make = () => `token-${++made}`;
+	await servedToken(keys, "db1", "/a/shop.fenec", make);
+	assert.equal(await servedToken(keys, "db1", "/a/shop.fenec", make, true), "token-2");
+	assert.equal(await servedToken(keys, "db1", "/a/shop.fenec", make), "token-2");
+	assert.equal(await servedToken(keys, "db1", "/b/shop.fenec", make), "token-3", "an item for another path is none");
+});
+
+test("a Keychain that refuses the token: no token comes back, so no server is started with one it does not hold", async () => {
+	const keys: KeyStore = { get: async () => null, set: async () => Promise.reject(new Error("denied")), delete: async () => {} };
+	await assert.rejects(servedToken(keys, "db1", "/a/shop.fenec", () => "t"), /denied/);
 });
