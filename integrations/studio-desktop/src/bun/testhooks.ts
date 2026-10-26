@@ -19,7 +19,36 @@ import { Utils, type BrowserWindow, type BrowserView } from "electrobun/main";
 import type { Notice } from "../shared/rpc.ts";
 import { secrets } from "./secrets.ts";
 import { keychainName, sealToken } from "./token.ts";
-import { createDatabase, forgetToken, onFact, openConnection, openFile, remotePartition, removeConnection, saveConnection, savedTokenOf, windows } from "./app.ts";
+import {
+	backupNow,
+	checkConnection,
+	compactNow,
+	createDatabase,
+	figuresOf,
+	forgetDatabase,
+	forgetToken,
+	makeKey,
+	newServeToken,
+	onFact,
+	openConnection,
+	openFile,
+	remotePartition,
+	removeConnection,
+	removeServed,
+	restartServed,
+	restoreBackup,
+	saveConnection,
+	savedTokenOf,
+	served,
+	serveFile,
+	serverLog,
+	serveTokenOf,
+	setArchive,
+	stopServed,
+	verifyBackups,
+	windows,
+} from "./app.ts";
+import { DEFAULT_SETTINGS } from "./serving.ts";
 import { showLauncher, showNewDatabase } from "./pages.ts";
 import { openStudioWindow, type StudioWindow } from "./windows.ts";
 
@@ -118,12 +147,12 @@ export function watchPage(win: BrowserWindow, name: string) {
 	});
 }
 
-// What a native dialog would have answered, queued by a check: the open and
-// folder dialogs cannot be clicked from outside the process.
-const answers: { file: (string | null)[]; folder: (string | null)[] } = { file: [], folder: [] };
+// What a native dialog would have answered, queued by a check: the open,
+// folder and key-file dialogs cannot be clicked from outside the process.
+const answers: { file: (string | null)[]; folder: (string | null)[]; key: (string | null)[] } = { file: [], folder: [], key: [] };
 
 /** The queued answer for a dialog, or `undefined` for none (the dialog then opens). */
-export function dialogAnswer(kind: "file" | "folder"): string | null | undefined {
+export function dialogAnswer(kind: "file" | "folder" | "key"): string | null | undefined {
 	return answers[kind].length ? answers[kind].shift() : undefined;
 }
 
@@ -132,20 +161,44 @@ async function run(c: any) {
 	const win = (key: string) => pages.get(key);
 	switch (c.cmd) {
 		case "open": report("open-result", { ...(await openFile(c.path)), path: c.path }); break;
-		case "create": report("create-result", { ...(await createDatabase(c.folder, c.name)), name: c.name }); break;
+		case "create": report("create-result", { ...(await createDatabase(c)), name: c.name }); break;
 		case "close": win(c.key)?.win.requestClose(); break; // the path the red button takes
 		case "close-direct": win(c.key)?.win.close(); break;
 		// executeJavascript is not the page's own eval(): the studio's CSP
 		// (script-src 'self') does not apply to it. The code reports its
 		// result itself, through the event-only bridge.
 		case "eval": win(c.key)?.view.executeJavascript(c.js); break;
-		case "sessions": report("sessions", { keys: [...windows.keys()], pids: [...windows.values()].map((s) => s.server?.pid), pages: [...pages.keys()] }); break;
-		case "answer": answers[c.kind as "file" | "folder"].push(c.path ?? null); break;
+		case "sessions": report("sessions", { keys: [...windows.keys()], pids: [...windows.values()].map((s) => s.server?.pid ?? s.on?.server.pid), pages: [...pages.keys()] }); break;
+		case "answer": answers[c.kind as "file" | "folder" | "key"].push(c.path ?? null); break;
+		// Serving: the settings are the sheet's defaults, but for what a check names.
+		case "serve": report("serve-result", { ...(await serveFile(c.path, { ...DEFAULT_SETTINGS, ...(c.settings ?? {}) }, c.sync ?? "250")), path: c.path }); break;
+		case "stop-served": report("stop-served-result", { ...(await stopServed(c.path)), path: c.path }); break;
+		case "restart-served": report("restart-served-result", { ...(await restartServed(c.path, c.settings ? { ...DEFAULT_SETTINGS, ...c.settings } : undefined, c.sync)), path: c.path }); break;
+		case "served": {
+			const s = served.get(c.path);
+			report("served-state", { path: c.path, running: Boolean(s), state: s?.state, origin: s?.server.origin, local: s?.server.local, port: s?.server.port, pid: s?.server.pid, metrics: s?.server.metrics });
+			break;
+		}
+		// The served database's token, which a check sends as an app would: the one the Keychain keeps.
+		case "serve-token": report("serve-token", { path: c.path, token: await serveTokenOf(c.path) }); break;
+		case "new-token": report("new-token-result", { ...(await newServeToken(c.path)), path: c.path }); break;
+		case "server-log": report("server-log", { path: c.path, lines: serverLog(c.path) }); break;
+		case "figures": report("figures", { path: c.path, figures: await figuresOf(c.path) }); break;
+		case "compact": report("compact-result", { ...(await compactNow(c.path)), path: c.path }); break;
+		case "set-archive": report("set-archive-result", { ...setArchive(c.path, c.dir, c.keyFile ?? null), path: c.path }); break;
+		case "backup": report("backup-result", { ...(await backupNow(c.path)), path: c.path }); break;
+		case "verify": report("verify-result", { ...(await verifyBackups(c.path)), path: c.path }); break;
+		case "restore": report("restore-result", { ...(await restoreBackup(c.path, c.change ?? null, c.folder, c.name)), from: c.path }); break;
+		case "check-conn": report("check-conn-result", { ...(await checkConnection(c.id)), id: c.id }); break;
+		case "remove-served": await removeServed(c.path); report("served-removed", { path: c.path }); break;
+		case "make-key": report("make-key-result", { ...(await makeKey(c.folder, c.name)) }); break;
+		case "forget": report("forget-result", { ...(await forgetDatabase(c.path)), path: c.path }); break;
 		case "launcher": await showLauncher(); break;
 		case "newdb": await showNewDatabase(); break;
 		case "addconn": {
 			try {
-				report("conn-added", { id: await saveConnection(c), name: c.name });
+				const saved = await saveConnection(c);
+				report("conn-added", { id: saved.id, forgotToken: saved.forgotToken, name: c.name });
 			} catch (e) {
 				report("conn-refused", { message: (e as Error).message });
 			}

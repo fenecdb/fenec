@@ -25,6 +25,8 @@ const LEAKS = {
   OTEL_SERVICE_NAME: 'leak',
   FENEC_JWT_SECRET: 'leak-jwt',
   FENEC_HTTP_TOKEN: 'leak-old-token',
+  FENEC_REPLICATION_TOKEN: 'leak-repl',
+  FENEC_KEY_FILE: '/tmp/leak.key',
   AWS_SECRET_ACCESS_KEY: 'leak-aws',
   GITHUB_TOKEN: 'leak-gh',
 };
@@ -38,14 +40,18 @@ const names = readFileSync(SEEN, 'utf8')
   .filter(Boolean)
   .map((l) => l.slice(0, l.indexOf('=')));
 log('names:', names.join(' '));
-for (const leak of ['OTEL_EXPORTER_OTLP_ENDPOINT', 'OTEL_SERVICE_NAME', 'FENEC_JWT_SECRET', 'AWS_SECRET_ACCESS_KEY', 'GITHUB_TOKEN', 'FENEC_DESKTOP_REPORT', 'FENEC_DESKTOP_CONTROL', 'FENEC_DESKTOP_OPEN', 'FENEC_SERVER_BIN']) {
+for (const leak of ['OTEL_EXPORTER_OTLP_ENDPOINT', 'OTEL_SERVICE_NAME', 'FENEC_JWT_SECRET', 'FENEC_KEY_FILE', 'AWS_SECRET_ACCESS_KEY', 'GITHUB_TOKEN', 'FENEC_DESKTOP_REPORT', 'FENEC_DESKTOP_CONTROL', 'FENEC_DESKTOP_OPEN', 'FENEC_SERVER_BIN']) {
   assert.ok(!names.includes(leak), `${leak} must not reach the server`);
 }
-const ALLOWED = /^(HOME|PATH|TMPDIR|LANG|USER|LOGNAME|TZ|LC_[A-Z]+|FENEC_HTTP_TOKEN|PWD|SHLVL|_|OLDPWD)$/;
+const ALLOWED = /^(HOME|PATH|TMPDIR|LANG|USER|LOGNAME|TZ|LC_[A-Z]+|FENEC_HTTP_TOKEN|FENEC_REPLICATION_TOKEN|PWD|SHLVL|_|OLDPWD)$/;
 assert.deepEqual(names.filter((n) => !ALLOWED.test(n)), [], 'only the allowlist (and what the wrapper script\'s own shell adds)');
 const env = Object.fromEntries(readFileSync(SEEN, 'utf8').split('\n').filter(Boolean).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
 assert.notEqual(env.FENEC_HTTP_TOKEN, 'leak-old-token', 'the app\'s own token, not one that was in its environment');
 assert.match(env.FENEC_HTTP_TOKEN, /^[A-Za-z0-9_-]{43}$/, '32 random bytes, base64url');
+// The replication token a backup asks the server's image with: the app's own as well, and another.
+assert.notEqual(env.FENEC_REPLICATION_TOKEN, 'leak-repl');
+assert.match(env.FENEC_REPLICATION_TOKEN, /^[A-Za-z0-9_-]{43}$/);
+assert.notEqual(env.FENEC_REPLICATION_TOKEN, env.FENEC_HTTP_TOKEN);
 
 step('quit');
 await quit(app);

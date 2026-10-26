@@ -1,6 +1,38 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { databaseFileName } from "../src/bun/names.ts";
+import { collectionStatement, databaseFileName } from "../src/bun/names.ts";
+
+test("a first collection is the one statement that makes it, written as FenecQL writes one", () => {
+	assert.deepEqual(collectionStatement("notes", "title text, done bool"), { ok: true, statement: "create collection notes (title text, done bool)" });
+	assert.deepEqual(collectionStatement(" tasks ", " title  TEXT @text ,due timestamp, tags [text], at geo, v vector<768>"), {
+		ok: true,
+		statement: "create collection tasks (title text @text, due timestamp, tags [text], at geo, v vector<768>)",
+	});
+});
+
+test("what could close the field list and say something else is refused, in words", () => {
+	for (const [name, fields] of [
+		["notes", "title text); drop collection orders; ("],
+		["notes", "title text) --"],
+		["notes", "title text, x"],
+		["notes", "title"],
+		["notes", ""],
+		["notes", "title text @hash extra"],
+		["notes", "title text @evil"],
+		["notes", "ti-tle text"],
+		["notes", 'title "text"'],
+		["no tes", "title text"],
+		["1notes", "title text"],
+		["notes;", "title text"],
+		["notes", "title text, Title int"],
+		["notes", "id text"],
+		["notes", "v vector<0>"],
+	] as const) {
+		const r = collectionStatement(name, fields);
+		assert.equal(r.ok, false, `${name} (${fields})`);
+		assert.ok(!r.ok && r.message.length > 0);
+	}
+});
 
 const ok = (typed: string) => {
 	const r = databaseFileName(typed);

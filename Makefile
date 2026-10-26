@@ -115,10 +115,11 @@ studio-test: wasm
 	cd studio && npm ci --no-audit --no-fund --loglevel=error && npm run e2e
 
 ## fenec studio as a desktop app (beta; macOS on Apple silicon, see
-## integrations/studio-desktop/README.md): the server it bundles built from this
-## checkout (scripts/get-server.sh; STUDIO_SERVER=0.1.12 downloads that
-## release's asset instead and checks its SHA-256 against the release's
-## SHA256SUMS), then the unsigned .app and .dmg, in build/ and artifacts/ there.
+## integrations/studio-desktop/README.md): the server and the `fenec` shell it
+## bundles built from this checkout (scripts/get-server.sh; STUDIO_SERVER=0.1.12
+## downloads that release's asset, which holds both, instead and checks its
+## SHA-256 against the release's SHA256SUMS), then the unsigned .app and .dmg,
+## in build/ and artifacts/ there.
 ## The toolchain (Electrobun's Hutch, its Bun and runtime) is fetched into
 ## .hutch-home/ in that directory on first use: nothing is installed globally
 ## and no shell file is touched. With ELECTROBUN_DEVELOPER_ID set (and the
@@ -132,12 +133,15 @@ studio-desktop:
 ## none of the test hooks, the sources type-checked and the unit tests run
 ## (names, the remote probe, wording, the token hand-off script, the server's
 ## environment, a token and its address, get-server.sh, the signing
-## switches, the Hutch pin), then the test variant, the same app with the
+## switches, the Hutch pin, a server's arguments, the figures of /_metrics,
+## and the real server and shell from bin/ started, backed up and restored
+## through the app's own code), then the test variant, the same app with the
 ## hooks and an identifier of its own, is built and driven through every
 ## scripted check (integrations/studio-desktop/scripts/checks): open, edit,
 ## close and reopen a file, a file another program holds, a server that dies,
 ## the app killed, the sandbox, every window held to where it is, what a window
-## keeps, saved servers and the Keychain, a new database, a file from Finder.
+## keeps, saved servers and the Keychain, a new database, a database served
+## and its token, backups and restores, a file from Finder.
 ## Needs a window server (a logged-in Mac); logs of a failure are in $$SD_DIR
 ## (default: fenec-desktop-checks under the temp directory). It leaves the
 ## test variant (build-test/) a program LaunchServices may offer for a .fenec
