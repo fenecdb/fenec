@@ -679,7 +679,9 @@ curl -X PATCH http://127.0.0.1:8080/_changes/consumers/mailer -d '{"since": 42}'
 
 <p>Unlike <code>XGROUP CREATE</code>, creating a consumer that already
 exists is no error (no <code>BUSYGROUP</code>): it answers 200 and stays
-where it is, so a worker can create its consumer every time it starts.</p>
+where it is, so a worker can create its consumer every time it starts. A
+<code>POST</code> with a <code>since</code> ahead of where it stands is
+409: moving it is the <code>PATCH</code>'s.</p>
 
 <ul>
   <li><b>At least once</b> where the server keeps the place: a consumer

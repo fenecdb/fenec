@@ -19,10 +19,11 @@
 //! A consumer that keeps no state of its own has the server keep where it
 //! is (`/_changes/consumers/<name>`), as a Kafka consumer group's committed
 //! offset: a `POST` makes it -- at the last write on disk unless it names a
-//! `since` -- and leaves one that is there where it stands, whatever the
-//! body names, as Kafka reads `auto.offset.reset` only for a group with no
-//! offset: a relay that makes its consumer at every start goes on from
-//! where it stopped. `?consumer=<name>` reads from where it is, and a
+//! `since` -- and leaves one that is there where it stands, as Kafka reads
+//! `auto.offset.reset` only for a group with no offset: a relay that makes
+//! its consumer at every start goes on from where it stopped. A `since`
+//! ahead of where it stands is a commit sent as a `POST`, refused 409
+//! ([`ahead`]). `?consumer=<name>` reads from where it is, and a
 //! `PATCH` of `since` moves it once the consumer has done with what it
 //! read -- so it has each write at least once, and again after a crash
 //! before the `PATCH` -- or back, to read from there again. The `POST`
@@ -77,7 +78,7 @@ pub fn route(db: &Arc<RwLock<Database>>, feed: &Feed, cfg: &Config, req: &Reques
         }
         (Method::Get, ["_changes", "consumers"]) => list(db, feed),
         (Method::Post, ["_changes", "consumers", name]) => make(db, feed, cfg, name, req),
-        (Method::Patch, ["_changes", "consumers", name]) => commit(db, feed, cfg, name, req),
+        (Method::Patch, ["_changes", "consumers", name]) => commit(db, cfg, name, req),
         (Method::Delete, ["_changes", "consumers", name]) => forget(db, cfg, name),
         _ => Response::error(404, &format!("path `{}`", req.path)),
     }
@@ -168,32 +169,58 @@ fn since_in(req: &Request) -> std::result::Result<Option<i64>, Response> {
     }
 }
 
-/// `name` refused as a consumer's, or a `since` past the last write on
-/// disk: another database's cursor, or this one's before a restore.
-fn refused(name: &str, since: Option<i64>, durable: u64) -> Option<Response> {
-    if name.is_empty() || name.len() > 200 {
-        return Some(Response::error(400, "a consumer's name is 1 to 200 bytes"));
-    }
-    match since {
-        Some(n) if n as u64 > durable => Some(Response::json(
+/// `name` refused as a consumer's.
+fn misnamed(name: &str) -> Option<Response> {
+    (name.is_empty() || name.len() > 200)
+        .then(|| Response::error(400, "a consumer's name is 1 to 200 bytes"))
+}
+
+/// A `since` past the last write the database holds, on disk or not:
+/// another database's cursor, or this one's before a restore, 409 as a
+/// read's cursor past it is (`Tail::Ahead`). One past the disk alone is
+/// taken: a 410 names the first `since` the feed still keeps, and the
+/// feed keeps writes by their size, on disk or not, so that `since` may be
+/// ahead of the disk -- refused, a consumer told to go on from there could
+/// not. Taken, its row lands after it, a read from it waits for the disk,
+/// and a crash before the disk has it hands those writes over again,
+/// never skips them.
+fn past(g: &Database, since: i64) -> Option<Response> {
+    let held = g.change_seq();
+    (since as u64 > held).then(|| {
+        Response::json(
             409,
-            format!(
-                "{{\"error\":\"{n} is past the last write on disk, {durable}\",\"seq\":{durable}}}"
-            ),
-        )),
-        _ => None,
-    }
+            format!("{{\"error\":\"{since} is past the last write, {held}\",\"seq\":{held}}}"),
+        )
+    })
+}
+
+/// A `POST` naming a `since` ahead of where `name` stands: a commit sent
+/// as one, as every commit was before the `PATCH`. Answered 200 and left
+/// where it was, its client read the same page for ever and was told
+/// nothing.
+fn ahead(name: &str, at: u64) -> Response {
+    let mut out = String::from("{\"error\":");
+    json::escape_into(
+        &mut out,
+        &format!(
+            "consumer {name} is there, at {at}: a POST makes a consumer and moves none; \
+             PATCH /_changes/consumers/{name} moves it"
+        ),
+    );
+    out.push_str(&format!(",\"since\":{at}}}"));
+    Response::json(409, out)
 }
 
 /// Makes `name` at the `since` the body names, or at the last write on
 /// disk: 201. One that is there stays where it stands and is answered so,
-/// 200, whatever the body names -- where a new one starts. Made at every
-/// start, as a relay or a follower makes its consumer, it goes on from
-/// where it stopped; moved to the last write on disk, it skipped every
-/// write made while it was stopped. Nor is one that is there a 409, as
-/// Redis's `XGROUP CREATE` answers `BUSYGROUP`: every caller would take
-/// that error for a success, and a consumer made from the first write
-/// (`{"since": 0}`) would fail every start but its first.
+/// 200, for no `since` or one at or behind it -- where a new one starts.
+/// Made at every start, as a relay or a follower makes its consumer, it
+/// goes on from where it stopped; moved to the last write on disk, it
+/// skipped every write made while it was stopped. Nor is one that is there
+/// a 409, as Redis's `XGROUP CREATE` answers `BUSYGROUP`: every caller
+/// would take that error for a success, and a consumer made from the first
+/// write (`{"since": 0}`) would fail every start but its first. A `since`
+/// ahead of it is the one 409 ([`ahead`]).
 fn make(
     db: &Arc<RwLock<Database>>,
     feed: &Feed,
@@ -205,32 +232,37 @@ fn make(
         Ok(s) => s,
         Err(r) => return r,
     };
-    let durable = feed.durable();
-    if let Some(r) = refused(name, start, durable) {
+    if let Some(r) = misnamed(name) {
         return r;
     }
-    let done = changed(db, cfg, |g| match cursor_in(g, name)? {
-        Some(at) => Ok((at as i64, false)),
-        None => {
-            // None given: from the last write on disk, what is written
-            // from now on.
-            let at = start.unwrap_or(durable as i64);
-            exec(
-                g,
-                "create collection if not exists _consumers (name text @hash, since int)",
-                &[],
-            )?;
-            exec(
-                g,
-                "put _consumers {name: $1, since: $2}",
-                &[Value::Text(name.into()), Value::Int(at)],
-            )?;
-            Ok((at, true))
+    let durable = feed.durable();
+    let done = changed(db, cfg, |g| {
+        if let Some(at) = cursor_in(g, name)? {
+            return Ok(match start {
+                Some(n) if n as u64 > at => Err(ahead(name, at)),
+                _ => Ok((at as i64, false)),
+            });
         }
+        if let Some(r) = start.and_then(|n| past(g, n)) {
+            return Ok(Err(r));
+        }
+        // None given: from the last write on disk, what is written from
+        // now on.
+        let at = start.unwrap_or(durable as i64);
+        exec(
+            g,
+            "create collection if not exists _consumers (name text @hash, since int)",
+            &[],
+        )?;
+        exec(
+            g,
+            "put _consumers {name: $1, since: $2}",
+            &[Value::Text(name.into()), Value::Int(at)],
+        )?;
+        Ok(Ok((at, true)))
     });
     match done {
-        Ok((at, true)) => standing(201, name, at),
-        Ok((at, false)) => standing(200, name, at),
+        Ok(((at, made), seq)) => at_seq(standing(if made { 201 } else { 200 }, name, at), seq),
         Err(r) => r,
     }
 }
@@ -238,14 +270,12 @@ fn make(
 /// Moves `name` to the `since` the body names: once the consumer has done
 /// with every write up to it, or back, to read from there again. Only a
 /// consumer that is there moves, 404 otherwise: a `POST` is the one way to
-/// make one, so a commit racing a `DELETE` makes none again.
-fn commit(
-    db: &Arc<RwLock<Database>>,
-    feed: &Feed,
-    cfg: &Config,
-    name: &str,
-    req: &Request,
-) -> Response {
+/// make one, so a commit racing a `DELETE` makes none again. Answered with
+/// where it stands after: a commit past nothing but consumers' writes
+/// writes nothing ([`unmoved`]) and leaves it where it was, which reads the
+/// same writes -- answered as sent, the answer named a place no `GET` of
+/// the consumers and no later `POST` would find.
+fn commit(db: &Arc<RwLock<Database>>, cfg: &Config, name: &str, req: &Request) -> Response {
     let since = match since_in(req) {
         Ok(Some(n)) => n,
         Ok(None) => {
@@ -253,28 +283,31 @@ fn commit(
         }
         Err(r) => return r,
     };
-    if let Some(r) = refused(name, Some(since), feed.durable()) {
+    if let Some(r) = misnamed(name) {
         return r;
     }
     let done = changed(db, cfg, |g| {
         let Some(at) = cursor_in(g, name)? else {
-            return Ok(false);
+            return Ok(Err(Response::error(
+                404,
+                &format!("no consumer `{name}`: POST /_changes/consumers/{name} makes it"),
+            )));
         };
-        if !unmoved(g, at, since) {
-            exec(
-                g,
-                "set _consumers {since: $2} where name = $1",
-                &[Value::Text(name.into()), Value::Int(since)],
-            )?;
+        if let Some(r) = past(g, since) {
+            return Ok(Err(r));
         }
-        Ok(true)
+        if unmoved(g, at, since) {
+            return Ok(Ok(at as i64));
+        }
+        exec(
+            g,
+            "set _consumers {since: $2} where name = $1",
+            &[Value::Text(name.into()), Value::Int(since)],
+        )?;
+        Ok(Ok(since))
     });
     match done {
-        Ok(true) => standing(200, name, since),
-        Ok(false) => Response::error(
-            404,
-            &format!("no consumer `{name}`: POST /_changes/consumers/{name} makes it"),
-        ),
+        Ok((at, seq)) => at_seq(standing(200, name, at), seq),
         Err(r) => r,
     }
 }
@@ -289,10 +322,10 @@ fn forget(db: &Arc<RwLock<Database>>, cfg: &Config, name: &str) -> Response {
                 &[Value::Text(name.into())],
             )?;
         }
-        Ok(())
+        Ok(Ok(()))
     });
     match done {
-        Ok(()) => Response::empty(204),
+        Ok(((), seq)) => at_seq(Response::empty(204), seq),
         Err(r) => r,
     }
 }
@@ -309,19 +342,30 @@ fn standing(status: u16, name: &str, since: i64) -> Response {
     Response::json(status, out)
 }
 
+/// `r` naming the change the database stood at once the consumer's write
+/// ran (`Fenec-Seq`), as a write's answer does: a read sent after it
+/// (`Fenec-After`) -- to a replica, where a router sends one near -- finds
+/// the consumer where this answer left it.
+fn at_seq(mut r: Response, seq: u64) -> Response {
+    r.seq = Some(seq);
+    r
+}
+
 /// Runs `f` over the consumers under the write lock, then waits for the
 /// file to be durable before the answer: what `f` wrote, and where it
 /// wrote nothing, what it read -- a consumer another request made a
 /// moment before, its fsync not yet run, is not answered as there until
-/// it is. A replica's consumers are its primary's, so it refuses each of
-/// these whatever `f` would change: a `POST` of one that is there writes
-/// nothing, and had passed, leaving a relay pointed at a replica to fail
-/// at its first commit rather than as it starts.
+/// it is. `f`'s refusal is answered as it is, nothing written. Gives `f`'s
+/// answer and the change the database stood at after it. A replica's
+/// consumers are its primary's, so it refuses each of these whatever `f`
+/// would change: a `POST` of one that is there writes nothing, and had
+/// passed, leaving a relay pointed at a replica to fail at its first
+/// commit rather than as it starts.
 fn changed<T>(
     db: &Arc<RwLock<Database>>,
     cfg: &Config,
-    f: impl FnOnce(&mut Database) -> Result<T>,
-) -> std::result::Result<T, Response> {
+    f: impl FnOnce(&mut Database) -> Result<std::result::Result<T, Response>>,
+) -> std::result::Result<(T, u64), Response> {
     if cfg.read_only {
         return Err(crate::read_only_refused(cfg));
     }
@@ -332,12 +376,20 @@ fn changed<T>(
                 "this database is a replica: its consumers are its primary's".into(),
             ));
         }
-        let out = f(&mut g)?;
-        Ok((out, crate::flush_for(cfg, &mut g)?))
+        let out = match f(&mut g)? {
+            Ok(out) => out,
+            Err(refused) => return Ok(Err(refused)),
+        };
+        let seq = g.change_seq();
+        Ok(Ok((out, seq, crate::flush_for(cfg, &mut g)?)))
     })();
-    let (out, durability) = done.map_err(|e| crate::error_response(&e))?;
+    let (out, seq, durability) = match done {
+        Ok(Ok(done)) => done,
+        Ok(Err(refused)) => return Err(refused),
+        Err(e) => return Err(crate::error_response(&e)),
+    };
     crate::await_durable(db, durability).map_err(|e| crate::error_response(&e))?;
-    Ok(out)
+    Ok((out, seq))
 }
 
 /// Whether moving a consumer standing at `at` to `since` changes nothing

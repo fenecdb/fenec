@@ -458,15 +458,19 @@ class Client:
     def consumer(self, name: str, since: int | None = None) -> dict:
         """Makes `name` a consumer at the last write on disk, or at `since`,
         and returns where it stands, `{"name", "since"}`. One that is there
-        already stays where it stands, whatever `since` says -- that is a
-        new consumer's start -- so a program can call this every time it
-        starts and go on from where it stopped. `move_consumer` moves one."""
+        already stays where it stands -- `since` is a new consumer's start
+        -- so a program can call this every time it starts and go on from
+        where it stopped; a `since` ahead of where it stands is a
+        `FenecError` (409), a commit sent the old way. `move_consumer`
+        moves one."""
         body = json.dumps({} if since is None else {"since": since}).encode()
         return self._post(f"/_changes/consumers/{_seg(name)}", body, "application/json")
 
     def move_consumer(self, name: str, since: int) -> dict:
         """Moves `name` to `since`: on, once it has done with every write up
-        to it (a commit), or back, to read from there again. A consumer that
+        to it (a commit), or back, to read from there again, and returns
+        where it stands after -- where it was, for a commit past nothing but
+        consumers' own commits, which reads the same writes. A consumer that
         is not there is a `FenecError` (404): `consumer` makes one."""
         body = json.dumps({"since": since}).encode()
         req = urllib.request.Request(

@@ -947,6 +947,8 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         // every row. A scoped token's filter holds no deletion of a row it
         // never saw, as a scoped subscription's ids do, so it is refused.
         if req.segments().first() == Some(&"_changes") {
+            let consumer = matches!(req.method, Method::Post | Method::Patch | Method::Delete)
+                && matches!(req.segments().as_slice(), ["_changes", "consumers", _]);
             let resp = match (authenticate(cfg, &req), repl.and_then(|r| r.feed())) {
                 (Err(deny), _) => deny,
                 (Ok(Who::Scoped(_)), _) => {
@@ -978,19 +980,16 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
                     match refused {
                         Some(refused) => refused,
                         None => match admit(&tenant, cdc_waits(&req)) {
-                            Ok(_slot) => cdc::route(db, feed, cfg, &req),
+                            Ok(_slot) => match &tenant {
+                                Some(t) if consumer => {
+                                    consumer_write(t, cfg, &req, || cdc::route(db, feed, cfg, &req))
+                                }
+                                _ => cdc::route(db, feed, cfg, &req),
+                            },
                             Err(refused) => refused,
                         },
                     }
                 }
-            };
-            // A consumer's commit is a tenant's write: asked of the lease
-            // again as it is answered, and refused by it 503 to come back.
-            let consumer = matches!(req.method, Method::Post | Method::Patch | Method::Delete)
-                && matches!(req.segments().as_slice(), ["_changes", "consumers", _]);
-            let resp = match &tenant {
-                Some(t) if consumer => answered_under_lease(t, &req, resp),
-                _ => resp,
             };
             // Its `Fenec-Seq` a change of the history the database is on,
             // as every answer carrying one names it.
@@ -1715,6 +1714,29 @@ fn lapsed_under(keyed: bool) -> String {
              batch, seq is its last landed statement's, and a 504 does not say which earlier \
              ones survived"
         ),
+    }
+}
+
+/// A `/_changes` consumer's make, move or let-go on a tenant: a tenant's
+/// write, so held against a freeze and asked of the lease as
+/// [`handle_admitted`] holds and asks one -- told to come back (503) while
+/// the tenant is moved or its lease is out, and asked of the lease again
+/// as it is answered ([`answered_under_lease`]). Run past the gate, one sent
+/// during a move landed on the source after its export and was lost at the
+/// flip: a make lost so is made again later at the last write on disk,
+/// past every write in between. A request marked as a read
+/// ([`marked`]) is refused by the route in words of its own, never told to
+/// come back to the same copy.
+fn consumer_write(
+    t: &tenants::Tenant,
+    cfg: &Config,
+    req: &Request,
+    run: impl FnOnce() -> Response,
+) -> Response {
+    let _held = t.enter();
+    match refusal(t).filter(|_| !cfg.read_only) {
+        Some(why) => Response::retry_after(503, &why, 1),
+        None => answered_under_lease(t, req, run()),
     }
 }
 

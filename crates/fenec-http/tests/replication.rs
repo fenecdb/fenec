@@ -914,8 +914,21 @@ fn a_consumer_goes_on_from_its_place_on_a_promoted_replica() {
     assert!(page.contains("item 1"), "{page}");
     let next = header_of(&head, "Fenec-Next").unwrap().to_string();
     let commit = format!("{{\"since\": {next}}}");
-    let (status, body) = http(p.port, "PATCH", "/_changes/consumers/relay", None, &commit);
+    let (status, head, body) = raw(p.port, "PATCH", "/_changes/consumers/relay", "", &commit);
     assert_eq!(status, 200, "{body}");
+    // The commit's answer names its change, as a write's does: a read sent
+    // after it to the replica waits for it there, and finds the consumer
+    // where the commit left it.
+    let committed = header_of(&head, "Fenec-Seq").expect("a commit names its change");
+    let (status, _, listed) = raw(
+        r.port,
+        "GET",
+        "/_changes/consumers",
+        &format!("Fenec-After: {committed}\r\nFenec-Wait: 20000\r\n"),
+        "",
+    );
+    assert_eq!(status, 200, "{listed}");
+    assert!(listed.contains(&format!("\"since\":{next}")), "{listed}");
     // Written after the commit: what the consumer reads next, wherever.
     write_some(&p, 2, 2);
     caught_up(&r, &p);

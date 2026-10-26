@@ -87,6 +87,12 @@ def test_a_consumer_made_again_goes_on_from_where_it_stood(client):
             if got:
                 break
         assert [(w["op"], w["doc"]["t"]) for w in got] == [("put", "while stopped")]
+        # A commit sent the old way, as a make ahead of where it stands, is
+        # refused rather than taken for a make and left where it was.
+        with pytest.raises(FenecError) as stale:
+            client.consumer(consumer, got[0]["seq"])
+        assert stale.value.status == 409
+        assert client.consumer(consumer)["since"] == first.next
         # A consumer that is not there is not moved into being.
         client.forget_consumer(consumer)
         with pytest.raises(FenecError) as refused:

@@ -255,8 +255,10 @@ leading from an archive's end never lands among its changes
 **[`/_changes` reads the writes on disk, documents and all](docs/design/replication.md#change-data-capture)**
 (`Database::changes_in`): only what an fsync covered, never with writes
 missing (410); a scoped token is refused. A consumer is made by a `POST`,
-which never moves one that is there (200, its place), and moved by a
-`PATCH` alone, which makes none (`cdc::make`, `cdc::commit`).
+which never moves one that is there (200 at its place, 409 for a `since`
+ahead of it), and moved by a `PATCH` alone, which makes none
+(`cdc::make`, `cdc::commit`); on a tenant each is a write held against a
+move and the lease (`consumer_write`).
 
 **[A read can wait for a write on a replica](docs/design/replication.md#fenec-after)**
 (`Hub::reached`): served once the database holds that change or 504
