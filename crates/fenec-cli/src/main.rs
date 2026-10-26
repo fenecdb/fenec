@@ -233,18 +233,13 @@ fn main() {
     // so no lock is taken: the file as it stood at the open, a record a
     // server is in the middle of appending passed over as a torn tail.
     let _held = match (&path, read_only) {
-        (Some(p), false) => {
-            let advice = format!(
-                "query it over HTTP, or stop it first; `fenec --read-only {p}` reads it as it stands"
-            );
-            match held::take(p, &advice) {
-                Ok(l) => Some(l),
-                Err(why) => {
-                    eprintln!("{why}");
-                    std::process::exit(1);
-                }
+        (Some(p), false) => match held::take(p, held::Way::Shell) {
+            Ok(l) => Some(l),
+            Err(why) => {
+                eprintln!("{why}");
+                std::process::exit(1);
             }
-        }
+        },
         _ => None,
     };
     let mut db = match &path {
@@ -270,8 +265,10 @@ fn main() {
     if let Some(cmd) = command {
         let mut code = if run(&mut db, &cmd) { 0 } else { 1 };
         // A one-shot write that never reached the disk must not exit 0: the
-        // caller's script would go on believing it.
-        if let (false, Err(e)) = (read_only, db.sync()) {
+        // caller's script would go on believing it. Read-only, there is
+        // nothing to push, and no sync is asked of the file.
+        let pushed = if read_only { Ok(()) } else { db.sync() };
+        if let Err(e) = pushed {
             eprintln!("could not push the writes to disk: {e}");
             code = 1;
         }
@@ -334,7 +331,8 @@ fn main() {
             Err(e) => eprintln!("could not write the checkpoint: {e}"),
         }
     }
-    if let (false, Err(e)) = (read_only, db.sync()) {
+    let pushed = if read_only { Ok(()) } else { db.sync() };
+    if let Err(e) = pushed {
         eprintln!("could not push the writes to disk: {e}");
         std::process::exit(1);
     }
@@ -881,7 +879,7 @@ fn save(db: &Database, path: &str) -> std::result::Result<(), String> {
     {
         return Err(format!("{READ_ONLY_REFUSAL}; save to another path"));
     }
-    let _held = held::take(path, "save to another path")?;
+    let _held = held::take(path, held::Way::Save)?;
     let side = format!("{path}.saving");
     let written = (|| -> std::io::Result<()> {
         let mut f = std::fs::File::create(&side)?;

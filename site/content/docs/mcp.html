@@ -39,7 +39,9 @@ fenec mcp --url http://127.0.0.1:8080/_mcp        # in front of a server, the to
 the shell over the same file is refused, as it is refused while they hold it: two
 processes writing one file corrupt it. Each write is on the disk before it is
 answered. <code>--read-only</code> takes no lock and writes nothing, and reads
-the file as it stood when the session began, beside a server writing it; to
+the file as it stood when the session began, beside a server writing it (on
+Linux, after the machine went down and before a writer opens the file again,
+without the last durable writes, which wait in the sync log beside it); to
 read what a server serves now, use <code>--url</code>. Over
 <code>--url</code> the tools are the server's, under its options and the
 token's rules, and the bridge decides nothing.</p>

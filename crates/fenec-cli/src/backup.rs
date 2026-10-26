@@ -312,7 +312,7 @@ pub fn main(command: &str, args: &[String]) -> i32 {
         _ => None,
     }
     .map(|out| {
-        crate::held::take(out, "stop it first, or write another file").unwrap_or_else(|why| {
+        crate::held::take(out, crate::held::Way::Copy).unwrap_or_else(|why| {
             eprintln!("fenec {command}: {why}");
             std::process::exit(1);
         })

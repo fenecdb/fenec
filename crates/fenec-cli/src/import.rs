@@ -163,10 +163,7 @@ pub fn main(args: &[String]) -> i32 {
     // run writes nothing and takes none.
     let _held = match dry_run {
         true => None,
-        false => match crate::held::take(
-            &target,
-            "stop it first, or import into another file (--file <path>)",
-        ) {
+        false => match crate::held::take(&target, crate::held::Way::Import) {
             Ok(l) => Some(l),
             Err(why) => {
                 eprintln!("error: {why}");

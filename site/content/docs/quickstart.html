@@ -434,8 +434,11 @@ script are refused alike, and so are <code>fenec import</code> into the file,
 a <code>backup</code> or <code>restore</code> into it and <code>.save</code>
 over it. <code>--read-only</code> takes no lock and writes nothing: it reads
 the file as it stood at the open, beside a server writing it, and refuses
-every write and <code>.checkpoint</code>. Releases up to 0.1.12 took no lock,
-and a write there beside a running server could leave the file unreadable.</p>
+every write and <code>.checkpoint</code>. On Linux, after the machine went
+down and before a server or the shell opens the file to write it again, it may
+lack the last durable writes: they wait in the sync log beside the file, which
+only an open to write plays back. Releases up to 0.1.12 took no lock, and a
+write there beside a running server could leave the file unreadable.</p>
 
 <p>Inside the shell: <code>.help</code> <code>.tables</code> <code>.stats</code>
 <code>.functions</code> <code>.save &lt;path&gt;</code> <code>.checkpoint</code>

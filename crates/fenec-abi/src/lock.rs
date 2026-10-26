@@ -209,22 +209,27 @@ pub fn holder(path: &str) -> Option<Holder> {
     #[cfg(unix)]
     let asked = record::holder(&file);
     #[cfg(not(unix))]
-    let asked: Option<Option<u32>> = None;
+    let asked: Option<Option<i32>> = None;
     drop(file);
     drop(locked);
     match asked {
         // Free now: the holder let go since the refusal.
         Some(None) => None,
-        // An id of 0: a holder in another pid namespace, a container's,
-        // whose own id the line holds and this one cannot check.
-        Some(Some(0)) => Some(Holder {
+        // An id of 0 or less names no process here: a holder in another
+        // pid namespace, a container's, whose own id the line holds and
+        // this one cannot check, or a lock kept by an open file rather than
+        // a process (-1, Linux's OFD locks). Held, and named by nothing.
+        Some(Some(pid)) if pid <= 0 => Some(Holder {
             pid: None,
             program: None,
         }),
-        Some(Some(pid)) => Some(Holder {
-            pid: Some(pid),
-            program: written.and_then(|(p, program)| program.filter(|_| p == pid)),
-        }),
+        Some(Some(pid)) => {
+            let pid = pid as u32;
+            Some(Holder {
+                pid: Some(pid),
+                program: written.and_then(|(p, program)| program.filter(|_| p == pid)),
+            })
+        }
         // The system cannot be asked: the line alone.
         None => written.map(|(pid, program)| Holder {
             pid: Some(pid),
@@ -303,16 +308,12 @@ mod record {
     /// The id of the process whose lock would refuse this one's, inside
     /// `None` where none would; `None` where the system could not be asked.
     #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
-    pub fn holder(file: &File) -> Option<Option<u32>> {
+    pub fn holder(file: &File) -> Option<Option<i32>> {
         let mut l = whole();
         if unsafe { fcntl(file.as_raw_fd(), F_GETLK, &mut l as *mut Flock) } != 0 {
             return None;
         }
-        Some(if l.kind == F_UNLCK {
-            None
-        } else {
-            Some(l.pid as u32)
-        })
+        Some(if l.kind == F_UNLCK { None } else { Some(l.pid) })
     }
 
     #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android")))]
@@ -327,7 +328,7 @@ mod record {
 
     /// An `flock` names no holder.
     #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android")))]
-    pub fn holder(_: &File) -> Option<Option<u32>> {
+    pub fn holder(_: &File) -> Option<Option<i32>> {
         None
     }
 }

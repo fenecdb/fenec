@@ -218,7 +218,10 @@ fn a_shell_beside_a_server_is_refused_and_the_file_stays_whole() {
     let put = format!(r#"put notes {{id: 2, body: "{}"}}"#, "x".repeat(300));
     let out = fenec(&[&p, "-c", &put]);
     refused(&out, &p, &pid, "-c");
+    // Told what to do by what holds it: a server is asked over HTTP.
     let why = text(&out.stderr);
+    assert!(why.contains("(fenec-server, pid "), "{why}");
+    assert!(why.contains("query it over HTTP"), "{why}");
     assert!(why.contains(&format!("fenec --read-only {p}")), "{why}");
     refused(&piped(&[&p], &format!("{put}\n")), &p, &pid, "piped");
     refused(&fenec(&[&p, "-c", "get notes"]), &p, &pid, "a read");
@@ -276,7 +279,14 @@ fn a_second_shell_is_refused_until_the_first_has_quit() {
     let holder = format!("(fenec, pid {})", first.id());
 
     let put = r#"put notes {body: "second"}"#;
-    refused(&fenec(&[&p, "-c", put]), &p, &holder, "-c");
+    let out = fenec(&[&p, "-c", put]);
+    refused(&out, &p, &holder, "-c");
+    // A session is quit, not queried over HTTP.
+    let why = text(&out.stderr);
+    assert!(
+        why.contains("quit that fenec session first") && !why.contains("HTTP"),
+        "{why}"
+    );
     refused(&piped(&[&p], &format!("{put}\n")), &p, &holder, "piped");
     let out = fenec(&["--read-only", &p, "-c", "collections"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
@@ -375,4 +385,39 @@ fn every_way_the_program_writes_a_held_file_is_refused() {
     );
     let out = fenec(&[&q, "-c", "collections"]);
     assert!(text(&out.stdout).contains("other"), "{}", text(&out.stderr));
+}
+
+/// A file in a directory this user may only read: the lock file cannot be
+/// made, so the shell says so and names `--read-only`, which reads it
+/// without one, as a read there did before the lock. Run as root, the
+/// directory refuses nothing and there is nothing to show.
+#[cfg(unix)]
+#[test]
+fn a_file_whose_lock_cannot_be_made_is_read_with_read_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = Dir::new("readonly-dir");
+    let inner = d.0.join("ro");
+    std::fs::create_dir_all(&inner).unwrap();
+    let p = inner.join("ro.fenec").to_str().unwrap().to_string();
+    let made = fenec(&[&p, "-c", "create collection notes (body text)"]);
+    assert!(made.status.success(), "{}", text(&made.stderr));
+    std::fs::remove_file(format!("{p}.lock")).unwrap();
+    let mode = |m| std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(m)).unwrap();
+    mode(0o555);
+    let out = fenec(&[&p, "-c", "collections"]);
+    let ro = fenec(&["--read-only", &p, "-c", "collections"]);
+    mode(0o755);
+    if out.status.success() {
+        eprintln!("passed over: the directory refused nothing (run as root?)");
+        return;
+    }
+    let why = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{why}");
+    assert!(why.contains(&format!("could not take {p}.lock")), "{why}");
+    assert!(
+        why.contains(&format!("`fenec --read-only {p}` reads it without a lock")),
+        "{why}"
+    );
+    assert_eq!(ro.status.code(), Some(0), "{}", text(&ro.stderr));
+    assert!(text(&ro.stdout).contains("notes"));
 }
