@@ -148,9 +148,11 @@ nearest ten at 99.1% recall in 0.141 ms, against pgvector's 98.6% in 2.076
 
 ## Install
 
-A first query in a few commands, from a release, a package or an image:
-**[Quickstart](https://fenecdb.com/docs/quickstart)**. From a clone
-instead ([Build from source](https://fenecdb.com/docs/build)):
+A first query in a few commands: **[Quickstart](https://fenecdb.com/docs/quickstart)**
+starts the server and writes two rows, and [in the
+browser](https://fenecdb.com/docs/quickstart-browser) there is no server at
+all. Every way to install is on **[Install](https://fenecdb.com/docs/install)**.
+From a clone instead ([Build from source](https://fenecdb.com/docs/build)):
 
 ```bash
 git clone https://github.com/fenecdb/fenecdb && cd fenecdb
@@ -178,8 +180,8 @@ file, only prints the `PATH` line to add. Read it first with
 `curl -fsSL https://fenecdb.com/install.sh | less`
 ([`site/install.sh`](site/install.sh)). The `.deb` and `.rpm` are attached to
 each release after 0.1.11, for amd64 and arm64, with their checksums in
-`SHA256SUMS`. The [Quickstart](https://fenecdb.com/docs/quickstart) has each
-with its first run; the tap's formula is
+`SHA256SUMS`. [Install](https://fenecdb.com/docs/install) has each of them,
+and the tarball, the image and the language packages too; the tap's formula is
 [`packaging/homebrew`](packaging/homebrew).
 
 **Shell.** Installed as above, `fenec data.fenec`; from a clone,
@@ -189,6 +191,8 @@ with its first run; the tap's formula is
 ./target/release/fenec data.fenec              # interactive
 ./target/release/fenec data.fenec -c 'get docs limit 5'
 ```
+
+[The shell](https://fenecdb.com/docs/shell) has a first session and its flags.
 
 **Browser.** Dependency-free ES modules and the wasm file beside them:
 
@@ -202,7 +206,7 @@ build step. An app whose queries run on a server can import
 `@fenecdb/web/client`, 9 KB brotli in its bundle, which cannot pull in the
 engine, sync or storage ([which package](https://fenecdb.com/docs/javascript#packages)). With live
 queries (`db.live`, React's `useLiveQuery`) it can be an app's whole state,
-no server: [state in the page](https://fenecdb.com/docs/javascript#state). [JavaScript client](https://fenecdb.com/docs/javascript).
+no server: [state in the page](https://fenecdb.com/docs/javascript#state). [Quickstart: in the browser](https://fenecdb.com/docs/quickstart-browser) · [JavaScript client](https://fenecdb.com/docs/javascript).
 
 **Server.** `fenec-server` serves a file, or a directory of tenants, over
 HTTP and JSON: REST routes, FenecQL through `POST /query`, all-or-nothing
@@ -351,7 +355,10 @@ query; it is not a join and is not trying to be one.
 
 | | |
 |---|---|
-| [Quickstart](https://fenecdb.com/docs/quickstart) | Install a release, a package or the image, write a row and query it: in a browser tab, on a server from your language, or in the shell |
+| [Quickstart](https://fenecdb.com/docs/quickstart) | Start the server, write two rows, query and search them with curl and from your language, and see them in the studio |
+| [Quickstart: in the browser](https://fenecdb.com/docs/quickstart-browser) | The database in a page with no server: a Vite project, one npm package and a script, then kept in IndexedDB |
+| [Install](https://fenecdb.com/docs/install) | The install script, Homebrew, a .deb or .rpm, a tarball, the image, a package for each language, or a build from source |
+| [The shell](https://fenecdb.com/docs/shell) | `fenec`: open a file, run FenecQL a statement at a time, script it, and import, back up and generate types |
 | [Build from source](https://fenecdb.com/docs/build) | Clone, build the shell, the server and the browser module, run the tests and build the site |
 | [How it works](https://fenecdb.com/docs/concepts) | Segments, the offset index, the mapped file, why there is no buffer pool of its own and exactly one writer, and HNSW with a filter |
 | [FenecQL](https://fenecdb.com/docs/fenecql) | A tour from the first write to a lookup and a total, the grammar, and a reference page for each family of statements: [reading](https://fenecdb.com/docs/fenecql-reading), [writing](https://fenecdb.com/docs/fenecql-writing), [collections and types](https://fenecdb.com/docs/fenecql-schema), [indexes](https://fenecdb.com/docs/fenecql-indexes), [lookup and subqueries](https://fenecdb.com/docs/fenecql-lookup), [aggregates](https://fenecdb.com/docs/fenecql-aggregates), [text search](https://fenecdb.com/docs/fenecql-search) and [vector search](https://fenecdb.com/docs/fenecql-vector) |

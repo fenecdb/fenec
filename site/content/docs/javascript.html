@@ -9,14 +9,15 @@ open a database, query it, and keep it between visits — or query a server
 through the client alone. Their types come with them.</p>
 
 <p>The shortest way in: install the package, open the module and query it. This
-is the script of the <a href="quickstart.html#in-the-browser">Quickstart's
-page</a>, which runs from any static file server:</p>
+is the script of <a href="quickstart-browser.html">Quickstart: in the
+browser</a>, a Vite project that you can follow from an empty folder:</p>
 
 <pre data-lang="bash">npm install @fenecdb/web</pre>
 
-<pre data-lang="js" data-label="script of index.html">import { Fenec } from './node_modules/@fenecdb/web/fenec.js';
+<pre data-lang="js" data-label="src/main.js, in a Vite project">import { Fenec } from '@fenecdb/web';
+import wasm from '@fenecdb/web/fenec.wasm?url';   // Vite hands over the module's URL
 
-const db = await Fenec.open('./node_modules/@fenecdb/web/fenec.wasm');
+const db = await Fenec.open(wasm);
 
 db.run('create collection notes (title text @text, year int @sorted)');
 db.run('put notes {title: $1, year: $2}', ['Dunes', 2021]);
@@ -24,7 +25,7 @@ db.run('put notes {title: $1, year: $2}', ['Night at the oasis', 2024]);
 
 const { rows } = db.run('get notes where year >= $1 order year desc', [2020]);
 // [{"id":2,"title":"Night at the oasis","year":2024},{"id":1,"title":"Dunes","year":2021}]
-const hits = db.rows('get notes select title match title $1', ['oasis']);
+const hits = db.rows('get notes select title match title $1 fuzzy', ['oasys']);
 // [{"title":"Night at the oasis","_score":0.62239116}]</pre>
 
 <p>That database is in the tab's memory, with no server; <a

@@ -42,7 +42,12 @@ banner moves with a release instead of being found and edited;
 `languages.html` as the tabs of the HTTP endpoint page, so the two cannot say
 different things (`make languages-test` holds that page's statements to the
 programs it runs, and runs the HTTP page's curl tab as written:
-`integrations/languages/docs_check.py`);
+`integrations/languages/docs_check.py`). The Quickstart's fourth step is not
+taken from there: each of its programs is a whole file a reader pastes
+(`integrations/languages/quickstart/`), shown as the file is, and
+`languages-test` runs every one against a server holding the notes of the
+Quickstart's steps 2 and 3 and holds what it prints to the block under the
+tabs, the same three lines in every language;
 `{{moved_script}}` is the script of a page that was split ("Splitting a docs
 page", below); and `{{builder "case" ...}}`, on the line above a
 `<pre data-lang="fenecql">`, makes the block the first tab of a box whose
@@ -73,18 +78,23 @@ statements the tabs send are written once, under the panels (`styles.css`
 hides them under FenecQL's tab). All are filled before the claims are checked and before the search and `llms.txt` read
 the page, and a version in prose that is a fact about the past (a comparison
 checked against a competitor's page on a day, a benchmark's build) stays as
-written. The Quickstart installs that release, so its steps use only what the
-release has (`fuzzy` and `limit $1` were `main`'s when 0.1.10 was released and
-failed against it), and the outputs it shows -- a score, the server's banner --
-were taken from that release by running the page's commands. Nothing checks
-them in CI: after a release, run the page's commands again and compare.
+written. The Quickstart, Quickstart: in the browser, Install and The shell
+install or run that release, so their steps use only what the release has
+(`fuzzy` and `limit $1` were `main`'s when 0.1.10 was released and failed
+against it), and the outputs they show -- the install script's, a score, the
+server's banner, Vite's -- were taken from that release by running the pages'
+commands. Only the Quickstart's curl steps and its programs are checked in CI
+(`languages-test`: `docs_check.py` runs the curl steps against the checkout's
+server and compares each answer, and `run-tests.sh` runs the programs), so a
+statement or an answer that moved fails there; after a release, run the other
+pages' commands again and compare.
 
 Every code block gets a copy button (`site.js`): over its corner, taking no
 room, in the label bar where a block has one and shown on hover otherwise; a
 block with prompt lines (`$ `, `fenec> `) copies those commands alone, with no
 prompt and none of the answers beneath. A set of tabs that are not languages
-names its own `data-tabs` and `data-key` (the Quickstart's Docker and
-release binary).
+names its own `data-tabs` and `data-key` (the Quickstart's macOS and Linux
+and Docker).
 
 Because it has the module in hand, `build.py` also checks the numbers the prose
 puts on it. The module's size is written into eight files and had drifted by
