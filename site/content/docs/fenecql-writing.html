@@ -311,10 +311,13 @@ answer, found and written under the one writer's lock.
 in the order they were picked. A job queue's claim is one statement:</p>
 
 <pre data-lang="fenecql">create collection jobs (payload json, run_at timestamp @sorted, owner text, attempts int)
-put jobs [{payload: {"to": "ada"}, run_at: now(), attempts: 0}, {payload: {"to": "bo"}, run_at: now(), attempts: 0}]
-set jobs {owner: "w1", run_at: now() + 30000, attempts: attempts + 1} where run_at &lt;= now() order run_at limit 10 returning *
+</pre>
+
+{{builder "docs: two jobs queued" "docs: the ten oldest ready jobs claimed" "docs: a job acknowledged" "docs: ready jobs popped"}}
+<pre data-lang="fenecql">put jobs [{payload: {to: "ada"}, run_at: now(), attempts: 0}, {payload: {to: "bo"}, run_at: now(), attempts: 0}]
+set jobs {owner: "w1", run_at: now() + 30000, attempts: attempts + 1} where run_at &lt;= now() order run_at asc limit 10 returning *
 del jobs where id = 1 and owner = "w1" require 1
-del jobs where run_at &lt;= now() order run_at limit 10 returning id, payload.to
+del jobs where run_at &lt;= now() order run_at asc limit 10 returning id, payload.to
 </pre>
 
 <ul>

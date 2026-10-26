@@ -207,7 +207,12 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
 /* ------------------------------------------------------------- sidebar */
 
 .side-host { min-height: 0; border-right: 1px solid var(--rule); background: var(--surface-2); }
-.side { height: 100%; display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
+/* By name as `.main`'s are: `.side-foot:empty` is not drawn, and a part
+   added or moved before it must not shift the rest a row. */
+.side { height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; grid-template-areas: "find" "tree" "foot"; min-height: 0; }
+.side > .side-search { grid-area: find; }
+.side > .tree-list { grid-area: tree; }
+.side > .side-foot { grid-area: foot; }
 .side-search { margin: 10px; height: 28px; }
 .tree-list { list-style: none; margin: 0; padding: 0 0 12px; overflow: auto; min-height: 0; }
 .tree-list ul { list-style: none; margin: 0; padding: 0; }
@@ -242,7 +247,21 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
 
 /* ------------------------------------------------------------- main */
 
-.main { display: grid; grid-template-rows: auto auto 1fr auto; min-height: 0; min-width: 0; background: var(--surface); }
+/* Each part has its row by name, never by its place among the children. The
+   counts' bar is not drawn for a collection with no `@hash` field (`hidden`,
+   so `display: none`), and the three children left took the first three of
+   four rows: the grid the `auto` one, 0 px high, and the status line the
+   `1fr`, so the rows were read and never to be seen. A part not drawn leaves
+   its row empty, and an empty `auto` row is 0 px. */
+.main {
+  display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-areas: "bar" "counts" "rows" "status";
+  min-height: 0; min-width: 0; background: var(--surface);
+}
+.main > .toolbar { grid-area: bar; }
+.main > .facets { grid-area: counts; }
+.main > .grid-host { grid-area: rows; }
+.main > .status { grid-area: status; }
 .toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px 14px; padding: 10px 14px; border-bottom: 1px solid var(--rule); }
 .view-head { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
 .view-title { font-size: 15px; font-family: var(--mono); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

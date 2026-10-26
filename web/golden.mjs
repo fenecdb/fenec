@@ -562,13 +562,68 @@ c('docs: the newest articles', arts, ['order', 'published', 'desc'], ['limit', 2
 c('docs: the newest articles since a day', arts, ['where', 'published', '>=', '2026-09-01'], ['order', 'published', 'desc'], ['limit', 20], ['rows']);
 c('docs: articles counted over a range of titles', arts, ['where', 'title', '>=', 'k'], ['where', 'title', '<', 'l'], ['count']);
 c('docs: the nearest articles since a day', arts, ['where', 'published', '>=', '2026-01-01'], ['near', 'embed', vec], ['limit', 10], ['rows']);
+const posts = ['from', 'posts'];
+c('docs: an owner\'s newest posts', posts, ['where', 'owner', 7], ['order', 'created', 'desc'], ['limit', 20], ['rows']);
+c('docs: three owners\' newest posts', posts, ['where', 'owner', 'in', [7, 8, 9]], ['order', 'created', 'desc'], ['limit', 20], ['rows']);
+c('docs: an owner\'s posts counted since a time', posts, ['where', 'owner', 7], ['where', 'created', '>=', '2026-10-01'], ['count']);
+const sessions = ['from', 'sessions'];
+c('docs: a session seen', sessions, ['insert', { user: 'ada', seen: { $expr: ['now()'] } }]);
+c('docs: a session seen again', sessions, ['where', 'user', 'ada'], ['update', { seen: { $expr: ['now()'] } }]);
+c('docs: a user\'s sessions', sessions, ['where', 'user', 'ada'], ['rows']);
+// languages.html: the builder's tour, from a read to a delete.
+const tour = ['from', 'docs'];
+c('docs: a page of documents with their comments', tour, ['where', 'year', '>=', 2024], ['where', { $or: [{ lang: 'tr' }, { tags: { has: 'rust' } }] }], ['order', 'title', 'asc', { collate: 'tr' }], ['limit', 20], ['lookup', 'comments', { on: 'doc_id', limit: 3 }], ['rows']);
+c('docs: documents matching a misspelt word', tour, ['where', 'year', '>=', 2024], ['match', 'title', 'databse', { fuzzy: true }], ['limit', 10], ['rows']);
+c('docs: the document of a slug', tour, ['where', 'slug', 'intro'], ['first']);
+c('docs: documents counted since a year', tour, ['where', 'year', '>=', 2024], ['count']);
+c('docs: a document inserted', tour, ['insert', { slug: 'intro', title: 'Ownership in Rust', year: 2026 }]);
+c('docs: a document inserted unless its slug is held', tour, ['insert', { slug: 'intro', title: 'Ownership in Rust' }, { ifAbsent: true }]);
+c('docs: a document\'s views counted', tour, ['where', 'slug', 'intro'], ['update', { views: { $inc: 1 } }]);
+c('docs: the documents before a year deleted', tour, ['where', 'year', '<', 2000], ['delete']);
 // fenecql-lookup.html
 c('docs: products with their newest reviews', prods, ['limit', 20], ['lookup', 'reviews', { on: 'product_id', order: [['created', 'desc']], limit: 3 }], ['rows']);
 c('docs: shops, their orders and the orders\' lines', ['from', 'shops'], ['limit', 20], ['lookup', 'orders', { on: 'shop_id', limit: 3 }], ['lookup', 'lines', { on: 'order_id', limit: 5 }], ['rows']);
 c('docs: products with a five-star review', prods, ['limit', 20], ['lookup', 'reviews', { on: 'product_id', required: true, where: { stars: 5 } }], ['rows']);
 c('docs: products with a five-star review counted', prods, ['lookup', 'reviews', { on: 'product_id', required: true, where: { stars: 5 } }], ['count']);
+c('docs: products with their reviews', prods, ['lookup', 'reviews', { on: 'product_id' }], ['rows']);
+c('docs: the names of dear products with their good reviews', prods, ['select', 'name'], ['where', 'price', '>=', 10000], ['lookup', 'reviews', { on: 'product_id', select: ['body'], where: { stars: { gte: 4 } }, limit: 3 }], ['rows']);
+c('docs: products with their tags by sku', prods, ['lookup', 'tags', { on: 'sku', parentKey: 'sku' }], ['rows']);
+c('docs: orders with their lines by a key of two fields', ords, ['where', 'org', 7], ['limit', 20], ['lookup', 'lines', { on: ['org', 'order'], parentKey: ['org', 'id'], order: 'line', limit: 5 }], ['rows']);
+const named = (e, as) => ({ $as: [{ $expr: [e] }, as] });
+c('docs: shops with their orders folded', ['from', 'shops'], ['limit', 20], ['lookup', 'orders', { on: 'shop', select: [named('count(*)', 'n'), named('sum(total)', 'revenue')] }], ['rows']);
+c('docs: couriers with their latest fifty deliveries folded', ['from', 'couriers'], ['limit', 20], ['lookup', 'deliveries', { on: 'courier', select: [named('count(*)', 'n'), named('avg(km)', 'km')], order: [['at', 'desc']], limit: 50 }], ['rows']);
+c('docs: each shop\'s three best sellers', ['from', 'shops'], ['lookup', 'lines', { on: 'shop', select: ['product', named('sum(qty)', 'sold')], group: ['product'], order: [['sold', 'desc']], limit: 3 }], ['rows']);
+c('docs: the busiest couriers with their names', ords, ['select', 'courier', named('count(*)', 'n')], ['where', 'at', '>=', '2026-10-01'], ['group', 'courier'], ['order', 'n', 'desc'], ['limit', 10], ['lookup', 'couriers', { on: 'user', parentKey: 'courier', select: ['name'] }], ['rows']);
 // fenecql-reading.html
 c('docs: articles counted since a year', arts, ['where', 'year', '>=', 2024], ['count']);
+c('docs: articles a page at a time', arts, ['where', 'year', 2024], ['order', 'published', 'desc'], ['limit', 20], ['offset', 40], ['rows']);
+c('docs: a page of matches with its brands counted', prods, ['match', 'title', 'tent'], ['limit', 20], ['facet', 'brand', { top: 10 }], ['rows']);
+c('docs: ready jobs claimed a page at a time', ['from', 'jobs'], ['where', { $raw: ['run_at <= now()'] }], ['order', 'run_at'], ['limit', 10], ['update', { owner: 'w1' }, { returning: true }]);
+c('docs: a column worked out', ['from', 'ticks'], ['select', 'sym', named('px * qty', 'notional')], ['where', 'qty', '>', 100], ['rows']);
+c('docs: columns named and worked out', ['from', 'ticks'], ['select', named('px', 'price'), { $as: [{ $bucket: ['at', '1m'] }, 'minute'] }, { $as: [{ $expr: ['greatest(px, ?)', 100] }, 'floor'] }], ['rows']);
+c('docs: a column of a case', ords, ['select', 'id', { $as: [{ $expr: ['case when total >= ? then ? else ? end', 100, 'large', 'small'] }, 'size'] }], ['rows']);
+// fenecql-schema.html
+const docsJson = ['from', 'docs'];
+c('docs: a document with a json field', docsJson, ['insert', { title: 'a', meta: { lang: 'tr', source: { site: 'x', rank: 3 } } }]);
+c('docs: documents by paths', docsJson, ['where', 'meta.lang', 'tr'], ['where', 'meta.source.rank', '>=', 2], ['rows']);
+c('docs: a path selected and ordered by', docsJson, ['select', 'title', 'meta.source.site'], ['order', 'meta.source.rank', 'desc'], ['rows']);
+c('docs: a path set', docsJson, ['where', 'title', 'a'], ['update', { 'meta.lang': 'en' }]);
+const events = ['from', 'events'];
+c('docs: an event at a time written out', events, ['insert', { name: 'login', t: '2026-09-19T12:34:56Z' }]);
+c('docs: an event at epoch milliseconds', events, ['insert', { name: 'logout', t: 1758285296000 }]);
+c('docs: events between a day and now', events, ['where', 't', '>=', '2026-01-01'], ['where', { $raw: ['t < now()'] }], ['rows']);
+const people = ['from', 'people'];
+c('docs: people in the root collation', people, ['order', 'name', 'asc', { collate: 'und' }], ['limit', 20], ['rows']);
+c('docs: people in Turkish order', people, ['order', 'city', 'desc', { collate: 'tr' }], ['order', 'name', 'asc', { collate: 'tr' }], ['rows']);
+c('docs: people counted by city in order', people, ['select', 'city', 'count(*)'], ['group', 'city'], ['order', 'city', 'asc', { collate: 'und' }], ['rows']);
+c('docs: the page of people after a name', people, ['where', 'name', '>', 'Ada'], ['order', 'name'], ['limit', 20], ['rows']);
+const users = ['from', 'users'];
+c('docs: a user', users, ['insert', { email: 'Alice@Example.com', name: 'İsmail' }]);
+c('docs: a user by an email in any case', users, ['where', 'email', 'alice@example.COM'], ['rows']);
+c('docs: a user whose email is taken', users, ['insert', { email: 'ALICE@example.com' }]);
+c('docs: a user unless the email is taken', users, ['insert', { email: 'alice@example.com' }, { ifAbsent: true }]);
+c('docs: a user by a name in any case', users, ['where', 'name', 'ismail'], ['rows']);
+c('docs: users in Turkish order', users, ['select', 'name'], ['order', 'name'], ['limit', 20], ['rows']);
 // fenecql-search.html
 c('docs: articles matching words', arts, ['match', 'body', 'ownership'], ['limit', 10], ['rows']);
 c('docs: articles matching words since a year', arts, ['where', 'year', '>=', 2024], ['match', 'body', 'ownership'], ['limit', 10], ['rows']);
@@ -578,6 +633,11 @@ c('docs: matches with their marks tagged', arts, ['select', 'title'], ['highligh
 c('docs: matches with a snippet', arts, ['select', 'title'], ['snippet', 'body', 20, { ellipsis: '…' }], ['match', 'body', 'ownership'], ['limit', 10], ['rows']);
 c('docs: matches with a snippet tagged', arts, ['select', 'title'], ['snippet', 'body', 20, { ellipsis: '…', pre: '<b>', post: '</b>' }], ['match', 'body', 'ownership'], ['limit', 10], ['rows']);
 c('docs: tents counted by price range', prods, ['where', 'category', 'tents'], ['limit', 24], ['facet', 'price', { ranges: [0, 2500, 5000, 10000, 25000], disjunctive: true }], ['rows']);
+c('docs: a page of products with brands and colours counted', prods, ['where', 'price', '<', 500], ['limit', 20], ['facet', 'brand'], ['facet', 'color'], ['rows']);
+c('docs: a page of matches with brands and tags counted', prods, ['where', 'price', '<', 500], ['match', 'title', 'tent'], ['limit', 20], ['facet', 'brand', { top: 10 }], ['facet', 'tags'], ['rows']);
+c('docs: phones counted by brand', prods, ['where', 'category', 'phones'], ['facet', 'brand'], ['count']);
+c('docs: products counted by origin alone', prods, ['limit', 0], ['facet', 'meta.origin', { top: 5 }], ['rows']);
+c('docs: red tents of two brands with their facets', prods, ['where', 'category', 'tents'], ['where', 'brand', 'in', ['acme', 'nova']], ['where', 'color', 'red'], ['order', 'price'], ['limit', 24], ['facet', 'brand', { disjunctive: true }], ['facet', 'color', { disjunctive: true }], ['facet', 'material'], ['rows']);
 // fenecql-vector.html
 c('docs: the nearest articles', arts, ['near', 'embed', vec], ['limit', 10], ['rows']);
 c('docs: the nearest articles since a year', arts, ['where', 'year', '>=', 2024], ['near', 'embed', vec, { ef: 200 }], ['limit', 10], ['rows']);
@@ -590,6 +650,11 @@ c('docs: the articles before a year deleted', arts, ['where', 'year', '<', 2000]
 c('docs: a product that must be there at its price', prods, ['where', 'sku', 'tee'], ['where', 'price', 1200], ['where', 'stock', '>', 0], ['require', 1], ['rows']);
 c('docs: a coupon that must still be usable', ['from', 'coupons'], ['where', 'code', 'X1'], ['where', { $raw: ['uses < max_uses'] }], ['limit', 1], ['require', 1], ['rows']);
 c('docs: no hold that must be there', ['from', 'holds'], ['where', 'order_ref', 'o-17'], ['where', 'state', 'held'], ['require', 0], ['rows']);
+const queued = (to) => ({ payload: { to }, run_at: { $expr: ['now()'] }, attempts: 0 });
+c('docs: two jobs queued', ['from', 'jobs'], ['insert', [queued('ada'), queued('bo')]]);
+c('docs: the ten oldest ready jobs claimed', ['from', 'jobs'], ['where', { $raw: ['run_at <= now()'] }], ['order', 'run_at'], ['limit', 10], ['update', { owner: 'w1', run_at: { $expr: ['now() + ?', 30000] }, attempts: { $expr: ['attempts + 1'] } }, { returning: true }]);
+c('docs: a job acknowledged', ['from', 'jobs'], ['where', 'id', 1], ['where', 'owner', 'w1'], ['delete', { require: 1 }]);
+c('docs: ready jobs popped', ['from', 'jobs'], ['where', { $raw: ['run_at <= now()'] }], ['order', 'run_at'], ['limit', 10], ['delete', { returning: ['id', 'payload.to'] }]);
 
 // ------------------------------------------------------------------ writing
 

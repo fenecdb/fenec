@@ -73,9 +73,10 @@ children per parent.</p>
 </ul>
 
 <details class="deep"><summary>Chains, keys over several fields, folded levels, required, flat rows and costs</summary>
+{{builder "docs: products with their reviews" "docs: products with their newest reviews" "docs: the names of dear products with their good reviews" "docs: products with their tags by sku"}}
 <pre data-lang="fenecql">get products lookup reviews on product_id
 get products limit 20 lookup reviews on product_id order created desc limit 3
-get products where price &gt;= 10000 select name
+get products select name where price &gt;= 10000
   lookup reviews on product_id select body where stars &gt;= 4 limit 3
 get products lookup tags on sku = sku
 </pre>
@@ -123,8 +124,11 @@ same 200 000 rows — is not a thing a query should do without saying so.</p>
 <h3 id="a-key-over-several-fields">A key over several fields</h3>
 
 <pre data-lang="fenecql">create collection lines (org int, order int, line int, qty int, @sorted(org, order, line))
-get orders where org = $1 limit 20
-  lookup lines on (org, order) = (org, id) order line limit 5
+</pre>
+
+{{builder "docs: orders with their lines by a key of two fields"}}
+<pre data-lang="fenecql">get orders where org = $1 limit 20
+  lookup lines on (org, order) = (org, id) order line asc limit 5
 </pre>
 
 <p>Where one field does not say which children are a row's — a tenant's
@@ -169,9 +173,10 @@ find.</p>
 
 <h3 id="lookup-folds">A level that folds</h3>
 
+{{builder "docs: shops with their orders folded" "docs: couriers with their latest fifty deliveries folded" "docs: each shop's three best sellers" "docs: the busiest couriers with their names"}}
 <pre data-lang="fenecql">get shops limit 20 lookup orders on shop select count(*) as n, sum(total) as revenue
-get couriers limit 20 lookup deliveries on courier order at desc limit 50
-  select count(*) as n, avg(km) as km
+get couriers limit 20 lookup deliveries on courier
+  select count(*) as n, avg(km) as km order at desc limit 50
 get shops lookup lines on shop select product, sum(qty) as sold group product
   order sold desc limit 3
 get orders select courier, count(*) as n where at &gt;= $1 group courier

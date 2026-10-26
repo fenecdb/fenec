@@ -135,10 +135,12 @@ usage: fenec-server [options]
                             token is for: it reaches /t/<t>/ only when the
                             claim names <t> (a text, or a list holding it)
                             default: tenant
-      --jwt-unbound-tenants with --dir, take a token naming no tenant for
-                            every tenant. Without it such a token is refused
-                            (403): a policy's `owner = $jwt.sub` matches the
-                            same user in every tenant's file
+      --jwt-unbound-tenants with --dir, take a token without the tenant
+                            claim for every tenant. Without it such a token
+                            is refused (403): a policy's `owner = $jwt.sub`
+                            matches the same user in every tenant's file. One
+                            holding the claim as null, an empty text or no
+                            tenant's name is refused either way
       --policy <path>       the rules a token is held to, one per line:
                             <collection|*> <grants> [where <filter>]
                             [for <role>], the grants read, insert, update,

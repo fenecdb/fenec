@@ -31,7 +31,7 @@ make packaging-test    # site/install.sh against a release of its own on localho
 make version V=X.Y.Z   # one version wherever a release reads it (RELEASING.md)
 make agents-md     # AGENTS.md written again from this file
 make builder-golden   # integrations/builder-golden.json written again from the JS builder (web/golden.mjs)
-make docs-builder     # the SDKs' tests of the FenecQL pages' builder tabs written again (site/builder_tabs.py)
+make docs-builder     # the SDKs' tests of the site's builder tabs written again (site/builder_tabs.py)
 make schema-golden    # integrations/schema-golden.json written again through the module (web/schema-golden.mjs)
 make types-check  # web/fenec.d.ts held to web/fenec.js and a caller's code under tsc --strict, then docs-types
 make studio-highlight   # studio/highlight.js and the Grafana data source's copy written again from site/highlight.js
@@ -359,7 +359,11 @@ transitions (`new.`, granting `update` alone), and `append-only` binds
 every scoped token. A scoped stream tells deletions only of ids it sent, a
 scoped poll's tag digests its answer (`content_tag`), a scoped `match`
 scores its rows alone (`Match::within`), and the algorithm is the key's,
-never the token's.
+never the token's. A claim held as `null`, `""` or a value its rule cannot
+compare (`usable`) is a claim the token lacks: the rule naming it does
+not apply and no filter is bound to it. A tenant claim naming no tenant
+reaches none, a `sub` of `""` is no subject, and a policy writing a `$<n>`
+of its own is refused at startup.
 
 **[A field a read rule withholds is held out of what a statement
 does.](docs/design/access.md#field-lists)** `fields::hold` and
@@ -996,9 +1000,10 @@ merge cannot hold exactly, and refuses (413) past its bounds, never cuts.
 not.](docs/design/integrations.md#integrations)** A builder change starts
 in `web/builder.js` and a case in `golden.mjs`, then every SDK's follows,
 held to `integrations/builder-golden.json`; `make types-check` holds
-`fenec.d.ts` to `fenec.js`. A FenecQL page's builder tab is a golden
-case's chain rendered by `site/builder_tabs.py`, never written by hand:
-its statement held to the page's, the JS and Python tabs run by its
+`fenec.d.ts` to `fenec.js`. A builder tab on the site (a FenecQL page's,
+Your language's tour) is a golden case's chain rendered by
+`site/builder_tabs.py`, never written by hand: its statement held to the
+page's or written from the case, the JS and Python tabs run by its
 `--check`, the others tests of their SDKs (`make docs-builder`); a
 builder's API change owes its renderer. Go's and .NET's SDKs bound a
 request by its context or token, never the HTTP client's timeout; a

@@ -71,13 +71,17 @@ a number, text, <code>true</code>, <code>false</code> or
 reads into it wherever a field is read.</p>
 
 <pre data-lang="fenecql">create collection docs (title text, meta json)
-put docs {title: "a", meta: {lang: "tr", source: {site: "x", rank: 3}}}
+</pre>
+
+{{builder "docs: a document with a json field" "docs: documents by paths" "docs: a path selected and ordered by" "docs: a path set"}}
+<pre data-lang="fenecql">put docs {title: "a", meta: {lang: "tr", source: {site: "x", rank: 3}}}
 
 get docs where meta.lang = "tr" and meta.source.rank &gt;= 2
 get docs select title, meta.source.site order meta.source.rank desc
 set docs {meta.lang: "en"} where title = "a"
+</pre>
 
-create index on docs (meta.lang) @hash
+<pre data-lang="fenecql">create index on docs (meta.lang) @hash
 create index on docs (meta.source.rank) @sorted
 </pre>
 
@@ -212,6 +216,7 @@ get places select name near loc $1 limit 10
 <p>A <code>timestamp</code> field takes an ISO-8601 date or epoch
 milliseconds, and always comes back as ISO-8601 in UTC.</p>
 
+{{builder "docs: an event at a time written out" "docs: an event at epoch milliseconds" "docs: events between a day and now"}}
 <pre data-lang="fenecql">put events {name: "login", t: "2026-09-19T12:34:56Z"}
 put events {name: "logout", t: 1758285296000}        -- epoch ms
 get events where t >= "2026-01-01" and t < now()
@@ -238,12 +243,17 @@ show every client a raw number.</p>
 language. <code>collate und</code> sorts it the way people expect in any
 language, and <code>collate tr</code> in Turkish order.</p>
 
-<pre data-lang="fenecql">get people order name collate und limit 20
-get people order city collate tr desc, name collate tr
-get people select city, count(*) group city order city collate und
+{{builder "docs: people in the root collation" "docs: people in Turkish order" "docs: people counted by city in order"}}
+<pre data-lang="fenecql">get people order name collate und asc limit 20
+get people order city collate tr desc, name collate tr asc
+get people select city, count(*) group city order city collate und asc
+</pre>
 
-create collection people (name text collate und @sorted, city text)
-get people where name &gt; $1 order name limit 20   -- the page after $1
+<pre data-lang="fenecql">create collection people (name text collate und @sorted, city text)
+</pre>
+
+{{builder "docs: the page of people after a name"}}
+<pre data-lang="fenecql">get people where name &gt; $1 order name asc limit 20   -- the page after $1
 </pre>
 
 <div class="tbl">
@@ -399,13 +409,16 @@ as <code>alice@X.COM</code>. It is PostgreSQL's <code>citext</code>, with
 Unicode's case folding where <code>citext</code> has <code>lower()</code>.</p>
 
 <pre data-lang="fenecql">create collection users (email text nocase @unique, name text collate tr nocase @sorted)
-put users {email: "Alice@Example.com", name: "İsmail"}
+</pre>
+
+{{builder "docs: a user" "docs: a user by an email in any case" "docs: a user whose email is taken" "docs: a user unless the email is taken" "docs: a user by a name in any case" "docs: users in Turkish order"}}
+<pre data-lang="fenecql">put users {email: "Alice@Example.com", name: "İsmail"}
 
 get users where email = "alice@example.COM"    -- the row, its email as written
 put users {email: "ALICE@example.com"}          -- refused: users.email is unique
 put users {email: "alice@example.com"} if absent   -- passed over, and not counted
 get users where name = "ismail"                 -- the row: İ is the capital of i in Turkish
-get users select name order name limit 20       -- in Turkish order, case aside
+get users select name order name asc limit 20   -- in Turkish order, case aside
 </pre>
 
 <ul>
