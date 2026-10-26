@@ -86,13 +86,16 @@ export class Sink {
     });
   }
 
-  /** Makes the consumer at the first write if it is new; where it stands otherwise. */
+  /**
+   * Makes the consumer at the first write if it is new (201); where it
+   * stands otherwise (200), which the answer names: the start in the body
+   * is a new consumer's alone.
+   */
   async open(): Promise<number> {
     const res = await this.#req(`/_changes/consumers/${this.name}`, { method: 'POST', body: JSON.stringify({ since: 0 }) });
-    if (res.status === 409 || res.ok) {
-      const list = (await (await this.#req('/_changes/consumers')).json()) as { name: string; since: number }[];
-      const me = (Array.isArray(list) ? list : []).find((c) => c.name === this.name);
-      this.since = me?.since ?? 0;
+    if (res.ok) {
+      const me = (await res.json()) as { name: string; since: number };
+      this.since = me.since;
       this.cursor = this.since;
       // A consumer that moved on while the file is empty lost its file (a
       // new disk, a sink moved): copy the journal again before streaming.
@@ -148,7 +151,7 @@ export class Sink {
     this.#uncommitted ||= writes > 0;
     const due = performance.now() - this.#committed >= (this.opts.commitEvery ?? 250);
     if (this.#uncommitted && due && next > this.since) {
-      const r = await this.#req(`/_changes/consumers/${this.name}`, { method: 'POST', body: JSON.stringify({ since: next }) });
+      const r = await this.#req(`/_changes/consumers/${this.name}`, { method: 'PATCH', body: JSON.stringify({ since: next }) });
       if (!r.ok) throw new Error(`commit ${next}: ${r.status} ${await r.text()}`);
       this.since = next;
       this.#uncommitted = false;
@@ -191,7 +194,7 @@ export class Sink {
     let out = '';
     for (const doc of json.results[0].rows) out += this.#line(doc, 0);
     this.#append(out);
-    const r = await this.#req(`/_changes/consumers/${this.name}`, { method: 'POST', body: JSON.stringify({ since: seq }) });
+    const r = await this.#req(`/_changes/consumers/${this.name}`, { method: 'PATCH', body: JSON.stringify({ since: seq }) });
     if (!r.ok) throw new Error(`commit ${seq}: ${r.status} ${await r.text()}`);
     this.since = seq;
     this.cursor = seq;
