@@ -759,6 +759,9 @@ impl Archive {
 
     /// Writes the database as it stood at `to` into `out`, a new file.
     pub fn restore(&self, out: &Path, to: Target) -> io::Result<Restored> {
+        // Through a link, the file it leads to (`fenec_core::fs::resolved`),
+        // as an open writes it: renamed over, the link would be another file.
+        let out = &fenec_core::fs::resolved(out);
         let tmp = out.with_extension("restoring");
         let r = self.assemble(&tmp, to)?;
         // Opened to check it whole, and forked: from here its writes are no
@@ -1183,6 +1186,12 @@ fn verify_probe() -> PathBuf {
 /// `out`: a file, or an archive directory. A file gets its history forked,
 /// as a restore's does, so it can be opened as a primary of its own.
 pub fn backup(upstream: &Upstream, out: &Path, key: Option<&Key>) -> io::Result<u64> {
+    // A file through a link is the one it leads to, as a restore's.
+    let resolved = fenec_core::fs::resolved(out);
+    let out = match out.is_dir() {
+        true => out,
+        false => &resolved,
+    };
     let mut rx = upstream.open(0, 0, true)?;
     let Message::Hello {
         image: true,
@@ -1221,6 +1230,8 @@ pub fn backup(upstream: &Upstream, out: &Path, key: Option<&Key>) -> io::Result<
 /// A backup file sealed with `key` (`backup` with a key), opened into
 /// `out`: the database file it holds.
 pub fn unseal(sealed: &Path, key: &Key, out: &Path) -> io::Result<u64> {
+    // A file through a link is the one it leads to, as a restore's.
+    let out = &fenec_core::fs::resolved(out);
     let bytes = seal::open_whole(key, &fs::read(sealed)?)
         .map_err(|e| corrupt(format!("{}: {e}", sealed.display())))?;
     let tmp = out.with_extension("tmp");

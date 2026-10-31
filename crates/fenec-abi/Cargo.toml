@@ -17,6 +17,11 @@ autotests = false
 fenec-core = { workspace = true, default-features = false }
 fenec-ql.workspace = true
 
+# `lock` names a lock file after the file a link leads to, as the core's
+# open resolves it (`fs::resolved`): files, so not the browser module's.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+fenec-core = { workspace = true, default-features = false, features = ["std-fs"] }
+
 [features]
 default = ["sync"]
 # A replica's sync with a server (`sync`): the native library's; the

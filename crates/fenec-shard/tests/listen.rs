@@ -46,3 +46,51 @@ fn a_router_on_port_0_names_the_port_it_took() {
     let _ = child.wait();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A second router over one directory file is refused, naming the first
+/// -- as a second `fenec-server --file` is -- and the file is its once the
+/// first is gone: two routers, or a shell beside one, wrote over each
+/// other's records in it.
+#[test]
+fn a_second_router_over_the_directory_is_refused() {
+    let dir = std::env::temp_dir().join(format!("fenec-shard-held-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("shard.fenec");
+    let start = || {
+        Command::new(env!("CARGO_BIN_EXE_fenec-shard"))
+            .args(["--listen", "127.0.0.1:0", "--directory"])
+            .arg(&file)
+            .stdin(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    // Its stderr read on, kept open while it runs: a log line written to a
+    // pipe closed would be a write refused.
+    let listening = |child: &mut std::process::Child| {
+        let mut lines = BufReader::new(child.stderr.take().unwrap()).lines();
+        loop {
+            let line = lines.next().expect("fenec-shard ended before it listened");
+            if line.unwrap().contains("listening on: http://") {
+                return std::thread::spawn(move || lines.for_each(drop));
+            }
+        }
+    };
+    let mut first = start();
+    let _first_log = listening(&mut first);
+    let second = start().wait_with_output().unwrap();
+    let said = String::from_utf8_lossy(&second.stderr);
+    assert_eq!(second.status.code(), Some(1), "{said}");
+    assert!(said.contains("could not open the directory"), "{said}");
+    let holder = format!("(held by fenec-shard, pid {})", first.id());
+    assert!(said.contains(&holder), "{said}");
+    let _ = first.kill();
+    let _ = first.wait();
+    // Let go with the process, however it ended.
+    let mut again = start();
+    let _again_log = listening(&mut again);
+    let _ = again.kill();
+    let _ = again.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -165,6 +165,25 @@ fn fail(msg: &str) -> ! {
     std::process::exit(2);
 }
 
+/// `<path>.lock` (`fenec_abi::lock`) for as long as the router runs, taken
+/// before the file is opened, as `fenec-server --file` takes its file's: a
+/// second router over the directory, or a shell over it, would corrupt it,
+/// and each takes the lock and is refused while another holds it. Refused,
+/// the router exits 1 having written nothing but the lock file, naming the
+/// holder where it can be told. The system lets the lock go at the exit.
+fn hold_file(path: &str, what: &str) -> fenec_abi::lock::FileLock {
+    fenec_abi::lock::hold(path).unwrap_or_else(|e| {
+        let who = match e {
+            fenec_abi::lock::Refused::Held => fenec_abi::lock::holder(path)
+                .filter(|h| h.is_known())
+                .map_or(String::new(), |h| format!(" (held by {h})")),
+            _ => String::new(),
+        };
+        fenec_http::log!("could not open {what} {path}: {e}{who}");
+        std::process::exit(1);
+    })
+}
+
 /// Refuses `--entry-token` where a node `dir` holds has it for its admin
 /// token, which reaches `/_admin/` there; a node added later is refused it
 /// as it is added (`PUT /_shard/nodes/<n>`).
@@ -422,6 +441,8 @@ fn main() {
         );
     }
 
+    // Held until the process ends, every way it ends.
+    let _held = hold_file(&path, "the directory");
     // The directory goes through the feed a standby reads it from; without
     // a token it is an ordinary file.
     let (db, feed) = if replicating {
@@ -467,6 +488,9 @@ fn main() {
                 Some(stem) => format!("{stem}.global.fenec"),
                 None => format!("{path}.global"),
             });
+        // Held until the process ends, as the directory's is: kept by no
+        // value of its own, the system lets it go at the exit.
+        std::mem::forget(hold_file(&gpath, "the global directory's copy"));
         let (mut gdb, gfeed) = match replication::open(&gpath, replication_buffer) {
             Ok(opened) => opened,
             Err(e) => fail(&format!(

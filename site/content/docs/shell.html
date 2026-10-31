@@ -72,9 +72,9 @@ Releases up to 0.1.12 have no <code>--version</code>: the first line an
 interactive session prints names theirs.</p>
 
 <p id="the-lock">The shell holds <code>&lt;file&gt;.lock</code> while it has a
-file open, as <code>fenec-server --file</code>, <code>fenec mcp --file</code>
-and an app through the native library do, so a file one of them or another
-shell has open is refused, and its holder named — <code>notes.fenec is open in
+file open, as <code>fenec-server --file</code>, a <code>--dir</code> node for
+each tenant it has open, <code>fenec mcp --file</code> and an app through the
+native library do, so a file one of them or another shell has open is refused, and its holder named — <code>notes.fenec is open in
 another process (fenec-server, pid 4242)</code>, exit 1. A server's file is
 queried over HTTP instead, or the server stopped first; a file another session
 or an app has open is closed there first. <code>-c</code>, a pipe and a script
@@ -83,7 +83,11 @@ are refused alike, and so are <code>fenec import</code> into the file, a
 it. Where the lock cannot be taken at all, in a directory you may only read,
 the refusal points to <code>--read-only</code>, which takes no lock and writes
 nothing: it reads the file as it stood at the open, beside a server writing it,
-and refuses every write and <code>.checkpoint</code>. On Linux, after the machine went down
+and refuses every write and <code>.checkpoint</code>. A file opened through a
+symbolic link is the file the link leads to, for its lock and for the
+checkpoints and compacts that write it anew, the link left a link; a hard link, a Docker Desktop bind mount and a
+network file system keeping no locks are not seen through, so open a file from
+one side of those only. On Linux, after the machine went down
 and before a server or the shell opens the file to write it again, it may lack
 the last durable writes: they wait in the sync log beside the file, which only
 an open to write plays back. Releases up to 0.1.12 took no lock, and a write

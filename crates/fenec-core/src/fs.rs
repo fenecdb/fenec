@@ -218,6 +218,35 @@ impl Tail {
     }
 }
 
+/// The file `path` names once a symbolic link in its place is followed,
+/// links to links too: what an open writes, a checkpoint or a compact
+/// renames over and `<file>.lock` is named after. Renamed over as given, a
+/// link was replaced by the new image -- a regular file of its own, beside
+/// which a shell through the link wrote while the server wrote the file
+/// the link had led to, and the file opened no more. A directory reached
+/// through a link needs nothing, since the files beside go through the
+/// same link to the same directory, so the path is resolved no further
+/// than its last name: one `lstat` where it is no link. `canonicalize`
+/// cost 20 us more an open, and fails for a file not made yet.
+pub fn resolved(path: &Path) -> PathBuf {
+    let mut real = path.to_path_buf();
+    // As many links as the system follows in one path before it gives up.
+    for _ in 0..40 {
+        match std::fs::symlink_metadata(&real) {
+            Ok(m) if m.file_type().is_symlink() => match std::fs::read_link(&real) {
+                Ok(to) if to.is_absolute() => real = to,
+                Ok(to) => {
+                    let dir = real.parent().map(Path::to_path_buf);
+                    real = dir.unwrap_or_default().join(to);
+                }
+                Err(_) => break,
+            },
+            _ => break,
+        }
+    }
+    real
+}
+
 /// `path` with `.suffix` after its whole name: the files a database keeps
 /// beside its own. Its extension replaced (`with_extension`), `x.db` and
 /// `x.fenec` would share them.
@@ -246,7 +275,7 @@ fn remove_synced(path: &Path) -> std::io::Result<()> {
 /// platform keeps no logs.
 pub fn forget_sync_log(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
-    return remove_synced(&crate::synclog::path_for(path));
+    return remove_synced(&crate::synclog::path_for(&resolved(path)));
     #[cfg(not(unix))]
     {
         let _ = path;
@@ -360,7 +389,9 @@ impl FileSink {
     /// Opens the file for reading and appending, creating it with the magic
     /// alone when it is missing or empty.
     fn create(path: impl AsRef<Path>) -> Result<(File, PathBuf)> {
-        let path = path.as_ref().to_path_buf();
+        // The file a link leads to, kept as the sink's path: every rewrite
+        // renames over it, leaving the link a link.
+        let path = resolved(path.as_ref());
         // An existing file is the database: never truncated.
         let mut file = OpenOptions::new()
             .read(true)

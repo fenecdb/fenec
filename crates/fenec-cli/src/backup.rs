@@ -26,11 +26,12 @@ fn duration(v: &str) -> Option<Duration> {
 }
 
 pub const USAGE: &str = r#"
-usage: fenec backup  <primary> <file.fenec | archive-dir>   [--token <t>]
+usage: fenec backup  <primary> <file.fenec | archive-dir>   [--token <t>] [--force]
        fenec archive <primary> <archive-dir>                [--token <t>]
                      [--image-every <1h>] [--keep <7d>]
        fenec archive --tenants <node> <root-dir>            [the same]
        fenec restore <archive-dir | sealed-file> <out.fenec> [--to <time> | --to-change <n>]
+                     [--force]
        fenec restore --tenants <root-dir> <out-dir>         [--to <time>]
        fenec prune   [--tenants] <archive-dir | root-dir> --keep <7d>
        fenec verify  [--tenants] <archive-dir | root-dir>
@@ -66,6 +67,10 @@ usage: fenec backup  <primary> <file.fenec | archive-dir>   [--token <t>]
             change, the segments run on with none missing, a restore to the
             end opens; says from when to when it can restore, and exits 1
             when it cannot
+
+  --force   backup and restore write a file over one there already, which
+            they refuse without it (exit 2): a database is never replaced
+            unasked. One a server or an app has open is refused either way
 
   --tenants every tenant of a --dir node (fenec-server --dir
             --replication-token), each an archive of its own under
@@ -130,6 +135,7 @@ pub fn main(command: &str, args: &[String]) -> i32 {
     let mut keep: Option<Duration> = None;
     let mut key_file = std::env::var("FENEC_KEY_FILE").ok();
     let mut tenants = false;
+    let mut force = false;
     let mut i = 0;
     let next = |i: &mut usize, flag: &str| -> String {
         *i += 1;
@@ -142,6 +148,7 @@ pub fn main(command: &str, args: &[String]) -> i32 {
         match args[i].as_str() {
             "--token" => token = Some(next(&mut i, "--token")),
             "--tenants" => tenants = true,
+            "--force" => force = true,
             "--key-file" => key_file = Some(next(&mut i, "--key-file")),
             "--to" => {
                 let v = next(&mut i, "--to");
@@ -181,6 +188,11 @@ pub fn main(command: &str, args: &[String]) -> i32 {
             other => positional.push(other.to_string()),
         }
         i += 1;
+    }
+    // `restore --tenants` writes no tenant's file over one there already,
+    // forced or not; `key` writes no key over one.
+    if force && (tenants || !matches!(command, "backup" | "restore")) {
+        fail("--force writes a backup or a restore over a file there already, and only those");
     }
     if command == "key" {
         let [path] = positional.as_slice() else {
@@ -317,6 +329,15 @@ pub fn main(command: &str, args: &[String]) -> i32 {
             std::process::exit(1);
         })
     });
+    // Asked under the lock, so nothing makes the file between the asking
+    // and the rename. Renamed over unasked, a restore or a backup into the
+    // name of a database replaced it whole and exited 0.
+    if _held.is_some() && !force && Path::new(b).exists() {
+        fail(&format!(
+            "fenec {command}: {b} is there already, and a {command} never writes over a \
+             database unasked: name a new file, or give --force to replace it"
+        ));
+    }
     let result = match command {
         "backup" => {
             let from = backup_from.unwrap_or_else(upstream);

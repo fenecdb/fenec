@@ -451,6 +451,7 @@ dependencies = [
 name = "fenec-shard"
 version = "0.1.12"
 dependencies = [
+ "fenec-abi",
  "fenec-core",
  "fenec-http",
  "fenec-ql",
