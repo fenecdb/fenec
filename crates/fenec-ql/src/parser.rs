@@ -180,11 +180,13 @@ const COMMANDS: [&str; 22] = [
 /// What a definition or a call is refused with where this build has no
 /// named statements (fenec-ql's `statements` feature): the browser module.
 #[cfg(not(feature = "statements"))]
-const UNBUILT: &str = "named statements are a server's; this module is built without them";
+pub(crate) const UNBUILT: &str =
+    "named statements are a server's; this module is built without them";
 
 /// What SQL's routine, `create function` or `create procedure`, is refused
 /// with: run as its caller unless told, it would change who may do what
 /// read as a named statement, which runs with its own text's authority.
+#[cfg(feature = "statements")]
 const ROUTINE: &str = "a routine here is a named statement, `create statement <name>($a int) as \
                        <statement>`, called with `call <name> {a: 1}`: it runs with its own \
                        text's authority, where SQL's function runs as its caller unless told";
@@ -255,6 +257,8 @@ pub struct Parser {
 
 /// What a definition's `$from` and `$jwt.sub` are numbered by: its
 /// parameters first, in the signature's order, then its claims in theirs.
+/// Never made without named statements, whose definitions alone make one.
+#[cfg_attr(not(feature = "statements"), allow(dead_code))]
 struct Names {
     params: Vec<String>,
     claims: Vec<String>,
@@ -582,6 +586,7 @@ fn fixed(e: &Expr) -> bool {
 }
 
 /// Whether a statement begins with `w` ([`COMMANDS`]).
+#[cfg(feature = "statements")]
 fn is_command(w: &str) -> bool {
     COMMANDS.iter().any(|c| w.eq_ignore_ascii_case(c))
 }
@@ -926,10 +931,13 @@ impl Parser {
                 self.next();
                 Ok(Statement::ListCollections)
             }
+            #[cfg(feature = "statements")]
             "statements" => {
                 self.next();
                 Ok(Statement::ListStatements)
             }
+            #[cfg(not(feature = "statements"))]
+            "statements" => self.err(UNBUILT),
             "call" => self.call_statement(),
             "describe" => {
                 self.next();
@@ -937,9 +945,11 @@ impl Parser {
                 // and no word a statement begins with -- `describe
                 // statement` alone stays the collection named `statement`'s
                 // description, a statement after it as ever.
+                #[cfg(feature = "statements")]
                 let named = self.peek_kw("statement")
                     && matches!(self.toks.get(self.i + 1).map(|t| &t.tok),
                         Some(Tok::Ident(w) | Tok::Str(w)) if !is_command(w));
+                #[cfg(feature = "statements")]
                 if named {
                     self.next();
                     return Ok(Statement::DescribeStatement(self.statement_name()?));
@@ -1022,6 +1032,7 @@ impl Parser {
         if self.peek_kw("statement") {
             return self.create_statement(false);
         }
+        #[cfg(feature = "statements")]
         if self.peek_kw("or") {
             self.next();
             self.expect_kw("replace")?;
@@ -1036,6 +1047,16 @@ impl Parser {
                  <name>(...) as ...`",
             ));
         }
+        // The module reads SQL's `create or replace` and routines as main
+        // did, and only a named statement's definition in words of its own.
+        #[cfg(not(feature = "statements"))]
+        if self.peek_kw("or")
+            && matches!(self.toks.get(self.i + 2).map(|t| &t.tok),
+                Some(Tok::Ident(w)) if w.eq_ignore_ascii_case("statement"))
+        {
+            return self.err(UNBUILT);
+        }
+        #[cfg(feature = "statements")]
         if self.peek_kw("function") || self.peek_kw("procedure") {
             return self.err(ROUTINE);
         }
@@ -1935,6 +1956,11 @@ impl Parser {
 
     fn drop(&mut self) -> Result<Statement> {
         self.expect_kw("drop")?;
+        #[cfg(not(feature = "statements"))]
+        if self.peek_kw("statement") {
+            return self.err(UNBUILT);
+        }
+        #[cfg(feature = "statements")]
         if self.eat_kw("statement") {
             let mut if_exists = false;
             if self.eat_kw("if") {
@@ -1946,6 +1972,7 @@ impl Parser {
                 if_exists,
             });
         }
+        #[cfg(feature = "statements")]
         if self.peek_kw("function") || self.peek_kw("procedure") {
             return self.err("a named statement is dropped with `drop statement <name>`");
         }
@@ -2060,11 +2087,7 @@ impl Parser {
             // or a list of them, so a page of any size is one text.
             docs_param = Some(*i);
             self.next();
-        } else if let Tok::Named(n) = self.peek() {
-            // A definition's body refuses it, by its tree.
-            let n = n.clone();
-            docs_param = Some(self.named(&n)?);
-            self.next();
+        } else if self.named_documents(&mut docs_param)? {
         } else if matches!(self.peek(), Tok::LBracket) {
             self.next();
             loop {
@@ -2405,13 +2428,13 @@ impl Parser {
         // SQL's `select transfer(...)`, a routine's value in a row, and
         // `select * from transfer(...)`, a table it makes: a collection's
         // name takes no arguments, and a named statement runs with `call`.
-        // Refused at the name, which is not consumed.
+        // Refused at the name, which is not consumed. With no `from`, the
+        // name may be a function of the list, `select count(*)` with its
+        // collection left out: both are said.
+        #[cfg(feature = "statements")]
         if matches!(self.peek(), Tok::LParen) {
             self.i = at;
-            return self.err(format!(
-                "`{collection}(...)` names no collection: a query reads `from` a collection, and \
-                 a named statement runs with `call {collection}(...)`"
-            ));
+            return Err(self.routine_read(sql, &collection));
         }
         // SQL's `from orders o join customers c on ...`, or an alias alone.
         let from = match sql {
@@ -2834,7 +2857,7 @@ impl Parser {
                         .chain(&COMMANDS)
                         .any(|k| w.eq_ignore_ascii_case(k))
                     // In a body, `end` closes it.
-                    && !(self.def.is_some() && w.eq_ignore_ascii_case("end")) =>
+                    && !(self.defining() && w.eq_ignore_ascii_case("end")) =>
             {
                 let a = w.clone();
                 self.next();
@@ -3504,8 +3527,85 @@ impl Parser {
 
     // ---------------------------------------------------- named statements
 
+    /// Whether a definition's `check` or body is being read: never
+    /// without named statements, so the module's parser asks nothing.
+    fn defining(&self) -> bool {
+        cfg!(feature = "statements") && self.def.is_some()
+    }
+
+    /// `put <c> $docs` in a definition's body: a parameter's documents,
+    /// which the body refuses by its tree. Whether it read one.
+    #[cfg(feature = "statements")]
+    fn named_documents(&mut self, docs_param: &mut Option<usize>) -> Result<bool> {
+        if !matches!(self.peek(), Tok::Named(_)) {
+            return Ok(false);
+        }
+        *docs_param = Some(self.named_documents_param()?);
+        Ok(true)
+    }
+
+    #[cfg(feature = "statements")]
+    #[cold]
+    #[inline(never)]
+    fn named_documents_param(&mut self) -> Result<usize> {
+        let Tok::Named(n) = self.peek().clone() else {
+            return self.err("a parameter's documents");
+        };
+        let i = self.named(&n)?;
+        self.next();
+        Ok(i)
+    }
+
+    /// `$from` read as a value: the parameter it names. Out of line, as
+    /// every path only a definition takes: inside `primary`, which every
+    /// value of every text passes, it weighed on the texts that hold none.
+    #[cfg(feature = "statements")]
+    #[cold]
+    #[inline(never)]
+    fn named_param(&mut self, n: &str) -> Result<Expr> {
+        let i = self.named(n)?;
+        self.next();
+        Ok(Expr::Param(i))
+    }
+
+    /// `$<i>` in a definition past the parameters it declares.
+    #[cfg(feature = "statements")]
+    #[cold]
+    #[inline(never)]
+    fn past_params(&self, i: usize, declared: usize) -> Error {
+        self.error(&format!(
+            "`${}`: the statement declares {declared} parameters, read by name or by place, and \
+             its claims by name, `$jwt.<claim>`",
+            i + 1
+        ))
+    }
+
+    /// SQL's `select transfer(...)` and `select * from transfer(...)`,
+    /// refused: `sql` where the list and its `from` were read.
+    #[cfg(feature = "statements")]
+    #[cold]
+    #[inline(never)]
+    fn routine_read(&self, sql: bool, c: &str) -> Error {
+        self.error(&match sql {
+            true => format!(
+                "`{c}(...)` names no collection: a routine's rows are no table here, and a named \
+                 statement runs with `call {c}(...)`"
+            ),
+            false => format!(
+                "`{c}(...)` names no collection: a function reads a collection's rows, `select \
+                 {c}(...) from <collection>`, and a named statement runs with `call {c}(...)`"
+            ),
+        })
+    }
+
+    #[cfg(not(feature = "statements"))]
+    fn named_documents(&mut self, _: &mut Option<usize>) -> Result<bool> {
+        Ok(false)
+    }
+
     /// A named statement's name, next: one `call_<name>` fits a model's
     /// tool name with, and no word a statement begins with.
+    #[cfg(feature = "statements")]
     fn statement_name(&mut self) -> Result<String> {
         let at = self.i;
         let name = self.ident()?;
@@ -3519,15 +3619,22 @@ impl Parser {
     /// The parameter, or the claim, `$<n>` names: its place among the
     /// definition's parameters, or past them among its claims. Refused
     /// outside a definition, where parameters are numbered.
+    #[cfg(feature = "statements")]
     fn named(&self, n: &str) -> Result<usize> {
-        let Some(d) = &self.def else {
+        let Some(d) = self.def.as_deref() else {
             return self.err(format!(
                 "`${n}` names a named statement's parameter; a statement sent alone numbers \
                  them, `$1`"
             ));
         };
+        self.named_in(d, n)
+    }
+
+    #[cfg(feature = "statements")]
+    fn named_in(&self, d: &Names, n: &str) -> Result<usize> {
         if n == "jwt" {
-            return self.err("`$jwt` is the caller's token: a body reads a claim it declares, `$jwt.sub`");
+            return self
+                .err("`$jwt` is the caller's token: a body reads a claim it declares, `$jwt.sub`");
         }
         if let Some(claim) = n.strip_prefix("jwt.") {
             if let Some((top, _)) = claim.split_once('.') {
@@ -3543,7 +3650,9 @@ impl Parser {
             };
         }
         if n.contains('.') {
-            return self.err(format!("`${n}`: a parameter is read whole, and no path into it"));
+            return self.err(format!(
+                "`${n}`: a parameter is read whole, and no path into it"
+            ));
         }
         match d.params.iter().position(|p| p == n) {
             Some(i) => Ok(i),
@@ -3578,7 +3687,9 @@ impl Parser {
         let mut params: Vec<Param> = Vec::new();
         while !matches!(self.peek(), Tok::RParen) {
             if params.len() == MAX_PARAMS {
-                return self.err(format!("a statement declares at most {MAX_PARAMS} parameters"));
+                return self.err(format!(
+                    "a statement declares at most {MAX_PARAMS} parameters"
+                ));
             }
             let at = self.i;
             let p = self.param()?;
@@ -3634,7 +3745,11 @@ impl Parser {
                 self.next();
                 self.def = Some(Box::new(Names {
                     params: params.iter().map(|p| p.name.clone()).collect(),
-                    claims: claims.iter().flatten().map(|c: &Claim| c.name.clone()).collect(),
+                    claims: claims
+                        .iter()
+                        .flatten()
+                        .map(|c: &Claim| c.name.clone())
+                        .collect(),
                 }));
                 let at = self.i;
                 let e = self.expr();
@@ -4739,24 +4854,17 @@ impl Parser {
             Tok::Param(i) => {
                 // In a definition, `$1` is its first parameter, and no
                 // claim is read by its place.
+                #[cfg(feature = "statements")]
                 if let Some(d) = &self.def {
                     if i >= d.params.len() {
-                        return self.err(format!(
-                            "`${}`: the statement declares {} parameters, read by name or by \
-                             place, and its claims by name, `$jwt.<claim>`",
-                            i + 1,
-                            d.params.len()
-                        ));
+                        return Err(self.past_params(i, d.params.len()));
                     }
                 }
                 self.next();
                 Ok(Expr::Param(i))
             }
-            Tok::Named(n) => {
-                let i = self.named(&n)?;
-                self.next();
-                Ok(Expr::Param(i))
-            }
+            #[cfg(feature = "statements")]
+            Tok::Named(n) => self.named_param(&n),
             Tok::Ident(name) => {
                 let lower = name.to_ascii_lowercase();
                 match lower.as_str() {

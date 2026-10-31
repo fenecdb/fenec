@@ -253,8 +253,8 @@ def run(tree, texts, target):
     subprocess.run([CARGO, "build", "-q", "--release", "-p", "fenec-ql", "--example", "corpus"],
                    cwd=tree, env=env, check=True)
     exe = os.path.join(target, "release", "examples", "corpus")
-    data = "\n".join(json.dumps(t["text"]) for t in texts) + "\n"
-    out = subprocess.run([exe], input=data.encode(), stdout=subprocess.PIPE, check=True).stdout
+    data = "\n".join(json.dumps(t["text"], ensure_ascii=False) for t in texts) + "\n"
+    out = subprocess.run([exe], input=data.encode("utf-8"), stdout=subprocess.PIPE, check=True).stdout
     lines = out.decode().split("\n")[: len(texts)]
     assert len(lines) == len(texts), (len(lines), len(texts))
     return lines

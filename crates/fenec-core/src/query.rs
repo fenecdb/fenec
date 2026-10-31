@@ -3096,21 +3096,28 @@ pub enum Statement {
     Compact(Option<String>),
     /// `create [or replace] statement <name>(...) ... as <body>`: a named
     /// statement's definition ([`crate::named`]). Boxed, as each variant
-    /// past a select's size would grow every `Statement`.
+    /// past a select's size would grow every `Statement`. Like each of
+    /// named statements' variants, in a build with them alone (the
+    /// `statements` feature): the browser module's parser reads none.
+    #[cfg(feature = "statements")]
     CreateStatement(Box<crate::named::Definition>),
     /// `drop statement [if exists] <name>`.
+    #[cfg(feature = "statements")]
     DropStatement {
         name: String,
         if_exists: bool,
     },
     /// `statements`: the named statements, as `collections` lists the
     /// collections.
+    #[cfg(feature = "statements")]
     ListStatements,
     /// `describe statement <name>`; `describe statement` alone is the
     /// collection named `statement`'s description, as it always was.
+    #[cfg(feature = "statements")]
     DescribeStatement(String),
     /// `call <name> ...` and SQL's `CALL <name>(...)`. Boxed, as
     /// `CreateStatement` is.
+    #[cfg(feature = "statements")]
     Call(Box<crate::named::Call>),
 }
 
@@ -3215,6 +3222,7 @@ impl Statement {
             } => set.iter().any(|(_, e)| e.reads_vectors()) || opt(filter) || picked(pick),
             Statement::Delete { filter, pick, .. } => opt(filter) || picked(pick),
             Statement::Select(s) | Statement::Explain(s) => s.reads_vectors(),
+            #[cfg(feature = "statements")]
             Statement::Call(c) => c.args.exprs().any(Expr::reads_vectors),
             _ => false,
         }
@@ -3228,19 +3236,20 @@ impl Statement {
     /// read that writes under the read lock is a write with readers beside
     /// it (`docs/design/named-statements.md`).
     pub fn is_read_only(&self) -> bool {
-        matches!(
-            self,
+        match self {
             Statement::Select(_)
-                | Statement::Explain(_)
-                | Statement::ListCollections
-                | Statement::Describe(_)
-                | Statement::ListStatements
-                | Statement::DescribeStatement(_)
-        )
+            | Statement::Explain(_)
+            | Statement::ListCollections
+            | Statement::Describe(_) => true,
+            #[cfg(feature = "statements")]
+            Statement::ListStatements | Statement::DescribeStatement(_) => true,
+            _ => false,
+        }
     }
 
     /// Whether it defines, drops or calls a named statement: what nothing
     /// runs yet ([`crate::named::NOT_BUILT`]).
+    #[cfg(feature = "statements")]
     pub fn is_named(&self) -> bool {
         matches!(
             self,
@@ -3326,6 +3335,7 @@ impl Statement {
             Statement::Delete { filter, pick, .. } => opt(filter).max(picked(pick)),
             // A definition's parameters are its calls', numbered in its
             // body: the text that defines it is handed none.
+            #[cfg(feature = "statements")]
             Statement::Call(c) => c
                 .args
                 .max_param()

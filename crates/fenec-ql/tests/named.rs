@@ -8,7 +8,8 @@ use fenec_core::named::{Args, Call, Claim, Definition, Param, NOT_BUILT};
 use fenec_core::prelude::*;
 use fenec_ql::{parse, parse_exact, parse_one};
 
-/// The design's ledger transfer, its guards' reasons aside.
+/// The design's ledger transfer, its guards' reasons aside (the test of
+/// them below gives them).
 const TRANSFER: &str = "create statement transfer($from int, $to int, $amount int)
   claims (sub text)
   comment 'Moves an amount from an account the caller owns to another'
@@ -104,10 +105,8 @@ fn a_definition_reads_into_its_tree() {
     assert_eq!(d.check, Some(want));
     assert_eq!(d.body.len(), 4);
     // `$jwt.sub` is the parameter past the three.
-    let same = parse_one(
-        "get accounts select id where id = $1 and owner = $4 limit 1 require 1",
-    )
-    .unwrap();
+    let same =
+        parse_one("get accounts select id where id = $1 and owner = $4 limit 1 require 1").unwrap();
     assert_eq!(d.body[0], same);
     let last = parse_one(
         "insert entries {from: $1, to: $2, amount: $3, by: $4, at: now()} returning id, at",
@@ -160,7 +159,10 @@ fn the_signature_takes_defaults_claims_markers_and_a_body_of_one() {
     assert!(d.block && d.body.len() == 1 && d.check.is_some());
     // Statements after a definition are statements of their own.
     let two = parse("create statement s() as get t select a\nget u").unwrap();
-    assert!(matches!(&two[..], [Statement::CreateStatement(_), Statement::Select(_)]));
+    assert!(matches!(
+        &two[..],
+        [Statement::CreateStatement(_), Statement::Select(_)]
+    ));
 }
 
 #[test]
@@ -199,7 +201,12 @@ fn drop_statements_and_describe_read_as_their_own() {
 fn a_call_reads_in_each_of_its_forms() {
     let lit = |n: i64| Expr::Lit(Value::Int(n));
     let named = |pairs: &[(&str, Expr)]| {
-        Args::Named(pairs.iter().map(|(k, e)| (k.to_string(), e.clone())).collect())
+        Args::Named(
+            pairs
+                .iter()
+                .map(|(k, e)| (k.to_string(), e.clone()))
+                .collect(),
+        )
     };
     assert_eq!(
         call("call purge"),
@@ -216,25 +223,25 @@ fn a_call_reads_in_each_of_its_forms() {
         named(&[("from", lit(1)), ("to", lit(2)), ("amount", lit(300))])
     );
     // SQL's arguments by name are the document's.
-    assert_eq!(call("CALL transfer(from => 1, to => 2, amount => 300)"), doc);
+    assert_eq!(
+        call("CALL transfer(from => 1, to => 2, amount => 300)"),
+        doc
+    );
     assert_eq!(
         call("CALL transfer(1, 2, amount => 300)").args,
         Args::Placed(vec![lit(1), lit(2)], vec![("amount".into(), lit(300))])
     );
-    assert_eq!(
-        call("call transfer $1").args,
-        Args::Param(0)
-    );
+    assert_eq!(call("call transfer $1").args, Args::Param(0));
     let c = call("call transfer $1 as {sub: 'alice'}");
     assert_eq!(
         c.claims,
         Some(named(&[("sub", Expr::Lit(Value::Text("alice".into())))]))
     );
-    assert_eq!(call("call transfer {from: $1} as $2").claims, Some(Args::Param(1)));
     assert_eq!(
-        parse_one("call transfer $1 as $2").unwrap().max_param(),
-        2
+        call("call transfer {from: $1} as $2").claims,
+        Some(Args::Param(1))
     );
+    assert_eq!(parse_one("call transfer $1 as $2").unwrap().max_param(), 2);
     // An expression of values is a value.
     assert_eq!(
         call("CALL f(1 + $1)").args,
@@ -262,23 +269,47 @@ fn named_parameters_are_a_definition_s_alone() {
         "`$jwt.sub` names a named statement's parameter",
         "$jwt",
     );
-    refused_at("put t $docs", "names a named statement's parameter", "$docs");
-    refused_at("get t limit $n", "names a named statement's parameter", "$n");
-    refused_at("call x $args", "names a named statement's parameter", "$args");
+    refused_at(
+        "put t $docs",
+        "names a named statement's parameter",
+        "$docs",
+    );
+    refused_at(
+        "get t limit $n",
+        "names a named statement's parameter",
+        "$n",
+    );
+    refused_at(
+        "call x $args",
+        "names a named statement's parameter",
+        "$args",
+    );
     let def = "create statement s($a int) claims (sub text) as get t select a where ";
-    refused_at(&format!("{def}a = $b"), "`$b` names no parameter the statement declares", "$b");
+    refused_at(
+        &format!("{def}a = $b"),
+        "`$b` names no parameter the statement declares",
+        "$b",
+    );
     refused_at(
         &format!("{def}a = $jwt.email"),
         "`$jwt.email` names no claim the statement declares: `claims (email text)`",
         "$jwt.email",
     );
-    refused_at(&format!("{def}a = $jwt"), "`$jwt` is the caller's token", "$jwt");
+    refused_at(
+        &format!("{def}a = $jwt"),
+        "`$jwt` is the caller's token",
+        "$jwt",
+    );
     refused_at(
         &format!("{def}a = $jwt.sub.x"),
         "a claim is read whole, `$jwt.sub`",
         "$jwt.sub.x",
     );
-    refused_at(&format!("{def}a = $a.x"), "a parameter is read whole", "$a.x");
+    refused_at(
+        &format!("{def}a = $a.x"),
+        "a parameter is read whole",
+        "$a.x",
+    );
     // `$2` would be the claim: a claim is read by its name alone.
     refused_at(
         &format!("{def}a = $2"),
@@ -287,7 +318,11 @@ fn named_parameters_are_a_definition_s_alone() {
     );
     // After the definition the names are gone again.
     let two = "create statement s($a int) as get t select a where a = $a; get t where a = $a";
-    refused_from(two, "names a named statement's parameter", two.rfind("$a").unwrap());
+    refused_from(
+        two,
+        "names a named statement's parameter",
+        two.rfind("$a").unwrap(),
+    );
 }
 
 #[test]
@@ -297,7 +332,11 @@ fn the_signature_s_refusals() {
         "`my statement` is no statement's name",
         "\"my",
     );
-    refused_at("create statement şehir() as get t select a", "no statement's name", "şehir");
+    refused_at(
+        "create statement şehir() as get t select a",
+        "no statement's name",
+        "şehir",
+    );
     refused_at(
         "create statement get() as get t select a",
         "`get` is no statement's name",
@@ -309,7 +348,11 @@ fn the_signature_s_refusals() {
         "at most 59 bytes",
         &long,
     );
-    refused_at("create statement s as get t", "follow its name in parentheses", "as get");
+    refused_at(
+        "create statement s as get t",
+        "follow its name in parentheses",
+        "as get",
+    );
     refused_at(
         "create statement s(a int) as get t select a",
         "a parameter is named with its `$`",
@@ -372,7 +415,10 @@ fn the_signature_s_refusals() {
     );
     let params: Vec<String> = (0..33).map(|i| format!("$p{i} int")).collect();
     refused_at(
-        &format!("create statement s({}) as get t select a", params.join(", ")),
+        &format!(
+            "create statement s({}) as get t select a",
+            params.join(", ")
+        ),
         "at most 32 parameters",
         "$p32",
     );
@@ -391,7 +437,11 @@ fn the_signature_s_refusals() {
         "a body holds at most 64 statements",
         "get t select a end",
     );
-    refused_at("create statement s() as begin end", "at least one statement", "s()");
+    refused_at(
+        "create statement s() as begin end",
+        "at least one statement",
+        "s()",
+    );
 }
 
 #[test]
@@ -526,7 +576,9 @@ fn a_writing_body_reads_its_caller_or_says_it_is_public() {
          set polls {votes: votes + 1} where id = $poll",
     );
     // A read needs neither.
-    definition("create statement board() as get scores select name, score order score desc limit 10");
+    definition(
+        "create statement board() as get scores select name, score order score desc limit 10",
+    );
     refused_at(
         "create statement vote($poll int) claims (sub text) public as set polls {by: $jwt.sub} \
          where id = $poll",
@@ -541,14 +593,21 @@ fn a_writing_body_reads_its_caller_or_says_it_is_public() {
 fn sql_s_routines_are_refused_naming_named_statements() {
     refused_at(
         "SELECT transfer(1, 2, 300)",
-        "`transfer(...)` names no collection: a query reads `from` a collection, and a named \
-         statement runs with `call transfer(...)`",
+        "`transfer(...)` names no collection: a function reads a collection's rows, `select \
+         transfer(...) from <collection>`, and a named statement runs with `call transfer(...)`",
         "transfer",
     );
     refused_at(
         "SELECT * FROM transfer(1, 2, 300)",
-        "a named statement runs with `call transfer(...)`",
+        "`transfer(...)` names no collection: a routine's rows are no table here, and a named \
+         statement runs with `call transfer(...)`",
         "transfer",
+    );
+    // A list's function with its `from` left out is told both.
+    refused_at(
+        "select count(*) where n > 1",
+        "`select count(...) from <collection>`",
+        "count",
     );
     for text in [
         "CREATE FUNCTION transfer(a int) RETURNS void AS 'select 1'",
@@ -560,7 +619,10 @@ fn sql_s_routines_are_refused_naming_named_statements() {
             .find(|w| w.eq_ignore_ascii_case("function") || w.eq_ignore_ascii_case("procedure"))
             .unwrap();
         let e = refused(text);
-        assert!(e.contains("a routine here is a named statement, `create statement"), "{e}");
+        assert!(
+            e.contains("a routine here is a named statement, `create statement"),
+            "{e}"
+        );
         let place = text.find(word).unwrap();
         assert!(e.contains(&format!("position {place}:")), "{text}: {e}");
     }
@@ -578,9 +640,64 @@ fn sql_s_routines_are_refused_naming_named_statements() {
     refused_at("CALL f(a)", "an argument is a value", "a)");
     refused_at("call f {a: b}", "`b` names a field", "{");
     refused_at("call f {a: 1, a: 2}", "`a` is given twice", "{");
-    refused_at("CALL f(a => 1, 2)", "an argument by place goes before", "2)");
+    refused_at(
+        "CALL f(a => 1, 2)",
+        "an argument by place goes before",
+        "2)",
+    );
     refused_at("call f.g", "`f.g` is a path", "f.g");
-    refused_at("call f as sub", "`as` takes the claims a call is made with", "sub");
+    refused_at(
+        "call f as sub",
+        "`as` takes the claims a call is made with",
+        "sub",
+    );
+}
+
+/// The design's transfer as written, each guard saying why: `require <n>
+/// else '<reason>'` reads in a body as it does alone, the reason in the
+/// tree, and a reason is part of what the digest holds.
+#[test]
+fn a_body_s_guards_say_why() {
+    let reasons = TRANSFER
+        .replacen(
+            "limit 1 require 1",
+            "limit 1 require 1 else 'not your account'",
+            1,
+        )
+        .replacen(
+            "balance >= $amount require 1",
+            "balance >= $amount\n    require 1 else 'insufficient funds'",
+            1,
+        )
+        .replacen(
+            "id = $to require 1",
+            "id = $to require 1 else 'no such account'",
+            1,
+        );
+    let d = definition(&reasons);
+    let said: Vec<&str> = d
+        .body
+        .iter()
+        .filter_map(|s| match s {
+            Statement::Select(s) => s.require.as_ref(),
+            Statement::Update { require, .. } => require.as_ref(),
+            _ => None,
+        })
+        .map(|r| &*r.reason)
+        .collect();
+    assert_eq!(
+        said,
+        ["not your account", "insufficient funds", "no such account"]
+    );
+    // The body's statement is the one sent alone, numbered as the
+    // signature numbers it.
+    let alone = parse_one(
+        "set accounts {balance: balance - $3} where id = $1 and balance >= $3 require 1 else \
+         'insufficient funds'",
+    )
+    .unwrap();
+    assert_eq!(d.body[1], alone);
+    assert_ne!(d.digest().unwrap(), definition(TRANSFER).digest().unwrap());
 }
 
 /// `end` closes a body: a name SQL writes without `as` takes it nowhere in
@@ -647,6 +764,11 @@ END";
         ("$amount > 0", "$amount > 1"),
         ("$amount > 0", "$amount >= 0"),
         ("limit 1 require 1", "limit 1"),
+        (
+            "limit 1 require 1",
+            "limit 1 require 1 else 'not your account'",
+        ),
+        ("limit 1 require 1", "limit 1 require 1 else 'not yours'"),
         ("balance >= $amount", "balance > $amount"),
         ("where id = $to", "where id = $from"),
         ("returning id, at", "returning id"),
@@ -715,7 +837,11 @@ fn the_engine_refuses_to_run_them() {
     ] {
         let s = parse_one(text).unwrap();
         assert!(!s.is_read_only() && s.is_named(), "{text}");
-        assert_eq!(db.execute_with(&s, &[Value::Int(1)]), Err(not_built.clone()), "{text}");
+        assert_eq!(
+            db.execute_with(&s, &[Value::Int(1)]),
+            Err(not_built.clone()),
+            "{text}"
+        );
         assert_eq!(db.query(&s, &[]), Err(not_built.clone()), "{text}");
         // In a block, the block is refused before its first statement runs.
         let put = parse_one("put t {a: 2}").unwrap();

@@ -172,7 +172,9 @@ fn a_definition_over_lines_reads_as_one_statement() {
     assert_eq!(err.matches(refused).count(), 2, "{err}");
     assert!(!err.contains("begins no statement"), "{err}");
     assert!(
-        err.ends_with("a body's statements are cut by `;`, and `end` closes it; found end of input\n"),
+        err.ends_with(
+            "a body's statements are cut by `;`, and `end` closes it; found end of input\n"
+        ),
         "{err}"
     );
     assert_eq!(tables(&text(&out.stdout)), [["5"]]);

@@ -599,18 +599,21 @@ test('named statements are a server\'s: the module refuses a definition and a ca
     'call s',
     'call s {a: 1} as {sub: "x"}',
     'CALL s(1, b => 2)',
+    'drop statement s',
+    'statements',
   ]) {
     assert.throws(() => db.run(text), theirs, text);
   }
   // Refused as it is read, a write before it in one text never runs.
   assert.throws(() => db.run('put t {a: 1}; call s'), theirs);
   assert.equal(db.run('get t count').rows[0].count, 0);
-  // A name after `$` is a definition's alone, here as on a server.
-  assert.throws(() => db.run('get t where a = $a'), /`\$a` names a named statement's parameter/);
-  // The rest reads, and answers for a database that holds none.
-  assert.throws(() => db.run('drop statement s'), /named statements are not built yet/);
-  assert.deepEqual(db.run('statements').rows, []);
-  assert.throws(() => db.run('describe statement s'), /statement `s`/);
+  // A name after `$` is a definition's, refused in the same words; SQL's
+  // routine and `describe statement x` are refused as before named
+  // statements.
+  assert.throws(() => db.run('get t where a = $a'), theirs);
+  assert.throws(() => db.run('get t where a = $_'), /expected a number after `\$`/);
+  assert.throws(() => db.run('CREATE FUNCTION f() RETURNS int'), (e) => !/named statement/.test(e.message));
+  assert.throws(() => db.run('describe statement s'), (e) => !/named statement/.test(e.message));
 });
 
 test('a claim picks the oldest ready rows and answers them, in the module', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {

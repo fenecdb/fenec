@@ -6165,6 +6165,7 @@ impl Database {
         self.disarm();
         // Before anything of the block runs, or a write before a `call`
         // would have landed beside a refusal.
+        #[cfg(feature = "statements")]
         if let Some(i) = stmts.iter().position(|(s, _)| s.is_named()) {
             return Err((i, not_named()));
         }
@@ -6260,8 +6261,11 @@ impl Database {
             Statement::Describe(name) => Ok(Response::Schemas(vec![Schema::clone(
                 &self.collection(name)?.schema,
             )])),
+            #[cfg(feature = "statements")]
             Statement::ListStatements => Ok(no_statements()),
+            #[cfg(feature = "statements")]
             Statement::DescribeStatement(name) => Err(no_statement(name)),
+            #[cfg(feature = "statements")]
             s if s.is_named() => Err(not_named()),
             _ => Err(Error::Query("this statement requires write access".into())),
         }
@@ -6430,6 +6434,7 @@ impl Database {
         #[cfg(not(target_arch = "wasm32"))]
         self.disarm();
         // Refused before a block opens: nothing of it may run.
+        #[cfg(feature = "statements")]
         if stmt.is_named() {
             return Err(not_named());
         }
@@ -6558,11 +6563,14 @@ impl Database {
                 &self.collection(name)?.schema,
             )])),
             Statement::Compact(which) => self.compact(which.as_deref(), true),
+            #[cfg(feature = "statements")]
             Statement::ListStatements => Ok(no_statements()),
+            #[cfg(feature = "statements")]
             Statement::DescribeStatement(name) => Err(no_statement(name)),
-            Statement::CreateStatement(_) | Statement::DropStatement { .. } | Statement::Call(_) => {
-                Err(not_named())
-            }
+            #[cfg(feature = "statements")]
+            Statement::CreateStatement(_)
+            | Statement::DropStatement { .. }
+            | Statement::Call(_) => Err(not_named()),
         }
     }
 
@@ -11754,6 +11762,34 @@ fn build_path_index(c: &mut Collection, path: &str) -> Result<()> {
     Ok(())
 }
 
+/// The refusal of a `create statement`, a `drop statement` and a `call`:
+/// nothing runs them yet ([`crate::named::NOT_BUILT`]). Out of line, one
+/// copy for its callers.
+#[cfg(feature = "statements")]
+#[inline(never)]
+fn not_named() -> Error {
+    Error::Query(crate::named::NOT_BUILT.into())
+}
+
+/// What `statements` answers while no database holds one: no row, under
+/// the column a statement's row leads with.
+#[cfg(feature = "statements")]
+#[inline(never)]
+fn no_statements() -> Response {
+    Response::Rows(ResultSet {
+        columns: vec!["name".to_string()],
+        ..ResultSet::default()
+    })
+}
+
+/// What `describe statement <name>` answers while no database holds one,
+/// as `describe` answers for a collection it does not hold.
+#[cfg(feature = "statements")]
+#[inline(never)]
+fn no_statement(name: &str) -> Error {
+    Error::NotFound(format!("statement `{name}`"))
+}
+
 /// What of a statement has to be read as written for a json field: its
 /// text, where a literal list of numbers is put into one or compared with a
 /// path into one, and the parameters given there by their number (`$1` is
@@ -11766,31 +11802,6 @@ fn build_path_index(c: &mut Collection, path: &str) -> Result<()> {
 /// this names it, and only then: a statement with no list of numbers costs
 /// the walk of its literals, and one into a collection with no json field a
 /// look at its fields.
-/// The refusal of a `create statement`, a `drop statement` and a `call`:
-/// nothing runs them yet ([`crate::named::NOT_BUILT`]). Out of line, one
-/// copy for its callers.
-#[inline(never)]
-fn not_named() -> Error {
-    Error::Query(crate::named::NOT_BUILT.into())
-}
-
-/// What `statements` answers while no database holds one: no row, under
-/// the column a statement's row leads with.
-#[inline(never)]
-fn no_statements() -> Response {
-    Response::Rows(ResultSet {
-        columns: vec!["name".to_string()],
-        ..ResultSet::default()
-    })
-}
-
-/// What `describe statement <name>` answers while no database holds one,
-/// as `describe` answers for a collection it does not hold.
-#[inline(never)]
-fn no_statement(name: &str) -> Error {
-    Error::NotFound(format!("statement `{name}`"))
-}
-
 #[derive(Debug, Default, PartialEq)]
 pub struct Exactly {
     pub text: bool,

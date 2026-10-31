@@ -122,6 +122,7 @@ last expression.</p>
 <tr data-same><td><code>CREATE INDEX ON posts (owner, created DESC)</code></td><td><code>create index on posts (owner, created desc) @sorted</code></td><td>over several columns, an index over several fields</td></tr>
 <tr data-same><td><code>CREATE INDEX ON docs USING hnsw (emb vector_cosine_ops) WITH (m = 16)</code></td><td><code>create index on docs (emb) @hnsw(cosine, m=16)</code></td><td>pgvector's operator class names the distance</td></tr>
 <tr data-same><td><code>CREATE INDEX ON docs USING gin (to_tsvector('english', body))</code></td><td><code>create index on docs (body) @text</code></td><td>full text, for <a href="/docs/fenecql-search#the-text-clause"><code>match</code></a></td></tr>
+<tr data-same><td><code>CALL transfer(from =&gt; 1, to =&gt; 2, amount =&gt; 300)</code></td><td><code>call transfer {from: 1, to: 2, amount: 300}</code></td><td>a named statement's call; read, and refused until named statements are built (<a href="/docs/fenecql#named-statements">named statements</a>)</td></tr>
 </tbody>
 </table>
 </div>
@@ -249,6 +250,7 @@ FenecQL text asks for.</p>
 <tr data-refused><td><code>INSERT INTO t (a) SELECT a FROM u</code></td><td><code>get u select a</code>, then <code>insert t $1</code></td><td>an insert writes documents, not a query's rows</td></tr>
 <tr data-refused><td><code>INSERT INTO t (k) VALUES ('a') ON CONFLICT ON CONSTRAINT t_k DO NOTHING</code></td><td><code>insert into t (k) values ('a') on conflict (k) do nothing</code></td><td>the target is the unique field (<a href="#upsert">below</a>)</td></tr>
 <tr data-refused><td><code>INSERT INTO t (k, n) VALUES ('a', 1) ON CONFLICT DO UPDATE SET n = 1 WHERE t.n &lt; 3</code></td><td><code>insert t {k: "a", n: 1} if absent else set {n: case when n &lt; 3 then 1 else n end}</code></td><td>the upsert sets the row it finds, with no <code>WHERE</code></td></tr>
+<tr data-refused><td><code>CREATE FUNCTION transfer(a int) RETURNS void LANGUAGE sql AS '…'</code></td><td><code>create statement transfer($a int) claims (sub text) as set accounts {balance: balance - $a} where owner = $jwt.sub</code></td><td>SQL's routine runs as its caller unless told, a named statement with its own text's authority; <code>SELECT transfer(…)</code> and <code>SELECT * FROM transfer(…)</code> are refused naming <code>call</code> (<a href="/docs/fenecql#named-statements">named statements</a>, not built yet)</td></tr>
 <tr data-refused><td><code>SELECT * FROM t WHERE "name" = 'Ada'</code></td><td><code>get t where name = 'Ada'</code></td><td><code>"name"</code> is text here (<a href="#quotes">below</a>)</td></tr>
 </tbody>
 </table>

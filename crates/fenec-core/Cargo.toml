@@ -71,6 +71,13 @@ analytics = []
 # Without it a file declaring a collated field opens, a statement over that
 # collection is refused, as `nocase`'s is, and so is `order ... collate`.
 collate = []
+# Named statements (docs/design/named-statements.md): their trees --
+# `create statement`, `drop statement`, `statements`, `describe statement`,
+# `call` -- and the engine's answers to them. Not in `full`, so a crate
+# naming `full` does not bring them into the browser module: fenec-ql's
+# `statements` turns this on, and the server, the shell and the native
+# library name that.
+statements = []
 
 [[test]]
 name = "all"

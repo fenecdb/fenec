@@ -26,8 +26,10 @@ fn start() -> Node {
     fenec_http::audit::set_delay(0);
     let access = Arc::new(Access::new(SECRET, POLICY).unwrap());
     let mut db = Database::new();
-    db.execute(&fenec_ql::parse_one("create collection notes (owner text @hash, body text)").unwrap())
-        .unwrap();
+    db.execute(
+        &fenec_ql::parse_one("create collection notes (owner text @hash, body text)").unwrap(),
+    )
+    .unwrap();
     let cfg = Config {
         addr: "127.0.0.1:0".into(),
         token: Some(ROOT.into()),
@@ -56,7 +58,10 @@ impl Node {
         .unwrap();
         let mut out = String::new();
         s.read_to_string(&mut out).unwrap();
-        let body = out.split_once("\r\n\r\n").map_or("", |(_, b)| b).to_string();
+        let body = out
+            .split_once("\r\n\r\n")
+            .map_or("", |(_, b)| b)
+            .to_string();
         (out[9..12].parse().unwrap(), body)
     }
 
@@ -99,10 +104,17 @@ fn the_server_s_token_is_refused_every_definition_and_call() {
         assert!(body.contains(NOT_BUILT), "{text}: {body}");
     }
     // A `/batch` holding one is refused before its first statement runs.
-    let batch = [line("put notes {owner: \"alice\", body: \"a\"}"), line("call mine")].join("\n");
+    let batch = [
+        line("put notes {owner: \"alice\", body: \"a\"}"),
+        line("call mine"),
+    ]
+    .join("\n");
     let (status, body) = node.post(ROOT, "/batch", &batch);
     assert_eq!(status, 400, "{body}");
-    assert!(body.contains(NOT_BUILT) && body.contains("\"at\":1"), "{body}");
+    assert!(
+        body.contains(NOT_BUILT) && body.contains("\"at\":1"),
+        "{body}"
+    );
     assert_eq!(node.notes(), before);
     // A key is kept by no refused write: sent again, refused again.
     let keyed = |n: &Node| {
@@ -134,7 +146,10 @@ fn the_server_s_token_is_refused_every_definition_and_call() {
     // A name after `$` outside a definition is refused where it stands.
     let (status, body) = node.query(ROOT, "get notes where owner = $owner");
     assert_eq!(status, 400, "{body}");
-    assert!(body.contains("`$owner` names a named statement's parameter"), "{body}");
+    assert!(
+        body.contains("`$owner` names a named statement's parameter"),
+        "{body}"
+    );
 }
 
 #[test]
@@ -157,7 +172,11 @@ fn a_scoped_token_is_refused_them_too() {
     let (status, _) = node.query(&alice, "describe statement mine");
     assert_eq!(status, 404);
     // Nor a `/batch` with one: its own write before it never lands.
-    let batch = [line("put notes {owner: \"alice\", body: \"a\"}"), line("call mine")].join("\n");
+    let batch = [
+        line("put notes {owner: \"alice\", body: \"a\"}"),
+        line("call mine"),
+    ]
+    .join("\n");
     let (status, body) = node.post(&alice, "/batch", &batch);
     assert_eq!(status, 400, "{body}");
     assert!(body.contains(NOT_BUILT), "{body}");

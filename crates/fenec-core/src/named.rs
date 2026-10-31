@@ -14,8 +14,8 @@
 use crate::codec;
 use crate::error::{Error, Result};
 use crate::query::{
-    Column, Count, Expr, Facet, Flat, Fuse, Lookup, Mark, Match, Near, Pick, Rerank, Select,
-    Sort, Statement,
+    Column, Count, Expr, Facet, Flat, Fuse, Lookup, Mark, Match, Near, Pick, Require, Rerank,
+    Select, Sort, Statement,
 };
 use crate::value::{DataType, Value};
 
@@ -477,7 +477,11 @@ fn each_collection<'a>(s: &'a Statement, f: &mut dyn FnMut(&str)) {
             f(collection);
             exprs.extend(docs.iter().flatten().map(|(_, e)| e));
             exprs.extend(else_set.iter().flatten().map(|(_, e)| e));
-            exprs.extend(pick.iter().flat_map(|p| &p.order).filter_map(|o| o.expr.as_ref()));
+            exprs.extend(
+                pick.iter()
+                    .flat_map(|p| &p.order)
+                    .filter_map(|o| o.expr.as_ref()),
+            );
         }
         Statement::Update {
             collection,
@@ -489,7 +493,11 @@ fn each_collection<'a>(s: &'a Statement, f: &mut dyn FnMut(&str)) {
             f(collection);
             exprs.extend(set.iter().map(|(_, e)| e));
             exprs.extend(filter);
-            exprs.extend(pick.iter().flat_map(|p| &p.order).filter_map(|o| o.expr.as_ref()));
+            exprs.extend(
+                pick.iter()
+                    .flat_map(|p| &p.order)
+                    .filter_map(|o| o.expr.as_ref()),
+            );
         }
         Statement::Delete {
             collection,
@@ -499,7 +507,11 @@ fn each_collection<'a>(s: &'a Statement, f: &mut dyn FnMut(&str)) {
         } => {
             f(collection);
             exprs.extend(filter);
-            exprs.extend(pick.iter().flat_map(|p| &p.order).filter_map(|o| o.expr.as_ref()));
+            exprs.extend(
+                pick.iter()
+                    .flat_map(|p| &p.order)
+                    .filter_map(|o| o.expr.as_ref()),
+            );
         }
         _ => {}
     }
@@ -585,6 +597,18 @@ impl Canon {
         if let Some(n) = n {
             self.tag(tag);
             self.uint(n);
+        }
+    }
+
+    /// `require <n> [else '<reason>']`: the count under `tag`, and the
+    /// reason, a part of the API it answers, under `reason` where one is
+    /// given -- a field of its own, so a guard without one writes what it
+    /// wrote before reasons were read.
+    fn require(&mut self, tag: u8, reason: u8, r: &Option<Require>) {
+        if let Some(r) = r {
+            self.tag(tag);
+            self.uint(r.n);
+            self.text(reason, &r.reason);
         }
     }
 
@@ -894,7 +918,7 @@ impl Canon {
             c.flag(4, *disjunctive);
             c.end();
         });
-        self.opt_num(19, *require);
+        self.require(19, 21, require);
         if let Some(f) = flat {
             self.tag(20);
             self.flat(f);
@@ -1046,7 +1070,7 @@ impl Canon {
                         self.expr(e);
                     }
                 }
-                self.opt_num(7, *require);
+                self.require(7, 9, require);
                 self.pick(8, pick);
                 self.end();
             }
@@ -1061,7 +1085,7 @@ impl Canon {
                 self.text(1, collection);
                 self.pairs(2, set);
                 self.opt_expr(3, filter);
-                self.opt_num(4, *require);
+                self.require(4, 6, require);
                 self.pick(5, pick);
                 self.end();
             }
@@ -1074,7 +1098,7 @@ impl Canon {
                 self.node(4);
                 self.text(1, collection);
                 self.opt_expr(2, filter);
-                self.opt_num(3, *require);
+                self.require(3, 5, require);
                 self.pick(4, pick);
                 self.end();
             }

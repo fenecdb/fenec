@@ -2738,9 +2738,7 @@ impl Scope {
             // scoped token as for the server's, before anything is asked
             // of its rules. A definition and a drop are schema changes,
             // refused below.
-            Statement::Call(_) => {
-                return Err(Error::Query(fenec_core::named::NOT_BUILT.into()))
-            }
+            Statement::Call(_) => return Err(Error::Query(fenec_core::named::NOT_BUILT.into())),
             _ => {
                 return Err(denied(
                     "a scoped token reads and writes documents; it changes no schema".into(),
