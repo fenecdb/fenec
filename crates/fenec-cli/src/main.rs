@@ -581,7 +581,10 @@ impl Reader {
             },
             Rest::Last(at, s) => {
                 self.keep(at);
-                if self.runs_now(&s) {
+                // A statement the text's end left open -- `describe
+                // statement`, with a name to come -- waits, whatever its
+                // kind, as a write does.
+                if !r.open && self.runs_now(&s) {
                     run(db, &self.buf);
                     self.clear();
                     self.settled(db);
@@ -727,18 +730,30 @@ enum Kind {
 /// FenecQL has to be placed here, or a new write would run at Enter.
 fn kind(s: &Statement) -> Kind {
     match s {
-        Statement::Put { .. } | Statement::Update { .. } | Statement::Delete { .. } => Kind::Write,
+        // A call writes, whatever its body: it waits for the line after.
+        Statement::Put { .. }
+        | Statement::Update { .. }
+        | Statement::Delete { .. }
+        | Statement::Call(_) => Kind::Write,
         Statement::Select(_)
         | Statement::Explain(_)
         | Statement::ListCollections
-        | Statement::Describe(_) => Kind::Read,
+        | Statement::Describe(_)
+        | Statement::ListStatements
+        | Statement::DescribeStatement(_) => Kind::Read,
         Statement::CreateCollection { .. }
         | Statement::DropCollection { .. }
         | Statement::CreateIndex { .. }
         | Statement::CreateComposite { .. }
         | Statement::DropComposite { .. }
         | Statement::AlterCollection { .. }
+        | Statement::DropStatement { .. }
         | Statement::Compact(_) => Kind::Schema,
+        // `begin ... end` closes itself, and runs as its line ends; a body
+        // of one statement may go on with the next line -- its `where`, its
+        // guard -- as the write it is would.
+        Statement::CreateStatement(d) if d.block => Kind::Schema,
+        Statement::CreateStatement(_) => Kind::Write,
     }
 }
 

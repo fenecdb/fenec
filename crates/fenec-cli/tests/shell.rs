@@ -151,6 +151,36 @@ fn a_delete_written_over_lines_deletes_what_it_says() {
     assert_eq!(count(&f, "where id = 3"), 0);
 }
 
+/// A named statement's definition over lines is one statement: its body's
+/// `;`s cut none, and an unended `begin` reads on to its `end`, which no
+/// bracket of the lexer's holds open -- the parser's refusal at the text's
+/// end does. Nothing runs one yet, so each is refused once, whole, and
+/// nothing of it lands; a `call` whose document is on the next line goes
+/// with it.
+#[test]
+fn a_definition_over_lines_reads_as_one_statement() {
+    let d = Dir::new("definition");
+    let f = d.notes();
+    let out = piped(
+        &f,
+        "create statement mine($t int) claims (sub text) as begin\n  get notes select body \
+         where topic = $t;\n  del notes where id = 1 and body = $jwt.sub\nend\ncall mine\n  \
+         {t: 4}\nget notes count\ncreate statement open() as begin\n  get notes select body\n",
+    );
+    let err = text(&out.stderr);
+    let refused = "error: query error: named statements are not built yet";
+    assert_eq!(err.matches(refused).count(), 2, "{err}");
+    assert!(!err.contains("begins no statement"), "{err}");
+    assert!(
+        err.ends_with(
+            "a body's statements are cut by `;`, and `end` closes it; found end of input\n"
+        ),
+        "{err}"
+    );
+    assert_eq!(tables(&text(&out.stdout)), [["5"]]);
+    assert_eq!(count(&f, ""), 5);
+}
+
 /// A script of statements, each over several lines -- a schema, a
 /// document, a `set`, a `del` that picks its row, reads -- runs as
 /// written, and a blank line between two lines of a statement is white
@@ -540,6 +570,41 @@ fn pasted_or_typed_a_clause_past_a_semicolon_and_a_dot_command_hold() {
     assert!(del < listed, "{out}");
     assert_eq!(count(&f, "where id = 4"), 0);
     assert_eq!(count(&f, "where id = 2"), 1);
+}
+
+/// Typed, a definition's `begin` reads on, line by line, to the `end`
+/// that closes it, which runs at its Enter; a body of one statement may go
+/// on with the next line, as a write may, and waits for an empty one.
+#[cfg(unix)]
+#[test]
+fn typed_a_definition_reads_on_to_its_end() {
+    let d = Dir::new("typed-definition");
+    let f = d.notes();
+    let mut t = pty::Shell::start(&f);
+    t.typed("create statement mine($t int) claims (sub text) as begin\n");
+    t.typed("  get notes select body where topic = $t;\n");
+    t.typed("  del notes where id = 1 and body = $jwt.sub\n");
+    t.typed("end\n");
+    t.wait_for("not built yet", 1);
+    t.typed("create statement purge() public as del notes\n");
+    t.typed("  where id = 1\n");
+    t.typed("\n");
+    t.wait_for("not built yet", 2);
+    t.typed("get notes count\n");
+    t.wait_for("(1 rows", 1);
+    // `describe statement` at its line's end waits for the name, which
+    // makes it a named statement's description, rather than describe the
+    // collection `statement` at Enter.
+    t.typed("describe statement\n");
+    t.typed("transfer\n");
+    t.typed("\n");
+    t.wait_for("statement `transfer`", 1);
+    t.typed(".quit\n");
+    let out = t.end();
+    assert!(!out.contains("collection `statement`"), "{out}");
+    assert_eq!(out.matches("not built yet").count(), 2, "{out}");
+    assert!(!out.contains("begins no statement"), "{out}");
+    assert_eq!(count(&f, ""), 5);
 }
 
 /// A pasted `.quit` between a write and its `where` waits behind the

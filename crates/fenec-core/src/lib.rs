@@ -43,6 +43,8 @@ pub mod history;
 pub mod hll;
 pub mod json;
 pub mod maps;
+#[cfg(feature = "statements")]
+pub mod named;
 pub mod num;
 mod off;
 pub mod plugin;

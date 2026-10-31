@@ -588,6 +588,37 @@ test('a write that misses its require puts its run back, in the module', { skip:
   assert.throws(() => db.from('accounts').where('name', 'a').toDelete({ require: -1 }), /whole number from 0/);
 });
 
+test('named statements are a server\'s: the module refuses a definition and a call in words of its own', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection t (a int)');
+  const theirs = /named statements are a server's; this module is built without them/;
+  for (const text of [
+    'create statement s() as get t select a',
+    'create or replace statement s($a int) as begin get t select a where a = $a; end',
+    'call s',
+    'call s {a: 1} as {sub: "x"}',
+    'CALL s(1, b => 2)',
+    'drop statement s',
+    'statements',
+  ]) {
+    assert.throws(() => db.run(text), theirs, text);
+  }
+  // Refused as it is read, a write before it in one text never runs.
+  assert.throws(() => db.run('put t {a: 1}; call s'), theirs);
+  assert.equal(db.run('get t count').rows[0].count, 0);
+  // A name after `$` is a definition's, refused in the same words; SQL's
+  // routine and `describe statement x` are refused as before named
+  // statements.
+  assert.throws(() => db.run('get t where a = $a'), theirs);
+  assert.throws(() => db.run('get t where a = $_'), /expected a number after `\$`/);
+  assert.throws(() => db.run('CREATE FUNCTION f() RETURNS int'), (e) => !/named statement/.test(e.message));
+  assert.throws(() => db.run('describe statement s'), (e) => !/named statement/.test(e.message));
+  // Their words reserve nothing: each is SQL's alias still.
+  assert.deepEqual(db.run('select a from t call').rows, []);
+  assert.deepEqual(db.run('select a statements from t').rows, []);
+});
+
 test('a claim picks the oldest ready rows and answers them, in the module', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
   const { Fenec } = await import('./fenec.js');
   const db = await Fenec.open(wasm);

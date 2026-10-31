@@ -662,6 +662,22 @@ engine.](docs/design/fenecql.md#declared-schemas)** `declared::plan`
 plans additions alone, never guessing a rename; `make schema-golden`
 writes `integrations/schema-golden.json`.
 
+**[Named statements are read, and nothing runs one
+yet.](docs/design/named-statements.md#what-is-built)** `create statement`,
+`drop statement` and `call` parse into `fenec_core::named`'s trees, boxed
+so a `Statement` stays a `get`'s size, and are refused before any block
+opens (`Statement::is_named`, `NOT_BUILT`), in `scoped()` and MCP's
+`write` too, until storage and authority land; `$name` is a definition's
+alone, and `call` and `statements` reserve no word: an alias takes either
+(`NAMED_COMMANDS`, never `COMMANDS`). They are fenec-core's and fenec-ql's
+`statements` feature, outside `full` and off in the workspace's
+dependency: the server, the shell and the native library name it, the
+module refuses in words of its own, and a path only a definition takes
+stays out of the hot parse, `#[cold]`. `Definition::canonical` writes a
+field only where it holds something and an operator by a byte of its own;
+a change reading a stored text otherwise raises `GRAMMAR_EPOCH`, and `make
+fenecql-corpus` holds every FenecQL text of the repository to main's tree.
+
 ### Held writes
 
 **[`Fenec-Wait` holds a `set` or a `del` that writes nothing until it

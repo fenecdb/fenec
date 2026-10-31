@@ -6,5 +6,8 @@
 
 mod e2e;
 mod join;
+// Named statements' syntax, read where the parser reads it.
+#[cfg(feature = "statements")]
+mod named;
 mod sql;
 mod text;

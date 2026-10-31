@@ -18,6 +18,16 @@ pub use parser::{
     parse_select_list, reading, spans, Reading, Refusal, Rest, SelectList, MAX_EXPR_DEPTH,
 };
 
+/// The grammar's epoch: raised by every change that could read a text
+/// stored before it as another tree. A named statement is stored as its
+/// text, with the epoch it was parsed under and its tree's digest
+/// (`fenec_core::named::Definition::digest`); an open parses it again and
+/// marks it broken where the digest is another, rather than run a tree its
+/// author never wrote. The corpus rule keeps that from happening
+/// (`docs/design/fenecql.md`): no text that parsed reads otherwise, so the
+/// epoch moves only where a change means to, and says so.
+pub const GRAMMAR_EPOCH: u32 = 1;
+
 use fenec_core::error::Result;
 use fenec_core::query::Statement;
 use fenec_core::schema::{Field, IndexKind, Schema};
@@ -568,5 +578,30 @@ mod tests {
             ")".repeat(MAX_EXPR_DEPTH - 1)
         );
         assert!(parse_one(&ok).is_ok());
+
+        // In a named statement's body and its `check`, the same bound: a
+        // definition's frames above the body's statement are a few: 511
+        // parentheses in a body took 1 011 KiB in release, as at the top,
+        // and 7 282 KiB in a debug build against 7 266.
+        #[cfg(feature = "statements")]
+        for depth in [MAX_EXPR_DEPTH - 1, MAX_EXPR_DEPTH] {
+            let (open, close) = ("(".repeat(depth), ")".repeat(depth));
+            for text in [
+                format!("create statement s() as get t select a where {open}n = 1{close}"),
+                format!(
+                    "create statement s() as begin get t select a where n = 1; get t select a \
+                     where {open}n = 1{close} end"
+                ),
+                format!("create statement s($n int) check {open}$n = 1{close} as get t select a"),
+            ] {
+                match parse_one(&text) {
+                    Ok(_) => assert!(depth < MAX_EXPR_DEPTH),
+                    Err(e) => {
+                        let deep = e.to_string().contains("too deep");
+                        assert!(depth == MAX_EXPR_DEPTH && deep, "{e}");
+                    }
+                }
+            }
+        }
     }
 }

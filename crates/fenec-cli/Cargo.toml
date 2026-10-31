@@ -11,7 +11,7 @@ categories.workspace = true
 
 [dependencies]
 fenec-core = { workspace = true, features = ["std-fs", "full"] }
-fenec-ql.workspace = true
+fenec-ql = { workspace = true, features = ["statements"] }
 # The `fenec import` subcommand. The SQLite reader, the PostgreSQL client and
 # the `--follow` replication follower grow the binary by 242 KB; it is
 # unnecessary for embedded/browser use and can be turned off:

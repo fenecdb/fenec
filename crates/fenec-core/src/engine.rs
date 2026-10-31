@@ -6163,6 +6163,12 @@ impl Database {
     ) -> std::result::Result<Vec<Response>, (usize, Error)> {
         #[cfg(not(target_arch = "wasm32"))]
         self.disarm();
+        // Before anything of the block runs, or a write before a `call`
+        // would have landed beside a refusal.
+        #[cfg(feature = "statements")]
+        if let Some(i) = stmts.iter().position(|(s, _)| s.is_named()) {
+            return Err((i, not_named()));
+        }
         if let Some(i) = stmts.iter().position(|(s, _)| !s.fits_block()) {
             return Err((
                 i,
@@ -6255,6 +6261,12 @@ impl Database {
             Statement::Describe(name) => Ok(Response::Schemas(vec![Schema::clone(
                 &self.collection(name)?.schema,
             )])),
+            #[cfg(feature = "statements")]
+            Statement::ListStatements => Ok(no_statements()),
+            #[cfg(feature = "statements")]
+            Statement::DescribeStatement(name) => Err(no_statement(name)),
+            #[cfg(feature = "statements")]
+            s if s.is_named() => Err(not_named()),
             _ => Err(Error::Query("this statement requires write access".into())),
         }
     }
@@ -6421,6 +6433,11 @@ impl Database {
     pub fn execute_with(&mut self, stmt: &Statement, params: &[Value]) -> Result<Response> {
         #[cfg(not(target_arch = "wasm32"))]
         self.disarm();
+        // Refused before a block opens: nothing of it may run.
+        #[cfg(feature = "statements")]
+        if stmt.is_named() {
+            return Err(not_named());
+        }
         // A write is a block of one: a `put` of many documents stopped half
         // way -- a hook's refusal, a crash -- left the ones before applied.
         // Its writes land as one record, which for a lone document is the
@@ -6546,6 +6563,14 @@ impl Database {
                 &self.collection(name)?.schema,
             )])),
             Statement::Compact(which) => self.compact(which.as_deref(), true),
+            #[cfg(feature = "statements")]
+            Statement::ListStatements => Ok(no_statements()),
+            #[cfg(feature = "statements")]
+            Statement::DescribeStatement(name) => Err(no_statement(name)),
+            #[cfg(feature = "statements")]
+            Statement::CreateStatement(_)
+            | Statement::DropStatement { .. }
+            | Statement::Call(_) => Err(not_named()),
         }
     }
 
@@ -11735,6 +11760,34 @@ fn build_path_index(c: &mut Collection, path: &str) -> Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+/// The refusal of a `create statement`, a `drop statement` and a `call`:
+/// nothing runs them yet ([`crate::named::NOT_BUILT`]). Out of line, one
+/// copy for its callers.
+#[cfg(feature = "statements")]
+#[inline(never)]
+fn not_named() -> Error {
+    Error::Query(crate::named::NOT_BUILT.into())
+}
+
+/// What `statements` answers while no database holds one: no row, under
+/// the column a statement's row leads with.
+#[cfg(feature = "statements")]
+#[inline(never)]
+fn no_statements() -> Response {
+    Response::Rows(ResultSet {
+        columns: vec!["name".to_string()],
+        ..ResultSet::default()
+    })
+}
+
+/// What `describe statement <name>` answers while no database holds one,
+/// as `describe` answers for a collection it does not hold.
+#[cfg(feature = "statements")]
+#[inline(never)]
+fn no_statement(name: &str) -> Error {
+    Error::NotFound(format!("statement `{name}`"))
 }
 
 /// What of a statement has to be read as written for a json field: its

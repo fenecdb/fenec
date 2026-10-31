@@ -12,7 +12,7 @@ categories.workspace = true
 
 [dependencies]
 fenec-core = { workspace = true, features = ["std-fs", "full"] }
-fenec-ql.workspace = true
+fenec-ql = { workspace = true, features = ["statements"] }
 fenec-abi.workspace = true
 
 [features]

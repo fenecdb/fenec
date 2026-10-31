@@ -30,6 +30,8 @@ sync = []
 
 [dev-dependencies]
 fenec-core = { workspace = true, features = ["full", "std-fs"] }
+# Its tests read named statements; the module it is built into does not.
+fenec-ql = { workspace = true, features = ["statements"] }
 
 [[test]]
 name = "all"

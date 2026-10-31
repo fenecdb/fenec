@@ -1257,3 +1257,27 @@ fn a_required_field_takes_no_null() {
     }
     assert_eq!(texts(&mut db, "get t select a"), ["x"]);
 }
+
+/// `call` and `statements` begin named statements and are no reserved
+/// words: SQL reserves neither (PostgreSQL's `CALL` is a word any alias
+/// takes), so each stays the alias it was before named statements, in a
+/// table's place and a column's, with or without the `statements` feature.
+#[test]
+fn call_and_statements_are_still_aliases() {
+    for word in ["call", "statements"] {
+        for text in [
+            "select a from t {w}",
+            "select a {w} from t",
+            "select count(*) {w} from t",
+            "select c.a, {w}.b from t c join calls {w} on {w}.id = c.id",
+            "select a from t {w} where a > 1",
+        ] {
+            let read = |w: &str| parse(&text.replace("{w}", w)).map(|s| format!("{s:?}"));
+            let (with, other) = (read(word), read("other"));
+            let other = other.unwrap_or_else(|e| panic!("{text} with `other`: {e}"));
+            let with = with.unwrap_or_else(|e| panic!("{text} with `{word}`: {e}"));
+            assert_eq!(with, other.replace("other", word), "{text} with `{word}`");
+            assert_eq!(parse(&text.replace("{w}", word)).unwrap().len(), 1);
+        }
+    }
+}

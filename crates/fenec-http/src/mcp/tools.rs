@@ -1190,6 +1190,9 @@ fn write(ctx: &Ctx, args: Args) -> Checked<String> {
     let stmt = fenec_ql::parse_one(text).map_err(|e| Outcome::refused(400, e.to_string()))?;
     match stmt {
         Statement::Put { .. } | Statement::Update { .. } | Statement::Delete { .. } => {}
+        // A named statement's tool is its own, `call_<name>`, once calls
+        // run; nothing runs one yet.
+        Statement::Call(_) => return Err(Outcome::refused(400, fenec_core::named::NOT_BUILT)),
         s if s.is_read_only() => {
             return Err(Outcome::refused(400, "write runs a put, insert, set or del: a read goes through query"))
         }

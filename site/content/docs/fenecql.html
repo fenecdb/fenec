@@ -310,6 +310,34 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
     shell</a>.</li>
 </ul>
 
+<h3 id="named-statements">Named statements, not built yet</h3>
+
+<p>A named statement is a statement, or a block of them, defined once in a
+database and called by name with typed arguments, running with its own
+text's authority — PostgreSQL's function used as an API, with FenecQL for
+its body. Its forms are read, and every one is refused, as <i>named
+statements are not built yet</i>, until the slices that store, check and
+scope them land: a statement defined with nothing to check it, or called
+with nothing to scope it, is never run.</p>
+
+<pre data-lang="fenecql">create [or replace] statement &lt;name&gt;($p &lt;type&gt; [= &lt;literal&gt;], ...)
+       [claims (&lt;c&gt; &lt;type&gt; [from "&lt;claim&gt;"], ...)] [public] [scans] [comment '&lt;text&gt;'] [check &lt;expr&gt;]
+       as &lt;statement&gt; | as begin &lt;statement&gt;; ... end   -- $p and $jwt.&lt;c&gt; in the body
+drop statement [if exists] &lt;name&gt; | statements | describe statement &lt;name&gt;
+call &lt;name&gt; [{p: value, ...} | $1] [as {c: value, ...}]   -- SQL's CALL &lt;name&gt;(v, ..., p =&gt; v)
+</pre>
+
+<p>A body holds <code>get</code>, <code>insert</code>, and <code>set</code>
+and <code>del</code> with a <code>where</code> or a pick, and its last
+statement names the fields it answers; a <code>put</code>, a parameter's
+documents, a schema change, a <code>call</code> or a collection whose name
+starts with <code>_</code> is refused as the definition is read. A
+<code>$name</code> outside a definition is refused: a statement sent alone
+numbers its parameters, <code>$1</code>. <code>statements</code> lists
+none, and <code>describe statement</code> finds none. The browser module
+reads none of these forms, refusing them as <i>named statements are a
+server's</i>.</p>
+
 <details class="deep"><summary>How insert and put treat an id</summary>
 <p>The <code>id</code> field is automatic. Supplying <code>id</code> inside a
 <code>put</code> turns it into an upsert. <code>insert</code> makes documents
