@@ -1425,8 +1425,8 @@ fn a_copy_s_word_of_its_primary_s_hello_outlives_a_restart() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let _gone = Files(dir.clone());
-    let open = || {
-        Tenants::new(&dir).unwrap().with_replication(Replicated {
+    let open = |dir: &Path| {
+        Tenants::new(dir).unwrap().with_replication(Replicated {
             token: REPL.into(),
             buffer: 8 << 20,
             upstream: None,
@@ -1435,11 +1435,26 @@ fn a_copy_s_word_of_its_primary_s_hello_outlives_a_restart() {
     };
     // A restart: the tenants written out and held, as a process exits with
     // them -- each instance is kept, since a follower it started holds its
-    // database -- then a registry opened anew over the same files.
+    // database -- then a registry opened anew over the files as they were
+    // left. Over a copy of them: this process still holds the old
+    // registry's `<file>.lock`s, as a process that exited would not, and a
+    // second registry over the same files is refused them.
+    let at = std::cell::RefCell::new((dir.clone(), Vec::new()));
     let restart = |old: Tenants| {
         old.shutdown();
         std::mem::forget(old);
-        let new = open();
+        let mut at = at.borrow_mut();
+        let next = PathBuf::from(format!("{}-{}", dir.display(), at.1.len() + 1));
+        let _ = std::fs::remove_dir_all(&next);
+        std::fs::create_dir_all(&next).unwrap();
+        for e in std::fs::read_dir(&at.0).unwrap().flatten() {
+            if e.file_type().unwrap().is_file() {
+                std::fs::copy(e.path(), next.join(e.file_name())).unwrap();
+            }
+        }
+        at.0 = next.clone();
+        at.1.push(Files(next.clone()));
+        let new = open(&next);
         new.resume_following();
         new
     };
@@ -1454,7 +1469,7 @@ fn a_copy_s_word_of_its_primary_s_hello_outlives_a_restart() {
             std::thread::sleep(Duration::from_millis(10));
         }
     };
-    let copy = open();
+    let copy = open(&dir);
     copy.create("t").unwrap();
     copy.follow("t", Some(&url)).unwrap();
     until_ready(&copy);

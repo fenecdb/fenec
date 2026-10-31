@@ -868,7 +868,7 @@ pub fn open_with(
     buffer: usize,
     mapped: bool,
 ) -> fenec_core::error::Result<(Database, Arc<Feed>)> {
-    open_as(path, buffer, mapped, false)
+    open_as(path, buffer, mapped, false, None)
 }
 
 /// [`open_with`] as a server opens its file: the vectors the open would
@@ -879,7 +879,20 @@ pub fn open_serving(
     buffer: usize,
     mapped: bool,
 ) -> fenec_core::error::Result<(Database, Arc<Feed>)> {
-    open_as(path, buffer, mapped, true)
+    open_as(path, buffer, mapped, true, None)
+}
+
+/// [`open_serving`] holding `lock`, the file's `<file>.lock`, in the
+/// database's sink (`fenec_abi::lock::Holding`): let go when the database
+/// is, whoever holds it last -- a tenant's follower holds it beside the
+/// registry.
+pub fn open_serving_holding(
+    path: &str,
+    buffer: usize,
+    mapped: bool,
+    lock: fenec_abi::lock::FileLock,
+) -> fenec_core::error::Result<(Database, Arc<Feed>)> {
+    open_as(path, buffer, mapped, true, Some(lock))
 }
 
 fn open_as(
@@ -887,11 +900,16 @@ fn open_as(
     buffer: usize,
     mapped: bool,
     serving: bool,
+    lock: Option<fenec_abi::lock::FileLock>,
 ) -> fenec_core::error::Result<(Database, Arc<Feed>)> {
     let feed = Feed::new(buffer);
     let made = Arc::clone(&feed);
     let wrap: Box<fenec_core::fs::Wrap<'_>> = Box::new(move |mut file| {
         file.sync_existing()?;
+        let file = match lock {
+            Some(lock) => fenec_abi::lock::holding(lock)(file)?,
+            None => file,
+        };
         Ok(Box::new(Tee { file, feed: made }) as Box<dyn Sink>)
     });
     let db = match serving {

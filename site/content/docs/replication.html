@@ -318,7 +318,8 @@ fenec restore /backups/archive before.fenec --to-change 41873
     restore.</li>
   <li>A <b>backup or a restore into a file</b> holds the file while it is
     written, as the shell does: one a running server has open is refused, its
-    holder named, rather than renamed over under it.</li>
+    holder named, rather than renamed over under it. A file there already is
+    refused too (exit 2) unless <code>--force</code> says to replace it.</li>
 </ul>
 
 <details class="deep"><summary>How a restore to a moment works</summary>
@@ -534,7 +535,9 @@ after, under <code>--sync always</code>, in turns, on this M1:</p>
 </table>
 </div>
 
-<p>The archiver's process runs the bench's writers as well. A write's time
+<p>The archiver's process runs the bench's writers as well, and the
+descriptors were counted before each open tenant held its
+<code>&lt;tenant&gt;.fenec.lock</code>: count one more an open tenant. A write's time
 under <code>--sync always</code> is the Mac's <code>F_FULLFSYNC</code>; a
 write waits for the node's stream as for a replica, and the stream sends
 within the fsync's noise. While the first images were taken no write

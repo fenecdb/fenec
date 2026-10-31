@@ -74,15 +74,88 @@ under it; it reads the file as it stood at the open. The shell refuses a
 write there before the engine sees it: handed over, the read-only sink's
 refusal was a storage error, after which every write said so.
 
-Not covered yet: a `--dir` node takes no lock on its directory or on a
-tenant's file, nor does `fenec-shard` on its directory file, so a shell
-over a tenant's file, or two routers over one directory, are not refused.
-The lock file is named after the path as given, so a file opened through a
-symbolic link to it is locked under another name. Elsewhere than on a Unix
-`hold` takes no lock at all (no release is built
-for Windows); `LockFileEx` over a range past the holder's line is what it
-would take there, since a Windows lock is mandatory and would refuse the
-reads of the line.
+**A node's tenants, the router's directory, and links.** A `--dir` node
+took no lock, so `fenec T/acme.fenec -c 'put ...'` beside it printed
+`1 records`, and the node's next two writes left the file unreadable
+(`corrupt: unknown record kind 120`), as a `--file` server's had. Each
+tenant's open now takes its lock (`Tenants::open_as`, `hold_tenant`) and
+hands it to the database's sink (`lock::Holding`, through the open's
+`Wrap`; inside the `Tee` where the node replicates), so it is let go when
+the database is, by whoever drops it last -- the registry, a follower, a
+linking thread -- and never while one of them could still write: held by
+the `Tenant`, a follower writing on after the registry let the tenant go
+would have written a file the lock no longer kept. `Holding` passes every
+`Sink` method on, the defaults too, since a default left in place runs its
+own body rather than the file's (`a_sink_holding_its_lock_passes_every_call_on`).
+A tenant's install (`import`) holds it across the rename, and a delete
+across the removal, so neither lands under a shell or an app that has the
+name open; both are refused (500, the holder named) while one does, and so
+is the open. The lock file of a deleted tenant stays: removed, a process
+that opened it before the removal and locked it after would hold a lock no
+later opener sees. In this process the lock is a database of the tenant not
+let go of yet, a second over the file as corrupting, so an open, a delete or
+an install waits up to `RELEASE_WAIT` for it to go (`lock::hold_within`,
+woken by each lock's drop): a follower's thread ending, a linking slice or
+the graph keeper's append holds the database a moment after the registry
+let the tenant go, and the open that follows a close, a delete or a follow
+was refused for nothing (`a_reopen_waits_for_what_still_holds_the_database`,
+its holder kept at a gate until the open is seen waiting,
+`lock::waiting_for`). Another process's hold is refused at once. What holds
+a database for longer -- a compact or a warm-up beside the queries, for
+their whole run -- keeps its tenant from closing (`Tenant::db_in_use`):
+closed when idle or for memory meanwhile, the database outlived the tenant
+with its lock, and every request's open waited the 5 s and answered 500. A
+delete or a follow meanwhile waits the same 5 s for it, then is refused. A
+`fenec restore --tenants` holds each file it writes across its check and
+its rename, as an install does. An in-process
+"restart" in `lease_stalls.rs`, which leaked its registry with its
+followers and opened another over the same files, now opens it over a copy,
+as a restarted process finds them. Measured with 500 tenants on an M1,
+alternating with main: a tenant's first request, its open, 126-153 us p50
+against 98-118 (the hold is 32-36 us, 20 of them the lock file's open; a
+truncate, a look-up of the program's name at each hold and a `canonicalize`
+made it 50-58, the last 20 us alone), the requests to open tenants
+53.5-54.5 us either way, and one descriptor more an open tenant (1 006
+against 506 for 500 on macOS, where a tenant keeps no sync log; three on
+Linux against two). Again on the final code, the file's open alone
+(`open_serving` of 500 small files, with and without the lock, rounds
+alternating): 47.8-55.9 us p50 against 24.7-26.1, the hold 23-28 of it.
+Most of the hold is the lock file's `open`, 17-18 us on this Mac with or
+without `O_CREAT`, which no other way of taking the lock avoids: the lock
+cannot live on the database file, which a checkpoint renames over, and a
+lock kept past the tenant's close would refuse the shell a tenant the node
+is not using. `fenec-shard` holds its directory file's lock, and
+a region's copy of the global directory's, for the life of the process, as
+`fenec-server --file` does.
+
+A file opened through a symbolic link is the file the link leads to
+(`fs::resolved`, which the sink's open and `lock_path` both ask): a symbolic
+link in the file's place is followed to what it names, links to links too,
+one `lstat` where it is none -- a directory reached through a link needs
+nothing, since the files beside go through the same link. The sink keeps
+the resolved path, so a checkpoint and a compact rename their image over the
+file and the link stays a link; so do a restore, a backup, `.save` and a
+tenant's install. Before, the lock was named past the link but the sink
+renamed over the link itself (#420's review): after `fenec-server --file
+link.fenec` compacted, `link.fenec` was a regular file, a shell over it took
+that file's lock beside the server, wrote, and the file ended `corrupt:
+unknown record kind 120` (`a_file_served_through_a_link_stays_one_file_across_a_compact`).
+Not `canonicalize`: 20 us more an open, and an error for a file not made
+yet. A hard link
+is a name of its own and takes a lock of its own: no name tells the two
+apart. A record lock does not reach across a file system that does not pass
+it on: a process inside a Docker Desktop container and one on the Mac over
+a bind mount of the file each took the lock (reproduced in #414's review), as two machines
+over a network file system that keeps no locks would. Elsewhere than on a
+Unix `hold` takes no lock at all (no release is built for Windows);
+`LockFileEx` over a range past the holder's line is what it would take
+there, since a Windows lock is mandatory and would refuse the reads of the
+line.
+
+`fenec restore` and `fenec backup` into a file renamed theirs over
+whatever had the name, a database written since included, and exited 0:
+under the lock, one there already is refused now (exit 2, the file as it
+was) unless `--force` says to replace it.
 
 ## Prepared blocks
 

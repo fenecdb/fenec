@@ -39,7 +39,11 @@ node's tenants follow when the router records the pair
 tenant ends the pair, and no tenant is placed on or moved to a standby. A
 tenant whose follower runs is never closed as idle: the follower holds the
 database rather than the tenant, and a close left it writing the file under
-the next instance. The router cannot tell a node that is gone from one it cannot reach,
+the next instance. Nor is one whose database anything else holds beside the
+queries -- a compact or a warm-up for its whole run (`Tenant::db_in_use`):
+the database holds the file's `<file>.lock`, let go only as it drops, and a
+close meanwhile had every request's open wait 5 s for it and answer 500
+(`docs/design/engine.md`, single writer). The router cannot tell a node that is gone from one it cannot reach,
 and guessing makes two primaries, so it promotes on its own only under a
 lease (`fenec-shard --auto-failover`, nodes `fenec-server --dir --lease`;
 `fenec-shard/src/lease.rs`, `fenec-http/src/lease.rs`): a node stops

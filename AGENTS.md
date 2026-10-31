@@ -164,13 +164,15 @@ before refuses (a graph's, rebuilds from), never one it would misread.
 Never two processes over one file: whatever writes a served file -- the
 endpoint, a follower, the graph keeper, `--follow`'s mirror -- is a
 `fenec-server` thread, never a binary of its own, and a block is open only
-under its opener's write lock. These open a file to write it, or rename
-one into its place, only under `<file>.lock` (`fenec_abi::lock`), refused
-while another holds it: `fenec-server --file`, the native library, and
-every `fenec` way in -- the shell, `-c`, a script, `import`, a `backup` or
-`restore` into a file, `.save`, `mcp --file`; a tool that only looks
-(`--read-only`, `fenec types`) takes none. Not yet: a `--dir` node's tenant
-files, fenec-shard's directory file, a file reached through a link.
+under its opener's write lock. Whatever opens a file to write it, or
+renames one into its place, holds `<file>.lock` (`fenec_abi::lock`),
+refused while another does, a symbolic link resolved to its file for the
+lock and every rename (`fs::resolved`): `fenec-server --file`,
+each open tenant of a `--dir` node (in its sink, `lock::Holding`, let go
+with the database), fenec-shard's directory, the native library and every
+`fenec` way that writes; `--read-only` and `fenec types` take none, and a
+`backup` or `restore` replaces a file only with `--force`. A hard link, a
+Docker Desktop bind mount or a file system keeping no locks escapes it.
 
 **[A block's documents are built beside the
 readers](docs/design/engine.md#prepared-blocks)** (`Database::prepare`,
@@ -267,7 +269,7 @@ its collections' only writer. A wire message's length is held to
 each.](docs/design/tenants.md#scaling-out-by-tenant)** The tenant comes from
 the path, never the query; the router forwards bytes, parsing none; the
 registry opens a file under its lock and closes it on its last `Arc` alone,
-never while its follower runs, so no two `Database`s share a file. A tenant's role is its file's, not the node's
+never while its follower or anything beside it holds the database, so no two `Database`s share a file. A tenant's role is its file's, not the node's
 `--replica-of`; a move is `freeze` (a gate taken exclusively, so no write lands
 after the export), copy, install, the flip in one statement, the source
 deleted once the standbys were sent it (`standbys_sent`). A node

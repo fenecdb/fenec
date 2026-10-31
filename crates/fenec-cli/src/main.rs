@@ -880,19 +880,22 @@ fn save(db: &Database, path: &str) -> std::result::Result<(), String> {
         return Err(format!("{READ_ONLY_REFUSAL}; save to another path"));
     }
     let _held = held::take(path, held::Way::Save)?;
-    let side = format!("{path}.saving");
+    // Through a link, the file it leads to, as an open writes it: renamed
+    // over, the link would be a file of its own.
+    let path = fenec_core::fs::resolved(Path::new(path));
+    let side = fenec_core::fs::beside(&path, "saving");
     let written = (|| -> std::io::Result<()> {
         let mut f = std::fs::File::create(&side)?;
         f.write_all(&db.snapshot())?;
         f.sync_all()?;
-        fenec_core::fs::forget_sync_log(Path::new(path))?;
-        std::fs::rename(&side, path)
+        fenec_core::fs::forget_sync_log(&path)?;
+        std::fs::rename(&side, &path)
     })();
     if written.is_err() {
         let _ = std::fs::remove_file(&side);
     }
     written.map_err(|e| e.to_string())?;
-    fenec_core::fs::sync_dir(Path::new(path)).map_err(|e| e.to_string())
+    fenec_core::fs::sync_dir(&path).map_err(|e| e.to_string())
 }
 
 fn human(n: usize) -> String {

@@ -164,6 +164,38 @@ fn write_follows(dir: &Path, name: &str, text: &str) -> std::io::Result<()> {
         .and_then(|_| dir_synced(&path))
 }
 
+/// A tenant's `<file>.lock` (`fenec_abi::lock`), taken before its file is
+/// opened or put in its place, as `fenec-server --file`, the shell and an
+/// app take a file's: refused while another process -- a shell, an app,
+/// another node over the directory -- has the file open, naming it. Held
+/// in this process, it is a database of the tenant not let go of yet,
+/// which a second over the file would corrupt as surely: waited for up to
+/// [`RELEASE_WAIT`], as a close, a delete or a follow lets the tenant go
+/// with what ran beside it still ending -- a follower's thread, a linking
+/// slice, the graph keeper's append -- then refused.
+fn hold_tenant(name: &str, path: &Path) -> std::result::Result<fenec_abi::lock::FileLock, Refused> {
+    fenec_abi::lock::hold_within(path, RELEASE_WAIT).map_err(|e| match e {
+        fenec_abi::lock::Refused::Held => {
+            let holder = fenec_abi::lock::holder(path);
+            let held = match &holder {
+                Some(h) if h.pid == Some(std::process::id()) => {
+                    "open in this process already, a database of it not let go of yet".into()
+                }
+                Some(h) if h.is_known() => format!("open in another process ({h})"),
+                _ => "open in another process".into(),
+            };
+            Refused(
+                500,
+                format!("tenant `{name}`'s file is {held}: two writers over one file corrupt it"),
+            )
+        }
+        fenec_abi::lock::Refused::Io(e) => Refused(
+            500,
+            format!("could not take tenant `{name}`'s lock file: {e}"),
+        ),
+    })
+}
+
 /// [`fenec_core::fs::sync_dir`] as an I/O error.
 fn dir_synced(path: &Path) -> std::io::Result<()> {
     fenec_core::fs::sync_dir(path).map_err(|e| std::io::Error::other(e.to_string()))
@@ -271,6 +303,20 @@ impl Tenant {
 
     pub fn is_frozen(&self) -> bool {
         self.frozen.load(Ordering::SeqCst)
+    }
+
+    /// Whether something beside the tenant holds its database: a compact
+    /// or a warm-up run beside the queries, a linking slice, the graph
+    /// keeper's append. Its follower's hold is the tenant's own. Closed
+    /// meanwhile, the database outlived the tenant, holding the file's
+    /// lock, and the next request's open waited [`RELEASE_WAIT`] for it
+    /// and answered 500 -- each request, for as long as a compact ran.
+    fn db_in_use(&self) -> bool {
+        if late_holders::listed(&self.name) {
+            return false;
+        }
+        let follower = self.repl.as_ref().and_then(|r| r.follower()).is_some();
+        Arc::strong_count(&self.db) > 1 + follower as usize
     }
 
     /// Whether this node's lease lets it write the tenant now, and why not:
@@ -1106,15 +1152,22 @@ impl Tenants {
         let failed = |e: fenec_core::error::Error| {
             Refused(500, format!("could not open tenant `{name}`: {e}"))
         };
+        // `<file>.lock` before the open, held by the database's sink and let
+        // go with the database, whoever drops it last. Taken by nothing, a
+        // shell over `acme.fenec` beside the node appended its write where
+        // the node appended its next, and the file opened no more.
+        let lock = hold_tenant(name, path)?;
         let (mut db, feed) = match &self.repl {
             None => {
-                let db = fenec_core::fs::open_serving(path, self.mapped, Box::new(Ok));
+                let wrap = fenec_abi::lock::holding(lock);
+                let db = fenec_core::fs::open_serving(path, self.mapped, Box::new(wrap));
                 (db.map_err(failed)?, None)
             }
             Some(r) => {
                 let file = path.to_string_lossy().into_owned();
-                let (db, feed) = crate::replication::open_serving(&file, r.buffer, self.mapped)
-                    .map_err(failed)?;
+                let (db, feed) =
+                    crate::replication::open_serving_holding(&file, r.buffer, self.mapped, lock)
+                        .map_err(failed)?;
                 (db, Some(feed))
             }
         };
@@ -1362,9 +1415,10 @@ impl Tenants {
         format!("[{}]", reports.join(","))
     }
 
-    /// Closes the slot's tenant if nothing but the slot holds it and it is
-    /// not frozen: checkpoint when there is a graph to keep, then the last
-    /// `Arc` goes and `Drop` does the final sync -- all under the slot lock.
+    /// Closes the slot's tenant if nothing but the slot holds it or its
+    /// database and it is not frozen: checkpoint when there is a graph to
+    /// keep, then the last `Arc` goes and `Drop` does the final sync -- all
+    /// under the slot lock.
     fn close(&self, held: &mut Held) -> bool {
         self.close_with(held, self.checkpoint)
     }
@@ -1375,7 +1429,7 @@ impl Tenants {
         let Held::Open(t) = &*held else {
             return false;
         };
-        if Arc::strong_count(t) > 1 || t.is_frozen() {
+        if Arc::strong_count(t) > 1 || t.is_frozen() || t.db_in_use() {
             return false;
         }
         // Its follower holds the database rather than the tenant: closed, the
@@ -1569,10 +1623,18 @@ impl Tenants {
             if matches!(held, Held::Open(_)) || path.exists() {
                 return Err(Refused(409, format!("tenant `{name}` already exists")));
             }
+            // Its lock across the rename: a file put in place under a
+            // shell or an app that has the name open would be written by
+            // both.
+            let _held = hold_tenant(name, &path)?;
             // A tenant installed here is its primary: a record left by a
             // replica of the same name deleted before would have it follow.
             let _ = std::fs::remove_file(self.follows_path(name));
-            let tmp = self.dir.join(format!("{name}.fenec.importing"));
+            // Through a link, the file it leads to, as the open writes it,
+            // and the image written beside that one: renamed over, the link
+            // would be a file of its own.
+            let target = fenec_core::fs::resolved(&path);
+            let tmp = fenec_core::fs::beside(&target, "importing");
             let written = std::fs::File::create(&tmp).and_then(|mut f| {
                 use std::io::Write;
                 f.write_all(image)?;
@@ -1581,8 +1643,8 @@ impl Tenants {
             // A log a tenant of this name left (`fenec_core::fs`) is not
             // this image's: gone, durably, before the rename.
             let written = written
-                .and_then(|_| fenec_core::fs::forget_sync_log(&path))
-                .and_then(|_| std::fs::rename(&tmp, &path));
+                .and_then(|_| fenec_core::fs::forget_sync_log(&target))
+                .and_then(|_| std::fs::rename(&tmp, &target));
             if let Err(e) = written {
                 let _ = std::fs::remove_file(&tmp);
                 return Err(Refused(
@@ -1662,6 +1724,11 @@ impl Tenants {
         if !path.exists() {
             return Err(Refused(404, format!("no tenant `{name}` on this node")));
         }
+        // Not removed from under another process that has it open -- a
+        // shell, an app -- which would write on into a file gone. The lock
+        // file stays: removed, a process that opened it before the removal
+        // and locked it after would hold a lock no later opener sees.
+        let _held = hold_tenant(name, &path)?;
         std::fs::remove_file(&path)
             .map_err(|e| Refused(500, format!("could not remove tenant `{name}`: {e}")))?;
         // Once the file is gone: a delete that failed is no departure --
@@ -1853,6 +1920,38 @@ fn refused_copy(me: Option<std::sync::Weak<Tenants>>, name: &str, opened: u64, e
         crate::log!(
             "tenant `{name}`'s copy here refused another tenant of its name, and stayed: {e}"
         );
+    }
+}
+
+/// A test's stand-in for a holder that took a tenant's database after its
+/// close looked ([`Tenant::db_in_use`]) -- the `@ttl` sweeper or the graph
+/// keeper upgrading its `Weak` between the look and the drop -- which then
+/// writes the file past the close: a close of a name listed here closes
+/// past what holds the database. Tests list names of their own, the
+/// process's being shared.
+#[doc(hidden)]
+pub mod late_holders {
+    use std::sync::{Mutex, MutexGuard};
+
+    static NAMES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    fn names() -> MutexGuard<'static, Vec<String>> {
+        NAMES.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Closes the tenant `name` past its database's holders until
+    /// [`forget`].
+    pub fn close_past(name: &str) {
+        names().push(name.to_string());
+    }
+
+    pub fn forget(name: &str) {
+        names().retain(|n| n != name);
+    }
+
+    pub(super) fn listed(name: &str) -> bool {
+        let names = names();
+        !names.is_empty() && names.iter().any(|n| n == name)
     }
 }
 
@@ -2209,6 +2308,78 @@ mod tests {
             upstream: None,
             sync_on_write: true,
         })
+    }
+
+    /// A tenant whose database something beside the queries holds -- a
+    /// compact or a warm-up for its whole run, as `link::compact` and
+    /// `warm` hold it -- is not closed when idle: closed, the database
+    /// outlived it with the file's lock, and each request's open waited
+    /// `RELEASE_WAIT` for it, then answered 500. Answered from the instance
+    /// still open, and closed once let go.
+    #[test]
+    fn a_tenant_whose_database_is_in_use_is_not_closed() {
+        let dir = scratch("in-use");
+        let reg = Tenants::new(&dir).unwrap();
+        let t = reg.create("t").unwrap();
+        run(&t, "create collection n (i int)");
+        let compacting = Arc::clone(&t.db);
+        drop(t);
+        assert_eq!(reg.close_idle(Duration::ZERO), 0);
+        let again = reg.get("t").unwrap();
+        assert!(Arc::ptr_eq(&again.db, &compacting), "opened again");
+        drop(again);
+        drop(compacting);
+        assert_eq!(reg.close_idle(Duration::ZERO), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A follow lets the tenant go and opens its file again, while a thread
+    /// beside the queries -- a linking slice, the graph keeper's append, a
+    /// compact -- still holds the database, and with it the file's lock:
+    /// the open waits for it, held here at a gate until the open is seen
+    /// waiting (`lock::waiting_for`), and goes on once it lets go, rather
+    /// than answer 500 or open a second database over the file.
+    #[test]
+    fn a_reopen_waits_for_what_still_holds_the_database() {
+        let dir = scratch("reopen");
+        let reg = Arc::new(replicating(&dir));
+        let t = reg.create("t").unwrap();
+        run(&t, "create collection n (i int)");
+        run(&t, "put n {i: 1}");
+        let (open_gate, gate) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let db = Arc::clone(&t.db);
+            std::thread::spawn(move || {
+                gate.recv().unwrap();
+                drop(db);
+            })
+        };
+        drop(t);
+        let follow = {
+            let reg = Arc::clone(&reg);
+            std::thread::spawn(move || reg.follow("t", Some("http://127.0.0.1:9")))
+        };
+        let path = dir.join("t.fenec");
+        while !fenec_abi::lock::waiting_for(&path) {
+            if follow.is_finished() {
+                panic!("not waited for: {:?}", follow.join().unwrap());
+            }
+            std::thread::yield_now();
+        }
+        open_gate.send(()).unwrap();
+        holder.join().unwrap();
+        follow.join().unwrap().unwrap();
+        let t = reg.get("t").unwrap();
+        assert!(t.read().history().following);
+        let stmt = fenec_ql::parse_one("get n count").unwrap();
+        let Ok(Response::Rows(rs)) = t.read().query(&stmt, &[]) else {
+            panic!("count")
+        };
+        assert_eq!(rs.rows[0].values[0], Value::Int(1));
+        if let Some(f) = t.repl.as_ref().and_then(|r| r.follower()) {
+            f.halt();
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A delete is a departure only on a node that replicates its tenants,

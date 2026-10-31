@@ -183,7 +183,10 @@ and `TasksMax` with it (65 536 and 16 384 leave room for 4 000). A
 connection refused past the ceiling holds its descriptor while its
 request is read off, 2 s at most and 512 a process at most (a quarter of
 `LimitNOFILE` where that is fewer): count 512 more descriptors, a node's
-and a router's alike.
+and a router's alike. Each tenant a node has open holds three on Linux: its
+file, its sync log and its `<tenant>.fenec.lock` (on macOS, which keeps no
+sync log, 500 open tenants held 1 006 descriptors, 506 before the lock), so
+the tenants `--idle-close` lets stay open count too.
 `FenecConnectionsNearCeiling` fires at four fifths. A router's ceiling (its
 default, 1 000) is its clients' and the regions' relays.
 `FenecNoThreadForConnection` fires once a process could make no thread for

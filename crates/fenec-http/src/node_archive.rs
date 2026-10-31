@@ -205,7 +205,7 @@ impl NodeArchive {
     pub fn new(root: impl AsRef<Path>, key: Option<Key>) -> io::Result<NodeArchive> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root)?;
-        let held = fenec_abi::lock::hold(&root.join("archiving").to_string_lossy())
+        let held = fenec_abi::lock::hold(root.join("archiving"))
             .map_err(|e| io::Error::other(format!("{}: {e}", root.display())))?;
         let mut tenants = BTreeMap::new();
         for (name, dir) in tenant_dirs(&root)? {
@@ -809,6 +809,13 @@ fn restore_line(
     to: crate::archive::Target,
     key: Option<&Key>,
 ) -> Restoring {
+    // Under the file's lock, asked and renamed in place, as a node installs
+    // a tenant: a node serving `out` that made the name meanwhile, or a
+    // shell over it, would have the file renamed from under it.
+    let _held = match fenec_abi::lock::hold(file) {
+        Ok(held) => held,
+        Err(e) => return Restoring::Failed(format!("{}: {e}", file.display())),
+    };
     if file.exists() {
         return Restoring::Failed(format!(
             "{} is there already: restore into an empty directory",
