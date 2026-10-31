@@ -28,9 +28,10 @@
 //! - `{"do":"wait","id":N,"ms":M}`: a timer
 //! - `{"do":"token"}`: the server said 401, a fresh token is wanted
 //! - `{"do":"changed"}`: the replica changed, live queries look again
-//! - `{"do":"refused","status":S,"message":..,"query":..,"quota":..}`: the
-//!   server refused a write, which was put back; `quota` is there where a
-//!   tenant's quota refused it (a 507 of `bytes` or `rows`)
+//! - `{"do":"refused","status":S,"message":..,"query":..,"quota":..,"reason":..}`:
+//!   the server refused a write, which was put back; `quota` is there where
+//!   a tenant's quota refused it (a 507 of `bytes` or `rows`), `reason`
+//!   where a `require <n> else '<reason>'` did (a 412)
 //! - `{"do":"status"}`: [`Sync::status`] has something new to say
 //!
 //! A write through `fenec_query` on a synced handle comes here
@@ -53,7 +54,7 @@ pub mod sse;
 use crate::Prepared;
 use fenec_core::json;
 use fenec_core::prelude::*;
-use fenec_core::query::{eval, EvalCtx, RowAccess};
+use fenec_core::query::{eval, EvalCtx, Require, RowAccess};
 
 /// Where the temporary ids of optimistic rows start: far from a server's,
 /// as `web/fenec.js` has it.
@@ -169,18 +170,23 @@ struct Said {
     quota: Option<String>,
     /// Milliseconds, 0 for none.
     retry_ms: u64,
+    /// What a `require <n> else '<reason>'` the server found unmet said.
+    reason: Option<String>,
 }
 
 fn said(body: &str) -> Said {
     let Ok(m) = members(body) else {
         return Said::default();
     };
-    let quota = field(&m, "quota")
-        .and_then(|q| json::parse(q).ok())
-        .and_then(|q| match q {
-            Value::Text(q) if !q.is_empty() => Some(q),
-            _ => None,
-        });
+    let text = |name: &str| {
+        field(&m, name)
+            .and_then(|q| json::parse(q).ok())
+            .and_then(|q| match q {
+                Value::Text(q) if !q.is_empty() => Some(q),
+                _ => None,
+            })
+    };
+    let quota = text("quota");
     let positive = |name: &str| match field(&m, name).and_then(|s| json::parse(s).ok()) {
         Some(Value::Int(n)) if n > 0 => n as f64,
         Some(Value::Float(f)) if f > 0.0 => f,
@@ -196,6 +202,7 @@ fn said(body: &str) -> Said {
     Said {
         quota,
         retry_ms: (ms as u64).min(RETRY_AFTER_MAX_MS),
+        reason: text("reason"),
     }
 }
 
@@ -1203,7 +1210,7 @@ impl Sync {
             // naming none (past `--max-memory`, or a proxy's) passes as
             // memory is let go of, and is waited out below.
             507 if said.quota.is_some() => {
-                self.refused(db, n, status, &message(status, body), said.quota)
+                self.refused(db, n, status, &message(status, body), said)
             }
             // No answer, or one that says to come back: the write stays, and
             // goes again under its key, which the server answers as the
@@ -1218,7 +1225,7 @@ impl Sync {
                 self.send_attempt += 1;
                 self.wait(Timer::Send, a, said.retry_ms);
             }
-            _ => self.refused(db, n, status, &message(status, body), said.quota),
+            _ => self.refused(db, n, status, &message(status, body), said),
         }
     }
 
@@ -1271,15 +1278,10 @@ impl Sync {
     /// The server refused write `n`: what it did to the replica is put
     /// back, the last statement's first, and the binding is told -- with
     /// the tenant's quota where one refused it, so an app says "storage
-    /// full" rather than "refused".
-    fn refused(
-        &mut self,
-        db: &mut Database,
-        n: i64,
-        status: u16,
-        why: &str,
-        quota: Option<String>,
-    ) {
+    /// full" rather than "refused", and the reason a `require <n> else
+    /// '<reason>'` gave, so it says "no seats left".
+    fn refused(&mut self, db: &mut Database, n: i64, status: u16, why: &str, said: Said) {
+        let Said { quota, reason, .. } = said;
         let Some(at) = self.queue.iter().position(|o| o.n == n) else {
             return;
         };
@@ -1322,6 +1324,10 @@ impl Sync {
         if let Some(q) = &quota {
             a.push_str(",\"quota\":");
             json::escape_into(&mut a, q);
+        }
+        if let Some(r) = &reason {
+            a.push_str(",\"reason\":");
+            json::escape_into(&mut a, r);
         }
         a.push('}');
         self.fault_naming(why.to_string(), status, false, quota);
@@ -1943,7 +1949,7 @@ impl Sync {
         key: Option<&str>,
         docs: Vec<Vec<(String, Value)>>,
         set: &[(String, Expr)],
-        require: Option<u64>,
+        require: Option<Require>,
         (text, params): (&str, &[Value]),
         mut undo: String,
     ) -> Result<Applied> {
@@ -2137,7 +2143,8 @@ impl Sync {
                 }
                 if let Some(set) = else_set {
                     let (key, set) = (key.as_deref(), set.as_slice());
-                    return self.upsert(db, &c, key, docs, set, *require, (text, params), undo);
+                    let require = require.clone();
+                    return self.upsert(db, &c, key, docs, set, require, (text, params), undo);
                 }
                 if let Some(k) = &key {
                     for d in &mut docs {
@@ -2151,8 +2158,8 @@ impl Sync {
                 if *if_absent {
                     line.push_str(" if absent");
                 }
-                if let Some(n) = require {
-                    line.push_str(&format!(" require {n}"));
+                if let Some(r) = require {
+                    r.clause_into(&mut line);
                 }
                 let count = docs.len();
                 let has_id =
@@ -2232,7 +2239,7 @@ impl Sync {
                 {
                     *ins = *insert;
                     *absent = *if_absent;
-                    *req = *require;
+                    *req = require.clone();
                 }
                 db.execute_with(&st, &[])?;
                 undo.push_str(",\"del\":[");

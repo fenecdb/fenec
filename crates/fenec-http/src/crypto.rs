@@ -1,11 +1,15 @@
 //! The smallest crypto set SCRAM-SHA-256 and HS256 JWTs need: SHA-256,
 //! HMAC, PBKDF2, and base64 in both its alphabets -- and ChaCha20-Poly1305
-//! (RFC 8439), which seals an archive's files (`seal.rs`).
+//! (RFC 8439), which seals an archive's files (`seal.rs`), and the RS256
+//! and ES256 (`p256.rs`) verifications an identity provider's tokens need.
 //!
 //! No dependencies, like the rest of fenecdb. All three functions are checked
 //! against RFC test vectors (see the tests at the end of the module);
 //! hand-written crypto is only usable when it can be proven against known
 //! vectors.
+
+mod p256;
+pub use p256::P256Key;
 
 // ----------------------------------------------------------------- SHA-256
 

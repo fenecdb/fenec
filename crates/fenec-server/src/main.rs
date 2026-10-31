@@ -122,10 +122,11 @@ usage: fenec-server [options]
       --jwt-secret-file <path>  the secret from a file
       --jwt-keys <path>     instead of a secret, the keys of a JWKS file
                             (its `keys` list): `oct` keys take HS256 tokens,
-                            `RSA` keys an identity provider's RS256 ones, a
-                            token's `kid` names its key. Read again as the
-                            file changes, which is how keys rotate. Also read
-                            from FENEC_JWT_KEYS
+                            `RSA` keys an identity provider's RS256 ones and
+                            `EC` keys on P-256 its ES256 ones, a token's
+                            `kid` names its key. Read again as the file
+                            changes, which is how keys rotate. Also read from
+                            FENEC_JWT_KEYS
       --jwt-require-exp <on|off>  refuse a token with no `exp` claim, which
                             would be good for ever  default: on
                             (--mint-token gives one an hour)
@@ -1065,11 +1066,19 @@ fn main() {
 
     // `<file>.lock` for as long as the process serves the file: a second
     // process over it -- another server, `fenec mcp --file`, an app through
-    // the native library -- corrupts it, and each takes the lock and is
-    // refused while another holds it. The system lets it go at the exit.
+    // the native library, the shell -- corrupts it, and each takes the lock
+    // and is refused while another holds it. The system lets it go at the
+    // exit. The refusal names the holder where it can be told; its first
+    // words stay what the desktop app reads (`it is open already`).
     let _held = file.as_deref().map(|path| {
         fenec_abi::lock::hold(path).unwrap_or_else(|e| {
-            fenec_http::log!("could not open {path}: {e}");
+            let who = match e {
+                fenec_abi::lock::Refused::Held => fenec_abi::lock::holder(path)
+                    .filter(|h| h.is_known())
+                    .map_or(String::new(), |h| format!(" (held by {h})")),
+                _ => String::new(),
+            };
+            fenec_http::log!("could not open {path}: {e}{who}");
             std::process::exit(1);
         })
     });

@@ -34,6 +34,24 @@ func TestAWriteWhoseOutcomeIsUnknownSaysSo(t *testing.T) {
 	}
 }
 
+// A require n else '<reason>' that refused says its reason beside the
+// message, and a Batch's stop's beside its At; "" where the statement gave
+// none.
+func TestARequireThatRefusedSaysItsReason(t *testing.T) {
+	e := errorOf(412, []byte("{\"error\":\"no such account (`set accounts` wrote 0 rows, and requires 1)\",\"reason\":\"no such account\"}"))
+	if e.Code != CodeUnmet || e.Reason != "no such account" || e.At != -1 {
+		t.Fatalf("%+v", e)
+	}
+	e = errorOf(412, []byte("{\"error\":\"unmet: no account to credit (`set accounts` wrote 0 rows, and requires 1)\",\"completed\":0,\"at\":1,\"reason\":\"no account to credit\"}"))
+	if e.At != 1 || e.Completed != 0 || e.Reason != "no account to credit" {
+		t.Fatalf("%+v", e)
+	}
+	e = errorOf(412, []byte("{\"error\":\"`set accounts` wrote 0 rows, and requires 1\"}"))
+	if e.Reason != "" {
+		t.Fatalf("%+v", e)
+	}
+}
+
 // Every f32 written reads back through an f64, as the server reads it --
 // one in 4 099 of them, a spread over every exponent, and the tie.
 func TestEveryF32ReadsBackThroughAnF64(t *testing.T) {

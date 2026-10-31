@@ -57,6 +57,9 @@ internal object FenecNative {
         if (code == 0) return text
         val v = runCatching { Json.parse(text) }.getOrNull() as? Map<*, *>
         val exact = (v?.get("exact") as? List<*>)?.map { (it as Number).toInt() }
-        throw FenecException(FenecException.Code.of(code), v?.get("message") as? String ?: "error $code", exact)
+        throw FenecException(
+            FenecException.Code.of(code), v?.get("message") as? String ?: "error $code", exact,
+            reason = v?.get("reason") as? String,
+        )
     }
 }

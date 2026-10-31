@@ -49,7 +49,14 @@ class FenecException implements Exception {
   /// failover's 503 in whole seconds (`Retry-After`).
   final Duration? retryAfter;
 
-  FenecException(this.code, this.message, [this.exact])
+  /// What a `require n else '<reason>'` that refused said
+  /// ([FenecCode.unmet]): the statement's own words, by which a caller tells
+  /// "insufficient funds" from "no such account" -- where [at] moves with
+  /// every statement put in front of it. From the library and a server
+  /// alike; null where the statement gave none.
+  final String? reason;
+
+  FenecException(this.code, this.message, [this.exact, this.reason])
       : status = null,
         at = null,
         completed = null,
@@ -57,9 +64,10 @@ class FenecException implements Exception {
         retryAfter = null;
 
   /// A server's refusal: its status and, for a batch, where it stopped; for
-  /// a tenant's quota, which one and how long to wait.
+  /// a tenant's quota, which one and how long to wait; for a `require`, the
+  /// reason it gave.
   FenecException.http(this.code, this.message,
-      {required int this.status, this.at, this.completed, this.quota, this.retryAfter})
+      {required int this.status, this.at, this.completed, this.quota, this.retryAfter, this.reason})
       : exact = null;
 
   @override
@@ -323,8 +331,8 @@ class Fenec {
         return const <String, Object?>{};
       }
     })();
-    throw FenecException(
-        FenecCode.of(code), v['message'] as String? ?? 'error $code', (v['exact'] as List?)?.cast<int>());
+    throw FenecException(FenecCode.of(code), v['message'] as String? ?? 'error $code',
+        (v['exact'] as List?)?.cast<int>(), v['reason'] as String?);
   }
 
   // ------------------------------------------------------------- running

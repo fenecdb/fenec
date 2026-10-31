@@ -73,7 +73,9 @@ hits = docs.select("title").match("title", "oasys", fuzzy=True).rows()
 n = docs.where("title", "~", "Dunes").count()</pre>
 <p><code>batch([(text, params), ...])</code> runs statements as one block,
 all or none -- a <code>FenecError</code> that stops it says which
-(<code>e.at</code>, from 0); <code>idempotency_key=</code> on
+(<code>e.at</code>, from 0) and, where a write's
+<code>require=1, reason="..."</code> said why, <code>e.reason</code>;
+<code>idempotency_key=</code> on
 <code>query</code> and <code>batch</code>, or
 <code>with_idempotency_key(key)</code> for every write of a copy, makes a
 write once however often it is sent (<code>db.replayed</code>), and
@@ -261,7 +263,8 @@ of the <a href="http.html">HTTP endpoint</a> and its
 <a href="http-reference.html">reference</a>
 (<a href="https://github.com/fenecdb/fenecdb/tree/main/integrations/dotnet">integrations/dotnet</a>);
 a refusal is a <code>FenecException</code>, and a batch's says which
-statement stopped it (<code>At</code>, from 0).
+statement stopped it (<code>At</code>, from 0) and, where its
+<code>require</code> said why, the <code>Reason</code>.
 A <code>float[]</code> or <code>ReadOnlyMemory&lt;float&gt;</code> goes out
 as the decimals that read back as each float.</p>
 <p>Without the SDK, <code>HttpClient</code> and <code>System.Text.Json</code>:</p>
@@ -583,6 +586,20 @@ and Dart's maps keep their order. A refusal there is a
 <code>FenecException</code>, each with the code <code>builder</code>, and
 every builder method throws as it is called, so a Swift chain takes one
 <code>try</code>.</p>
+<p>A <code>require</code>'s reason (<code>require 1 else 'no such
+account'</code>, <a href="fenecql-writing.html#require-reason">A reason for the
+refusal</a>) is written the same way: on a read, Python's
+<code>.require(1, reason="...")</code>, Go's
+<code>q.Require(1, fenecdb.Reason("..."))</code>, .NET's
+<code>Require(1, reason: "...")</code>, Swift's and Dart's
+<code>require(1, reason: "...")</code>, Kotlin's
+<code>require(1, reason = "...")</code>; on a write, the same name among its
+options (<code>require=1, reason="..."</code> in Python,
+<code>fenecdb.Reason("...")</code> in Go). The refusal reads it back as
+<code>FenecError.reason</code> in Python and Swift,
+<code>Error.Reason</code> in Go, <code>FenecException.Reason</code> in .NET,
+<code>FenecException.reason</code> in Kotlin and the error's
+<code>reason</code> in Dart.</p>
 </details>
 
 <h2 id="http">From the shell</h2>

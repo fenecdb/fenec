@@ -14,7 +14,8 @@ a server or an app keeps.</p>
 installing it (<a href="install.html">Install</a>), and the steps below need
 nothing else. Give it a file of its own, <code>scratch.fenec</code> here: not
 one a server has open, such as the Quickstart's <code>notes.fenec</code>, since
-two processes writing one file would corrupt it.</p>
+two processes writing one file would corrupt it: the shell refuses a file
+another process has open (<a href="#the-lock">The file's lock</a>).</p>
 
 <ol class="steps-doc">
   <li>
@@ -61,6 +62,7 @@ in this shell, from a first write to a lookup and a total.</p>
 fenec scratch.fenec -c 'get notes limit 5'   # one statement, then exit
 echo 'get notes' | fenec scratch.fenec       # from a pipe
 fenec scratch.fenec &lt; seed.fenecql           # a script
+fenec --read-only notes.fenec                # a server's file, read beside it
 fenec --version                              # fenec &lt;version&gt;, and nothing opened</pre>
 
 <p><code>--version</code>, or <code>-V</code>, prints the shell's version on
@@ -68,6 +70,24 @@ stdout and exits 0 without opening a file; <code>fenec version</code>, with no
 dashes, opens a file named <code>version</code>, as any other word does.
 Releases up to 0.1.12 have no <code>--version</code>: the first line an
 interactive session prints names theirs.</p>
+
+<p id="the-lock">The shell holds <code>&lt;file&gt;.lock</code> while it has a
+file open, as <code>fenec-server --file</code>, <code>fenec mcp --file</code>
+and an app through the native library do, so a file one of them or another
+shell has open is refused, and its holder named — <code>notes.fenec is open in
+another process (fenec-server, pid 4242)</code>, exit 1. A server's file is
+queried over HTTP instead, or the server stopped first; a file another session
+or an app has open is closed there first. <code>-c</code>, a pipe and a script
+are refused alike, and so are <code>fenec import</code> into the file, a
+<code>backup</code> or <code>restore</code> into it and <code>.save</code> over
+it. Where the lock cannot be taken at all, in a directory you may only read,
+the refusal points to <code>--read-only</code>, which takes no lock and writes
+nothing: it reads the file as it stood at the open, beside a server writing it,
+and refuses every write and <code>.checkpoint</code>. On Linux, after the machine went down
+and before a server or the shell opens the file to write it again, it may lack
+the last durable writes: they wait in the sync log beside the file, which only
+an open to write plays back. Releases up to 0.1.12 took no lock, and a write
+there beside a running server could leave the file unreadable.</p>
 
 <p>Inside the shell, a line that begins with a <code>.</code> is the shell's own:</p>
 

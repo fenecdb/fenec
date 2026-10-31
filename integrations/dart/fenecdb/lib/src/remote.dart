@@ -186,9 +186,11 @@ class FenecRemote {
   /// `POST /batch`: the statements in order under one write lock, as one
   /// block -- their writes all land, or at the first error none of them do,
   /// a [FenecException] whose [FenecException.at] is the statement that
-  /// stopped it ([FenecCode.unmet] for a write's `require` not met). A
-  /// statement is what the builder's `toInsert`, `toUpdate`, `toDelete` and
-  /// `toFenecQL` make. With [idempotencyKey] a retry after a timeout is
+  /// stopped it ([FenecCode.unmet] for a write's `require` not met, its
+  /// [FenecException.reason] the one the statement gave, which stays put as
+  /// statements go in front of it where `at` moves). A statement is what
+  /// the builder's `toInsert`, `toUpdate`, `toDelete` and `toFenecQL`
+  /// make. With [idempotencyKey] a retry after a timeout is
   /// answered as the first try was and writes nothing twice; a batch of
   /// reads alone takes no key.
   Future<BatchAnswer> batch(List<Statement> statements, {String? idempotencyKey}) async {
@@ -308,9 +310,10 @@ class FenecRemote {
   void close() => _shared.client.close();
 
   /// A refusal as the error it is: its status and message, where a batch
-  /// stopped, and where a tenant's quota refused it the quota and how long
-  /// to wait -- to the millisecond where the body says it
-  /// (`retry_after_ms`), else `Retry-After`, or the same in the body.
+  /// stopped, what a `require n else '<reason>'` that refused it said, and
+  /// where a tenant's quota refused it the quota and how long to wait -- to
+  /// the millisecond where the body says it (`retry_after_ms`), else
+  /// `Retry-After`, or the same in the body.
   static FenecException refused(int status, Map? m, String? retryAfter) {
     final quota = m?['quota'] as String?;
     final ms = (m?['retry_after_ms'] as num?)?.toInt();
@@ -322,7 +325,12 @@ class FenecRemote {
             : Duration(seconds: secs);
     return FenecException.http(
         quota == null ? _code(status) : FenecCode.quota, m?['error'] as String? ?? 'HTTP $status',
-        status: status, at: m?['at'] as int?, completed: m?['completed'] as int?, quota: quota, retryAfter: wait);
+        status: status,
+        at: m?['at'] as int?,
+        completed: m?['completed'] as int?,
+        quota: quota,
+        retryAfter: wait,
+        reason: m?['reason'] as String?);
   }
 
   /// An HTTP status as the error kind the engine would have said; the

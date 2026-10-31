@@ -32,6 +32,10 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [router.md](router.md) -- the router's CORS, its pooled connections, the cuts a failover makes, the leading router's and its followers', and queries across tenants
 - [integrations.md](integrations.md) -- `integrations/`, the Grafana data source, the desktop app, the `deploy/` kit and the install channels (Homebrew, `install.sh`, `.deb` and `.rpm`)
 
+The conventions hold no invariant of the code, and are listed apart:
+
+- [conventions.md](conventions.md) -- where tests live and which run alone, a test that fails on one run, Chrome's launch, the clock, ports, and the docs a change a user meets owes
+
 A proposal holds no invariant until it is built, and is listed apart:
 
 - [named-statements.md](named-statements.md) -- *proposal, not built*: FenecQL defined once in a database and called by name with typed arguments and an authority of its own, its storage, its authority model against `SECURITY DEFINER`'s, its surfaces and the slices that would build it

@@ -424,10 +424,11 @@ which needs the signing identity and bundle id to stay fixed.
 * Updates: Electrobun makes bsdiff patches against a release it can download,
   and nothing is published; a new version is a new DMG.
 * Intel Macs, Windows and Linux. Windows also needs `fenec_abi::lock` to take a
-  lock there (`record_lock` is unix only), a Windows target in the release
+  lock there (`record::take` is Unix only), a Windows target in the release
   matrix, and a signing hook (Hutch does not sign on Windows).
 * A stable origin for a file: the server listens on a port the system picks.
   A window's store is its own, so nothing a file's page keeps (its theme, its
   history) carries to the next open of the file.
-* A `<file>.lock` (0 bytes) stays beside every file the app opens; that is
+* A `<file>.lock` stays beside every file the app opens, holding the last
+  holder's `<pid> <program>` line, which a refusal names it by; that is
   `fenec-server`'s, not the app's.

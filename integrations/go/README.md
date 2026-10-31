@@ -52,8 +52,10 @@ docs.Where("year", "<", 2000).Delete(ctx)      // no filter: refused unless fene
 - `Changes(ctx, since, wait)` reads every write on disk (`/_changes`); `Health(ctx)` asks `/_health`.
 - `WithTenant("acme")` sends everything under `/t/acme/`; `WithTimeout`, `WithHTTPClient` as they say.
 - A refusal is an `*fenecdb.Error` with `Status`, `Code` and `Message`, for `errors.As`; a failed `Batch`'s also
-  says which statement stopped it, `At` (from 0; -1 otherwise), and how many stayed applied, `Completed`. A
-  tenant's quota names itself, `Quota` (the `Quota*` constants): `QuotaBytes` and `QuotaRows` answer 507
+  says which statement stopped it, `At` (from 0; -1 otherwise), and how many stayed applied, `Completed`.
+  `Reason("insufficient funds")` beside `Require(1)` (`require 1 else '...'`, written into the text) comes back
+  as `Reason`, which tells one guard's refusal from another's where `At` moves with every statement added in
+  front; a read's `Require(1, Reason("no such account"))` says its own. A tenant's quota names itself, `Quota` (the `Quota*` constants): `QuotaBytes` and `QuotaRows` answer 507
   (`CodeFull`), and room is made by deleting; the rest answer 429 (`CodeTooMany`) with `RetryAfter`, the wait the
   server asks for, as a tenant being moved or failed over answers its writes 503 (`CodeUnavailable`).
 - A `[]float32` goes out as the decimals that read back as each `f32`, so a vector round-trips to the bit.

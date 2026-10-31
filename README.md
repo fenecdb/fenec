@@ -48,14 +48,15 @@ const rows = await open.rows();      // once
 const stop = db.live(open, draw);    // and again after every write it reads
 ```
 
-A write reads the row it writes, and can be made to find it. Sent as one
-`/batch`, a debit that finds too little money is refused (412, `unmet`,
-`"at": 0`) before the credit runs, and a credit to an account that is not
-there (`"at": 1`) puts the debit back:
+A write reads the row it writes, and can be made to find it, saying why
+when it does not. Sent as one `/batch`, a debit that finds too little money
+is refused (412, `unmet`, `"at": 0`, `"reason": "insufficient funds"`) before
+the credit runs, and a credit to an account that is not there (`"at": 1`,
+`"reason": "no account to credit"`) puts the debit back:
 
 ```
-set accounts {balance: balance - $3} where name = $1 and balance >= $3 require 1
-set accounts {balance: balance + $3} where name = $2 require 1
+set accounts {balance: balance - $3} where name = $1 and balance >= $3 require 1 else 'insufficient funds'
+set accounts {balance: balance + $3} where name = $2 require 1 else 'no account to credit'
 ```
 
 Search is in the same query: the words ranked by BM25, a typo and a word
@@ -190,8 +191,12 @@ and the tarball, the image and the language packages too; the tap's formula is
 ```bash
 ./target/release/fenec data.fenec              # interactive
 ./target/release/fenec data.fenec -c 'get docs limit 5'
+./target/release/fenec --read-only data.fenec  # a server's file, read beside it
 ```
 
+The shell holds `data.fenec.lock` while it has the file open, as the server
+does: a file a server, an agent's session, an app or another shell has open is
+refused, its holder named, since two processes writing one file corrupt it.
 [The shell](https://fenecdb.com/docs/shell) has a first session and its flags.
 
 **Browser.** Dependency-free ES modules and the wasm file beside them:
@@ -203,7 +208,7 @@ const db = await Fenec.open('./fenec.wasm');
 
 330 KB of gzipped WebAssembly and a 60 KB gzipped client — no wasm-bindgen, no
 build step. An app whose queries run on a server can import
-`@fenecdb/web/client`, 9 KB brotli in its bundle, which cannot pull in the
+`@fenecdb/web/client`, 10 KB brotli in its bundle, which cannot pull in the
 engine, sync or storage ([which package](https://fenecdb.com/docs/javascript#packages)). With live
 queries (`db.live`, React's `useLiveQuery`) it can be an app's whole state,
 no server: [state in the page](https://fenecdb.com/docs/javascript#state). [Quickstart: in the browser](https://fenecdb.com/docs/quickstart-browser) · [JavaScript client](https://fenecdb.com/docs/javascript).
@@ -327,7 +332,7 @@ let db = try await Fenec.sync(url: "https://api.example.com", token: jwt,
 | **Interfaces** | FenecQL · a query builder in seven languages · REST/JSON + SSE · WASM C ABI · a native C ABI for apps · change data capture (`/_changes`, every write on disk as a JSON line, resumable) · import from SQLite and PostgreSQL |
 | **Agents** | an MCP server (`fenec-server --mcp`, `fenec mcp` over stdio): `schema`, `search` (words, an embedding, or both fused), `query`, `get`, and `write` and a memory (`remember`, `recall`) where asked for, held to the token's rules |
 | **Integrations** | `useLiveQuery` for React, over a database in the page or a synced replica · SDKs for Python, JavaScript, Go and .NET · embedded in Swift, Kotlin and Dart/Flutter apps, live queries as SwiftUI observables, Flows and Streams · LangChain and LlamaIndex vector stores, each passing its framework's own tests |
-| **Access** | a server token · HS256 and RS256 JSON Web Tokens (JWKS, rotated by `kid`) held to [the issuer and audience you name](https://fenecdb.com/docs/http-access#whom-a-token-is-for) and to a policy, down to the rows (`owner = $jwt.sub`, a provider's own claims such as `$jwt."cognito:groups"`) and the fields each row shows · a refused token waiting longer each time · an audit log of refusals, schema changes and admin actions |
+| **Access** | a server token · HS256, RS256 and ES256 JSON Web Tokens (JWKS, rotated by `kid`) held to [the issuer and audience you name](https://fenecdb.com/docs/http-access#whom-a-token-is-for) and to a policy, down to the rows (`owner = $jwt.sub`, a provider's own claims such as `$jwt."cognito:groups"`) and the fields each row shows · a refused token waiting longer each time · an audit log of refusals, schema changes and admin actions |
 | **Operations** | read replicas and promotion · archives and backups sealed with a key, restored to a moment, every tenant of a node over one connection · a file per tenant behind a router, failed over on a lease, a replica that did not take tried again and the tenants left without one counted ([replicas of their own](https://fenecdb.com/docs/sharding-failover#replicas-of-their-own)) |
 | **Regions** | nodes in regions and zones, a tenant's replica in another zone of its region · a region keeping its own directory, leased and failed over by its own router while cut off ([its own directory](https://fenecdb.com/docs/sharding-regions#region-directories)) · one URL for every region: a Cloudflare Worker that learns each tenant's home from the routers and names each client to them under an HMAC, so a refused token waits by the client's address ([global entry](https://fenecdb.com/docs/sharding-entry#global-entry)) · read replicas in other regions: the reads a client marks, through any SDK (`reads: 'nearest'` in JavaScript), answered near it and never from before its own write, a subscription sent after that write waiting for it too, and a JavaScript live query's runs after each change its stream at home tells of ([read replicas](https://fenecdb.com/docs/sharding-read-replicas#read-replicas)) · a kit to run them: systemd units, alert rules, a runbook and a failover drill ([deploy/](deploy/RUNBOOK.md)) |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, `--slow-ms`, and OpenTelemetry traces over OTLP (`--otlp-endpoint`) |

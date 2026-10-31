@@ -35,11 +35,13 @@ fenec mcp --url http://127.0.0.1:8080/_mcp        # in front of a server, the to
 </pre>
 
 <p><code>--file</code> holds the database itself and takes
-<code>notes.fenec.lock</code> while the session lasts — a server or an app
-over the same file is refused, as it is refused while they hold it: two
+<code>notes.fenec.lock</code> while the session lasts — a server, an app or
+the shell over the same file is refused, as it is refused while they hold it: two
 processes writing one file corrupt it. Each write is on the disk before it is
 answered. <code>--read-only</code> takes no lock and writes nothing, and reads
-the file as it stood when the session began, beside a server writing it; to
+the file as it stood when the session began, beside a server writing it (on
+Linux, after the machine went down and before a writer opens the file again,
+without the last durable writes, which wait in the sync log beside it); to
 read what a server serves now, use <code>--url</code>. Over
 <code>--url</code> the tools are the server's, under its options and the
 token's rules, and the bridge decides nothing.</p>
@@ -166,8 +168,11 @@ as text. Names are checked against FenecQL's rule for one.</p>
 result with <code>isError</code>: an argument it does not take, a vector of
 the wrong length, a statement the token's rules refuse, an answer past a
 bound — each saying what to change, and with the status <code>/query</code>
-would have answered it with. A call that is not one — an unknown tool, a
-malformed message — is a JSON-RPC error.</p>
+would have answered it with. A <code>write</code> whose <code>require N else
+'…'</code> refused it carries that <code>reason</code> beside its words, as
+the 412 does (<a href="/docs/fenecql-writing#require-reason">A reason for the
+refusal</a>). A call that is not one — an unknown tool, a malformed message —
+is a JSON-RPC error.</p>
 
 <h2 id="limits">Bounds</h2>
 

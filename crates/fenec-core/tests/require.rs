@@ -96,7 +96,7 @@ fn require_parses_after_each_write_and_nowhere_else() {
         let require = match &s {
             Statement::Put { require, .. }
             | Statement::Update { require, .. }
-            | Statement::Delete { require, .. } => *require,
+            | Statement::Delete { require, .. } => require.clone(),
             other => panic!("{other:?}"),
         };
         assert!(require.is_some(), "{sql}");
@@ -136,7 +136,7 @@ fn a_get_that_misses_its_count_puts_the_block_back() {
         let Statement::Select(sel) = parse(sql) else {
             panic!("{sql}");
         };
-        assert_eq!(sel.require, Some(want), "{sql}");
+        assert_eq!(sel.require.map(|r| r.n), Some(want), "{sql}");
     }
 
     let mut db = Database::new();
@@ -402,4 +402,204 @@ fn the_docs_checkout_stops_at_the_line_that_fails() {
     run(&mut db, "set coupons {max_uses: 5}").unwrap();
     assert_eq!(buy(&mut db, 12, "C", "o2"), Err(2), "no stock");
     assert_eq!(int(one(&db, "get orders select sum(paid)")), 10);
+}
+
+/// `require <n> else '<reason>'`: the reason, written in the statement,
+/// after the count wherever a `require` goes, in either quote.
+#[test]
+fn a_require_takes_its_reason_after_its_count() {
+    let reason = |sql: &str| -> Option<(u64, String)> {
+        let r = match parse(sql) {
+            Statement::Put { require, .. }
+            | Statement::Update { require, .. }
+            | Statement::Delete { require, .. } => require,
+            Statement::Select(sel) => sel.require,
+            other => panic!("{other:?}"),
+        }?;
+        (!r.reason.is_empty()).then(|| (r.n, r.reason.into()))
+    };
+    for (sql, n, why) in [
+        (
+            "set a {n: n - 1} where id = 1 and n > 0 require 1 else 'insufficient funds'",
+            1,
+            "insufficient funds",
+        ),
+        (
+            "del a where id = 1 require 1 else \"no such row\"",
+            1,
+            "no such row",
+        ),
+        ("put a {n: 1} require 1 else 'x'", 1, "x"),
+        (
+            "insert a {n: 1} if absent require 1 else 'taken' returning id",
+            1,
+            "taken",
+        ),
+        (
+            "insert a {n: 1} returning id require 1 else 'taken'",
+            1,
+            "taken",
+        ),
+        (
+            "del a require 0 else 'not empty' where n < 0",
+            0,
+            "not empty",
+        ),
+        (
+            "get a where id = 1 limit 1 require 1 else 'no such account'",
+            1,
+            "no such account",
+        ),
+        ("get a require 1 else 'none' lookup b on x", 1, "none"),
+        (
+            "select n from a where id = 1 require 1 else 'none'",
+            1,
+            "none",
+        ),
+        // SQL's quote doubled, a backslash's escape, and letters past ASCII.
+        ("get a require 0 else 'it''s held'", 0, "it's held"),
+        ("get a require 0 else 'a \\\\ b'", 0, "a \\ b"),
+        (
+            "update a set n = 1 where id = 2 require 1 else 'yok böyle bir hesap'",
+            1,
+            "yok böyle bir hesap",
+        ),
+    ] {
+        assert_eq!(reason(sql), Some((n, why.to_string())), "{sql}");
+    }
+    // Without `else`, none, as before.
+    assert_eq!(reason("set a {n: 1} where id = 1 require 1"), None);
+    // As long as a reason goes: 200 bytes, here 100 letters of two each.
+    let long = "ş".repeat(100);
+    assert_eq!(
+        reason(&format!("get a require 1 else '{long}'")),
+        Some((1, long.clone()))
+    );
+    // A sync replica writes the clause back as the parser reads it.
+    for sql in [
+        "put a {n: 1} require 1 else 'it''s \\\\ held'",
+        "put a {n: 1} require 2",
+    ] {
+        let Statement::Put {
+            require: Some(r), ..
+        } = parse(sql)
+        else {
+            panic!("{sql}")
+        };
+        let mut text = String::from("put a {n: 1}");
+        r.clause_into(&mut text);
+        assert_eq!(text, sql);
+    }
+}
+
+/// What a reason may not be, each refused naming what to write: a
+/// parameter (the statement's own words, as its count is), empty, past
+/// 200 bytes, or anything but a text.
+#[test]
+fn a_reason_is_a_text_of_the_statement() {
+    let refused = |sql: &str| fenec_ql::parse(sql).unwrap_err().to_string();
+    let e = refused("set a {n: 1} where id = 1 require 1 else $1");
+    assert!(e.contains("never a parameter"), "{e}");
+    let e = refused("get a require 1 else ''");
+    assert!(e.contains("reason is empty"), "{e}");
+    let e = refused(&format!("get a require 1 else '{}'", "x".repeat(201)));
+    assert!(e.contains("at most 200 bytes, not 201"), "{e}");
+    let e = refused(&format!("get a require 1 else '{}x'", "ş".repeat(100)));
+    assert!(e.contains("at most 200 bytes, not 201"), "{e}");
+    // A backtick, which the refusal quotes its statement with: the reason
+    // is read back as the message up to the first `` (` ``.
+    for sql in [
+        "get a require 1 else 'see (`docs`)'",
+        "set a {n: 1} where id = 1 require 1 else 'a ) (` b'",
+        "del a where id = 1 require 1 else \"`\"",
+    ] {
+        let e = refused(sql);
+        assert!(e.contains("reason holds no backtick"), "{sql}: {e}");
+    }
+    for (sql, found) in [
+        ("del a where id = 1 require 1 else", "end of input"),
+        ("del a where id = 1 require 1 else 5", "5"),
+        ("del a where id = 1 require 1 else no", "`no`"),
+        ("put a {n: 1} require 1 else set {n: 2}", "`set`"),
+    ] {
+        let e = refused(sql);
+        assert!(e.contains("takes its reason in quotes"), "{sql}: {e}");
+        assert!(e.ends_with(&format!("found {found}")), "{sql}: {e}");
+    }
+    // `else` with no `require` before it is no clause: as before, a word
+    // that begins no statement.
+    let e = refused("del a where id = 1 else 'x'");
+    assert!(e.contains("unknown command `else`"), "{e}");
+}
+
+/// The reason in the refusal: ahead of the count's words, and whole in
+/// `Error::reason`, for a write and for a `get`; the block put back.
+#[test]
+fn an_unmet_require_says_its_reason() {
+    let mut db = ledger(2, 100);
+    let seq = db.change_seq();
+    let e = run(
+        &mut db,
+        "set accounts {balance: balance - 500} where name = \"a0\" and balance >= 500 \
+         require 1 else 'insufficient funds'",
+    )
+    .unwrap_err();
+    assert_eq!(e.reason(), Some("insufficient funds"));
+    assert_eq!(
+        e.to_string(),
+        "unmet: insufficient funds (`set accounts` wrote 0 rows, and requires 1)"
+    );
+    // One without a reason says none.
+    let e = run(&mut db, "del accounts where name = \"nobody\" require 1").unwrap_err();
+    assert_eq!(e.reason(), None);
+    // A `get`'s, alone, parentheses and all.
+    let e = db
+        .query(
+            &parse("get accounts where name = \"nobody\" limit 1 require 1 else 'no (such) one'"),
+            &[],
+        )
+        .unwrap_err();
+    assert_eq!(e.reason(), Some("no (such) one"));
+    assert_eq!(
+        e,
+        Error::Unmet("no (such) one (`get accounts` answered 0 rows, and requires 1)".into())
+    );
+    // The transfer, each guard saying why: the block stops at the one that
+    // failed, says its reason, and nothing of it lands.
+    let stmts: Vec<Statement> = [
+        "get accounts where name = $1 limit 1 require 1 else 'no such account'",
+        "set accounts {balance: balance - $3} where name = $1 and balance >= $3 require 1 \
+         else 'insufficient funds'",
+        "set accounts {balance: balance + $3} where name = $2 require 1 else 'no account to credit'",
+        "insert journal [{tx: $4, account: $1, amount: 0 - $3}, {tx: $4, account: $2, amount: $3}]",
+    ]
+    .iter()
+    .map(|s| parse(s))
+    .collect();
+    for (from, to, amount, at, why) in [
+        ("ghost", "a1", 10, 0, "no such account"),
+        ("a0", "a1", 101, 1, "insufficient funds"),
+        ("a0", "ghost", 10, 2, "no account to credit"),
+    ] {
+        let (stopped, e) = transfer(&mut db, &stmts, from, to, amount, 1).unwrap_err();
+        assert_eq!((stopped, e.reason()), (at, Some(why)), "{from} -> {to}");
+    }
+    assert_eq!(db.change_seq(), seq, "nothing landed");
+    assert_eq!(int(one(&db, "get accounts select sum(balance)")), 200);
+    assert_eq!(int(one(&db, "get journal count")), 0);
+    assert!(transfer(&mut db, &stmts, "a0", "a1", 10, 1).is_ok());
+    // A quoted collection's name holding the count's opening, `` (` ``:
+    // the reason is the message up to the first, never the last, which
+    // read it as "my reason (`set x".
+    run(&mut db, "create collection \"x (`y\" (a int)").unwrap();
+    for sql in [
+        "set \"x (`y\" {a: 1} where a = 5 require 1 else 'my reason'",
+        "del \"x (`y\" where a = 5 require 1 else 'my reason'",
+        "select a from \"x (`y\" where a = 5 require 1 else 'my reason'",
+    ] {
+        let e = run(&mut db, sql).unwrap_err();
+        assert_eq!(e.reason(), Some("my reason"), "{sql}: {e}");
+    }
+    let e = run(&mut db, "del \"x (`y\" where a = 5 require 1").unwrap_err();
+    assert_eq!(e.reason(), None, "{e}");
 }

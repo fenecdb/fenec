@@ -14,7 +14,7 @@ const tail = (text: string, lines = 8) => text.trim().split("\n").slice(-lines).
 export function heldNotice(name: string, serverSaid: string): Notice {
 	return {
 		title: "This database is open in another program",
-		message: `${name} is open in another program: another fenec studio, a fenec-server, or an app that uses the file.`,
+		message: `${name} is open in another program: another fenec studio, a fenec-server, the fenec shell, or an app that uses the file.`,
 		hint: "Close it there first. Two programs over one file would corrupt it.",
 		detail: tail(serverSaid),
 		actions: [{ id: "retry", label: "Try again" }],
