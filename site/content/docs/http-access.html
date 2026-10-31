@@ -465,8 +465,8 @@ sign with. An <code>EC</code> key on the P-256 curve verifies ES256 tokens
 whole file is refused, as it is for an RSA key under 2048 bits. A file
 whose malformed P-256 key an earlier version skipped therefore no longer
 loads: at the start the server refuses it, and on a reload it keeps the
-keys it read last. A token issued by one of them is taken with its public
-keys alone. Keys of any other kind (<code>OKP</code>, an <code>EC</code>
+keys it read last. A token one of these providers issues is taken with
+its public keys alone. Keys of any other kind (<code>OKP</code>, an <code>EC</code>
 key on P-384 or P-521) are skipped, and a token signed with EdDSA, PS256,
 ES384, ES512, RS384 or RS512 is refused (401). A key is only used for
 its own algorithm: an RSA modulus is public, and taken as an HS256 secret it

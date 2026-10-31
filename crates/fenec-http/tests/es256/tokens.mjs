@@ -59,6 +59,10 @@ const lines = [
   // Algorithms this server does not take, signed right.
   ['es384', token({ alg: 'ES384', kid: 'e384' }, { sub: 'alice', exp: EXP }, 'sha384', p384)],
   ['eddsa', token({ alg: 'EdDSA', kid: 'ed' }, { sub: 'alice', exp: EXP }, null, ed)],
+  // Issued for an audience, the server's and another app's: under
+  // --jwt-audience the signature is good either way, and the claim decides.
+  ['aud-ours', token({ alg: 'ES256', kid: 'e1' }, { sub: 'alice', aud: 'notes-api', exp: EXP }, 'sha256', e1)],
+  ['aud-other', token({ alg: 'ES256', kid: 'e1' }, { sub: 'alice', aud: 'billing-api', exp: EXP }, 'sha256', e1)],
 ];
 
 console.log(JSON.stringify(jwks));
