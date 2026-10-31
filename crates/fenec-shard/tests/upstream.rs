@@ -1,10 +1,11 @@
 //! The router's pooled connections to a node, through a relay standing
 //! where the network does: it passes bytes both ways and, as told, passes
-//! the node's close of a connection on as a reset -- what macOS does to
-//! the router's end about a minute after the node's FIN -- or drops an
-//! answer the node sent and closes the router's end, as a node that ran a
-//! request and went down before answering would. It counts the
-//! connections the router let go of, which a held claim's client gone
+//! the node's close of a connection on as a FIN and then a reset -- what
+//! macOS does to the router's end about a minute after the node's FIN --
+//! or drops an answer the node sent and closes the router's end, as a node
+//! that ran a request and went down before answering would. A connection
+//! counts as closed once the router's system has taken its FIN. It counts
+//! the connections the router let go of, which a held claim's client gone
 //! makes the router do.
 
 use fenec_http::tenants::Tenants;
@@ -66,7 +67,8 @@ impl Relay {
     }
 
     /// Waits for every connection to be closed, each by the node's idle
-    /// timeout and passed on to the router.
+    /// timeout and passed on to the router, whose system has taken the
+    /// close.
     fn until_all_closed(&self) {
         let open = self.shared.open.lock().unwrap();
         let (open, waited) = self
@@ -134,13 +136,63 @@ fn pass(s: &Arc<Shared>, router: TcpStream) {
         }
     }
     node_done.store(true, Ordering::SeqCst);
+    // Set before the socket is shut both ways, which macOS's `setsockopt`
+    // then refuses (EINVAL).
     if s.reset && !swallowed {
         reset_on_close(&to_router);
     }
     // Wakes the copy the other way, which then lets go of its handle, so
-    // this one's close is the socket's: a FIN, or the reset.
+    // this one's close is the socket's.
     let _ = to_router.shutdown(Shutdown::Read);
     let _ = up.join();
+    // The node's end goes on as a FIN, and the connection is counted closed
+    // only once the router's system has taken it: a loopback FIN is taken a
+    // moment after the call that sent it returns (6 to 14 us on an M1, busy
+    // or idle), and the router's look before a write cannot see a close on
+    // its way -- a write it then sends may have run, by all it can tell, and
+    // is the client's 502. Counted at the close, a test sending the next
+    // request raced the FIN to the router's socket and lost on macOS CI:
+    // "Connection reset by peer" for the write the test said lands once.
+    // Reset, the router's end is reset after the FIN it took, as macOS
+    // resets it a minute after the node's FIN.
+    let _ = to_router.shutdown(Shutdown::Write);
+    until_fin_taken(&to_router);
+}
+
+/// Waits for the peer of `s`, whose end was just shut for writing, to have
+/// acknowledged the FIN: its system has taken it then -- the ACK is sent as
+/// the FIN is processed -- so a look at its end finds the close. Read as the
+/// connection's TCP state, which leaves FIN_WAIT_1, CLOSING or LAST_ACK on
+/// that ACK alone, or is gone with the connection.
+fn until_fin_taken(s: &TcpStream) {
+    use std::os::fd::AsRawFd;
+    extern "C" {
+        fn getsockopt(fd: i32, level: i32, name: i32, value: *mut u8, len: *mut u32) -> i32;
+    }
+    // `TCP_CONNECTION_INFO` and `TCP_INFO`, both opening with the state,
+    // and the numbers of FIN_WAIT_1, CLOSING and LAST_ACK there. The crate
+    // takes no `libc`, so they are each system's.
+    #[cfg(target_vendor = "apple")]
+    let (name, unacked) = (0x106, [6u8, 7, 8]);
+    #[cfg(not(target_vendor = "apple"))]
+    let (name, unacked) = (11, [4u8, 11, 9]);
+    const IPPROTO_TCP: i32 = 6;
+    let start = Instant::now();
+    loop {
+        let mut info = [0u8; 512];
+        let mut len = info.len() as u32;
+        let fd = s.as_raw_fd();
+        // SAFETY: `len` bytes of `info`, which outlives the call.
+        let rc = unsafe { getsockopt(fd, IPPROTO_TCP, name, info.as_mut_ptr(), &mut len) };
+        if rc != 0 || len == 0 || !unacked.contains(&info[0]) {
+            return;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "the router's end never took the FIN"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 /// `SO_LINGER` of zero: the socket's close resets the connection. The
@@ -334,7 +386,10 @@ fn titles(s: &Setup) -> Vec<String> {
 /// such a socket there, and the error was not one the retry knew. Passed
 /// on as the FIN alone, a router that sent a write without looking would
 /// read the end of the connection after it, and could not tell that the
-/// node never ran it.
+/// node never ran it. The next write goes out once the router's system
+/// has taken the close ([`until_fin_taken`]): one still on its way is a
+/// close the look cannot see, and the write's 502 the router's answer to
+/// it (the `upstream` module's comment).
 fn idle_close(tag: &str, reset: bool) {
     let s = setup(tag, Some(Duration::from_millis(200)), reset);
     let r = put(&s.router, "first", "");
