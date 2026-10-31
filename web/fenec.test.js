@@ -614,6 +614,9 @@ test('named statements are a server\'s: the module refuses a definition and a ca
   assert.throws(() => db.run('get t where a = $_'), /expected a number after `\$`/);
   assert.throws(() => db.run('CREATE FUNCTION f() RETURNS int'), (e) => !/named statement/.test(e.message));
   assert.throws(() => db.run('describe statement s'), (e) => !/named statement/.test(e.message));
+  // Their words reserve nothing: each is SQL's alias still.
+  assert.deepEqual(db.run('select a from t call').rows, []);
+  assert.deepEqual(db.run('select a statements from t').rows, []);
 });
 
 test('a claim picks the oldest ready rows and answers them, in the module', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {

@@ -14,8 +14,8 @@
 use crate::codec;
 use crate::error::{Error, Result};
 use crate::query::{
-    Column, Count, Expr, Facet, Flat, Fuse, Lookup, Mark, Match, Near, Pick, Require, Rerank,
-    Select, Sort, Statement,
+    ArithOp, CmpOp, Column, Count, Expr, Facet, Flat, Fuse, Lookup, Mark, Match, Near, Pick,
+    Require, Rerank, Select, Sort, Statement,
 };
 use crate::value::{DataType, Value};
 
@@ -536,6 +536,30 @@ fn each_collection<'a>(s: &'a Statement, f: &mut dyn FnMut(&str)) {
     }
 }
 
+/// An operator's byte in the canonical tree: fixed here, never the
+/// variant's place in `CmpOp`, so reordering the enum or adding to it moves
+/// no stored digest.
+fn cmp_byte(op: CmpOp) -> u64 {
+    match op {
+        CmpOp::Eq => 0,
+        CmpOp::Ne => 1,
+        CmpOp::Lt => 2,
+        CmpOp::Le => 3,
+        CmpOp::Gt => 4,
+        CmpOp::Ge => 5,
+    }
+}
+
+/// As [`cmp_byte`], for `ArithOp`.
+fn arith_byte(op: ArithOp) -> u64 {
+    match op {
+        ArithOp::Add => 0,
+        ArithOp::Sub => 1,
+        ArithOp::Mul => 2,
+        ArithOp::Div => 3,
+    }
+}
+
 /// The canonical tree's writer ([`Definition::canonical`]).
 struct Canon(Vec<u8>);
 
@@ -741,7 +765,7 @@ impl Canon {
             }
             Expr::Cmp(op, a, b) => {
                 self.node(7);
-                self.uint(*op as u64);
+                self.uint(cmp_byte(*op));
                 self.expr(a);
                 self.expr(b);
             }
@@ -774,7 +798,7 @@ impl Canon {
             }
             Expr::Arith(op, a, b) => {
                 self.node(14);
-                self.uint(*op as u64);
+                self.uint(arith_byte(*op));
                 self.expr(a);
                 self.expr(b);
             }

@@ -700,6 +700,37 @@ fn a_body_s_guards_say_why() {
     assert_ne!(d.digest().unwrap(), definition(TRANSFER).digest().unwrap());
 }
 
+/// `describe statement` at the text's end is the collection `statement`'s
+/// description, and a name after it makes it a named statement's: the
+/// reading says the end decided it, so the shell holds it for its next
+/// line rather than run it at Enter.
+#[test]
+fn describe_statement_at_the_end_waits_for_its_name() {
+    use fenec_ql::{reading, Rest};
+    assert!(reading("DESCRIBE STATEMENT -- its name next\n").open);
+    let r = reading("describe statement");
+    assert!(r.open, "{r:?}");
+    let Rest::Last(0, s) = &r.rest else {
+        panic!("{r:?}")
+    };
+    assert_eq!(**s, Statement::Describe("statement".into()));
+    let r = reading("describe statement\ntransfer");
+    assert!(!r.open, "{r:?}");
+    let Rest::Last(0, s) = &r.rest else {
+        panic!("{r:?}")
+    };
+    assert_eq!(**s, Statement::DescribeStatement("transfer".into()));
+    for whole in [
+        "describe statement transfer",
+        "describe notes",
+        "describe statement;",
+        "get notes count",
+        "get notes count\n",
+    ] {
+        assert!(!reading(whole).open, "{whole}");
+    }
+}
+
 /// `end` closes a body: a name SQL writes without `as` takes it nowhere in
 /// one, and anywhere outside one as before.
 #[test]

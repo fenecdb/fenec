@@ -592,8 +592,16 @@ fn typed_a_definition_reads_on_to_its_end() {
     t.wait_for("not built yet", 2);
     t.typed("get notes count\n");
     t.wait_for("(1 rows", 1);
+    // `describe statement` at its line's end waits for the name, which
+    // makes it a named statement's description, rather than describe the
+    // collection `statement` at Enter.
+    t.typed("describe statement\n");
+    t.typed("transfer\n");
+    t.typed("\n");
+    t.wait_for("statement `transfer`", 1);
     t.typed(".quit\n");
     let out = t.end();
+    assert!(!out.contains("collection `statement`"), "{out}");
     assert_eq!(out.matches("not built yet").count(), 2, "{out}");
     assert!(!out.contains("begins no statement"), "{out}");
     assert_eq!(count(&f, ""), 5);

@@ -151,8 +151,11 @@ const TAKEN: [&str; 27] = [
 
 /// The words a statement begins with, and SQL's that `Parser::statement`
 /// answers: one a `get` stops at is the next statement's, any other an
-/// alias or a mistake.
-const COMMANDS: [&str; 22] = [
+/// alias or a mistake. Named statements' `call` and `statements` are not
+/// among them ([`NAMED_COMMANDS`]): reserved, they took `select a from t
+/// call` and `count(*) statements` from SQL, which reserves neither
+/// (PostgreSQL's `CALL` is a word any alias takes).
+const COMMANDS: [&str; 20] = [
     "get",
     "select",
     "put",
@@ -173,9 +176,13 @@ const COMMANDS: [&str; 22] = [
     "start",
     "commit",
     "rollback",
-    "call",
-    "statements",
 ];
+
+/// The words named statements begin with, which an alias still takes: a
+/// text reads `call` and `statements` as a statement only where one may
+/// begin, and a statement's name is neither.
+#[cfg(feature = "statements")]
+const NAMED_COMMANDS: [&str; 2] = ["call", "statements"];
 
 /// What a definition or a call is refused with where this build has no
 /// named statements (fenec-ql's `statements` feature): the browser module.
@@ -356,6 +363,12 @@ pub struct Reading {
     pub whole: Vec<(usize, usize)>,
     /// What follows them.
     pub rest: Rest,
+    /// Whether the text's end decided which statement the last one is
+    /// (`left_open`): `describe statement` is the collection `statement`'s
+    /// description alone and a named statement's with a name on the next
+    /// line. A reader a line at a time waits for the next line before it
+    /// runs one, whatever its kind.
+    pub open: bool,
 }
 
 /// What a [`Reading`] ends in.
@@ -470,6 +483,7 @@ pub fn reading(src: &str) -> Reading {
             return Reading {
                 whole: Vec::new(),
                 rest: Rest::Refused(r),
+                open: false,
             };
         }
     };
@@ -493,6 +507,7 @@ pub fn reading(src: &str) -> Reading {
     // every row's delete.
     let mut whole: Vec<usize> = Vec::new();
     let mut last: Option<(usize, Statement, bool, bool)> = None;
+    let mut open = false;
     let rest = loop {
         if p.semis() {
             if let Some((.., ended)) = &mut last {
@@ -505,7 +520,10 @@ pub fn reading(src: &str) -> Reading {
                     whole.push(at);
                     Rest::Nothing
                 }
-                Some((at, s, ..)) => Rest::Last(at, Box::new(s)),
+                Some((at, s, cut, _)) => {
+                    open = cut && left_open(&s);
+                    Rest::Last(at, Box::new(s))
+                }
                 None => Rest::Nothing,
             };
         }
@@ -572,6 +590,7 @@ pub fn reading(src: &str) -> Reading {
     Reading {
         whole: whole.iter().copied().zip(ends).collect(),
         rest,
+        open,
     }
 }
 
@@ -585,10 +604,25 @@ fn fixed(e: &Expr) -> bool {
     matches!(e, Expr::Lit(_) | Expr::Param(_))
 }
 
-/// Whether a statement begins with `w` ([`COMMANDS`]).
+/// Whether `s`, read whole at the text's end with the end marked
+/// (`Parser::cut`), is another statement with a word more: `describe
+/// statement` is the collection `statement`'s description, and a named
+/// statement's with its name on the next line. Not every mark: most are
+/// left by a reading tried and dropped (`get notes count` tries SQL's list
+/// first), and a read the next line may go on with runs at Enter all the
+/// same -- its `where` begins no statement, and says so.
+fn left_open(s: &Statement) -> bool {
+    cfg!(feature = "statements")
+        && matches!(s, Statement::Describe(n) if n.eq_ignore_ascii_case("statement"))
+}
+
+/// Whether a statement begins with `w` ([`COMMANDS`], [`NAMED_COMMANDS`]).
 #[cfg(feature = "statements")]
 fn is_command(w: &str) -> bool {
-    COMMANDS.iter().any(|c| w.eq_ignore_ascii_case(c))
+    COMMANDS
+        .iter()
+        .chain(&NAMED_COMMANDS)
+        .any(|c| w.eq_ignore_ascii_case(c))
 }
 
 /// Why a call's argument is no value, if it is not: it reads no row, so it
@@ -949,6 +983,14 @@ impl Parser {
                 let named = self.peek_kw("statement")
                     && matches!(self.toks.get(self.i + 1).map(|t| &t.tok),
                         Some(Tok::Ident(w) | Tok::Str(w)) if !is_command(w));
+                // `describe statement` at the text's end: alone it is the
+                // collection `statement`'s, and a name on the next line
+                // makes it a named statement's.
+                #[cfg(feature = "statements")]
+                {
+                    self.cut |= self.peek_kw("statement")
+                        && matches!(self.toks.get(self.i + 1).map(|t| &t.tok), Some(Tok::Eof));
+                }
                 #[cfg(feature = "statements")]
                 if named {
                     self.next();
@@ -3960,8 +4002,21 @@ impl Parser {
     #[inline(never)]
     fn call_statement(&mut self) -> Result<Statement> {
         use fenec_core::named::{Args, Call};
+        let at = self.i;
         self.next();
-        let name = self.statement_name()?;
+        let name = match self.statement_name() {
+            Ok(name) => name,
+            // `call` at the text's end: a name to come, or the alias of the
+            // statement before it (`select a call`, with `from t` to come),
+            // which reserves no word. Not consumed, and cut short, so the
+            // reading holds the two together until the next line says.
+            Err(e) if self.at_eof() => {
+                self.i = at;
+                self.cut = true;
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        };
         // `call transfer` at a line's end: its document may come on the
         // next.
         self.cut |= self.at_eof();
@@ -5102,6 +5157,13 @@ mod tests {
         "call transfer $1 as $2",
         "CALL transfer(1, 2, amount => 300)",
         "call purge",
+        // `call` and `statements` are aliases still, in a table's place and
+        // a column's.
+        "select a from t call",
+        "select a call from t",
+        "select count(*) statements from t",
+        "select c.a, call.b from t c join calls call on call.id = c.id",
+        "select a from t statements",
     ];
 
     /// The words of a text, cut where the white space between them is.
@@ -5251,6 +5313,11 @@ mod tests {
                 "select count(*) filter (where tier is null) as nulls, sum(t) filter (where k = 1)",
                 "select count(*) filter (where tier is null) as nulls, sum(t) filter (where k = 1) as",
                 "select count(*) filter (where tier is null) as nulls, sum(t) filter (where k = 1) as s",
+                // And of the aliases named statements' words still are.
+                "select count(*)",
+                "select count(*) statements",
+                "select c.a,",
+                "select c.a, call.b",
             ]
         );
         // A refusal of what was read stands at once, wherever it is placed.

@@ -581,7 +581,10 @@ impl Reader {
             },
             Rest::Last(at, s) => {
                 self.keep(at);
-                if self.runs_now(&s) {
+                // A statement the text's end left open -- `describe
+                // statement`, with a name to come -- waits, whatever its
+                // kind, as a write does.
+                if !r.open && self.runs_now(&s) {
                     run(db, &self.buf);
                     self.clear();
                     self.settled(db);
