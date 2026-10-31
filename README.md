@@ -191,8 +191,12 @@ and the tarball, the image and the language packages too; the tap's formula is
 ```bash
 ./target/release/fenec data.fenec              # interactive
 ./target/release/fenec data.fenec -c 'get docs limit 5'
+./target/release/fenec --read-only data.fenec  # a server's file, read beside it
 ```
 
+The shell holds `data.fenec.lock` while it has the file open, as the server
+does: a file a server, an agent's session, an app or another shell has open is
+refused, its holder named, since two processes writing one file corrupt it.
 [The shell](https://fenecdb.com/docs/shell) has a first session and its flags.
 
 **Browser.** Dependency-free ES modules and the wasm file beside them:

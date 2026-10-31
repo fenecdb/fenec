@@ -164,7 +164,13 @@ before refuses (a graph's, rebuilds from), never one it would misread.
 Never two processes over one file: whatever writes a served file -- the
 endpoint, a follower, the graph keeper, `--follow`'s mirror -- is a
 `fenec-server` thread, never a binary of its own, and a block is open only
-under its opener's write lock.
+under its opener's write lock. These open a file to write it, or rename
+one into its place, only under `<file>.lock` (`fenec_abi::lock`), refused
+while another holds it: `fenec-server --file`, the native library, and
+every `fenec` way in -- the shell, `-c`, a script, `import`, a `backup` or
+`restore` into a file, `.save`, `mcp --file`; a tool that only looks
+(`--read-only`, `fenec types`) takes none. Not yet: a `--dir` node's tenant
+files, fenec-shard's directory file, a file reached through a link.
 
 **[A block's documents are built beside the
 readers](docs/design/engine.md#prepared-blocks)** (`Database::prepare`,
@@ -422,7 +428,7 @@ text, and a read past `--mcp-max-rows` or `--mcp-max-bytes` is refused,
 never cut. The origin is asked before the token, and with no token only a
 `Host` naming localhost or an address is answered; `write` never changes a
 schema or compacts. `<file>.lock` (`fenec_abi::lock`) is taken by `fenec
-mcp --file`, `fenec-server --file` and the native library alike.
+mcp --file`, `fenec-server --file`, the native library and the shell alike.
 
 **[An `Idempotency-Key` makes a write
 once.](docs/design/http.md#idempotency-keys)** The write and its key's
