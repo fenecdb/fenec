@@ -21,7 +21,7 @@
 // by its timeout. A process is not stopped here.)
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { assertClean, data, describe, mine, procs, startApp, startServer, step, until, waitFor, waitStudio, log } from './lib.mjs';
+import { assertClean, cmd, data, describe, forgetServeItems, mine, procs, startApp, startServer, step, until, waitFor, waitStudio, log } from './lib.mjs';
 
 /** The pipes and sockets each pid holds, from lsof: pid -> [{fd, type, own, peer}], `own` and `peer` the kernel's addresses of the two ends. */
 function ends(pids) {
@@ -70,25 +70,29 @@ step('the control: a process that holds another one\'s stdin write end is found'
 
 const A = data('small', 50);
 const B = data('second', 20);
+const C = data('served-one', 10);
 
 const app = startApp('orphan', { FENEC_DESKTOP_OPEN: `${A}:${B}` });
 const a = await waitFor((l) => l.what === 'server-started' && l.path === A, 60000, 'the first server started');
 const b = await waitFor((l) => l.what === 'server-started' && l.path === B, 60000, 'the second server started');
 await waitStudio(`file:${A}`);
 await waitStudio(`file:${B}`);
+// A served database's server, started after both: the same pipe, the same end, whatever its window does.
+cmd({ cmd: 'serve', path: C });
+const c = await waitFor((l) => l.what === 'served' && l.path === C, 60000, 'the served one started');
 
 step('the write end of each server\'s stdin is held by the app, and by no server');
 const appPids = mine().filter((p) => !p.command.includes('fenec-server')).map((p) => p.pid);
 assert.ok(appPids.length > 0, 'the app\'s own processes');
-const table = ends([a.pid, b.pid, ...appPids]);
-for (const [name, server] of [['A', a], ['B', b]]) {
+const table = ends([a.pid, b.pid, c.pid, ...appPids]);
+for (const [name, server] of [['A', a], ['B', b], ['C, served', c]]) {
   const writers = writersOfStdin(table, server.pid);
   log(`${name} (${server.pid}) is written to by`, writers.join(', '));
   assert.ok(writers.length > 0, `${name}'s stdin is written to by somebody (else the reading sees nothing)`);
   assert.deepEqual(writers.filter((p) => !appPids.includes(p)), [], `${name}'s stdin is held by the app alone, not by the other server`);
 }
 
-step('SIGKILL the app (everything of it but its servers): both servers end by themselves');
+step('SIGKILL the app (everything of it but its servers): every server ends by itself, the served one too');
 for (const pid of appPids) {
   try {
     process.kill(pid, 'SIGKILL');
@@ -97,14 +101,15 @@ for (const pid of appPids) {
   }
 }
 const gone = (pid) => !procs().some((p) => p.pid === pid);
-await until(() => gone(a.pid) && gone(b.pid), 30000, 'both servers ending');
-log('both gone');
+await until(() => gone(a.pid) && gone(b.pid) && gone(c.pid), 30000, 'the servers ending');
+log('all gone');
 
 step('and each file is free: another program opens it');
-for (const file of [A, B]) {
+for (const file of [A, B, C]) {
   const probe = await startServer(['--file', file, '--http', '127.0.0.1:0'], { FENEC_HTTP_TOKEN: 'x' });
   await probe.stop();
 }
 assert.equal(mine().length, 0, `nothing left:\n${describe(mine())}`);
+forgetServeItems();
 void app;
 log('clean');

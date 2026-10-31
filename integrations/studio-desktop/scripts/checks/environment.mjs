@@ -9,7 +9,7 @@
 // (A shipped app does not read it: checks/release.mjs.)
 import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { D, SERVER, assertClean, data, quit, startApp, step, waitFor, waitStudio, log } from './lib.mjs';
+import { D, SERVER, assertClean, cmd, data, lines, quit, startApp, step, waitFor, waitStudio, log } from './lib.mjs';
 
 assertClean('before');
 const SMALL = data('small', 20);
@@ -25,6 +25,8 @@ const LEAKS = {
   OTEL_SERVICE_NAME: 'leak',
   FENEC_JWT_SECRET: 'leak-jwt',
   FENEC_HTTP_TOKEN: 'leak-old-token',
+  FENEC_REPLICATION_TOKEN: 'leak-repl',
+  FENEC_KEY_FILE: '/tmp/leak.key',
   AWS_SECRET_ACCESS_KEY: 'leak-aws',
   GITHUB_TOKEN: 'leak-gh',
 };
@@ -33,19 +35,37 @@ await waitFor((l) => l.what === 'server-started', 60000, 'the server started');
 await waitStudio(`file:${SMALL}`);
 
 step('the environment the server was started with');
-const names = readFileSync(SEEN, 'utf8')
-  .split('\n')
-  .filter(Boolean)
-  .map((l) => l.slice(0, l.indexOf('=')));
+const seen = () => Object.fromEntries(readFileSync(SEEN, 'utf8').split('\n').filter(Boolean).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
+const names = Object.keys(seen());
 log('names:', names.join(' '));
-for (const leak of ['OTEL_EXPORTER_OTLP_ENDPOINT', 'OTEL_SERVICE_NAME', 'FENEC_JWT_SECRET', 'AWS_SECRET_ACCESS_KEY', 'GITHUB_TOKEN', 'FENEC_DESKTOP_REPORT', 'FENEC_DESKTOP_CONTROL', 'FENEC_DESKTOP_OPEN', 'FENEC_SERVER_BIN']) {
+for (const leak of ['OTEL_EXPORTER_OTLP_ENDPOINT', 'OTEL_SERVICE_NAME', 'FENEC_JWT_SECRET', 'FENEC_KEY_FILE', 'AWS_SECRET_ACCESS_KEY', 'GITHUB_TOKEN', 'FENEC_DESKTOP_REPORT', 'FENEC_DESKTOP_CONTROL', 'FENEC_DESKTOP_OPEN', 'FENEC_SERVER_BIN']) {
   assert.ok(!names.includes(leak), `${leak} must not reach the server`);
 }
-const ALLOWED = /^(HOME|PATH|TMPDIR|LANG|USER|LOGNAME|TZ|LC_[A-Z]+|FENEC_HTTP_TOKEN|PWD|SHLVL|_|OLDPWD)$/;
+const ALLOWED = /^(HOME|PATH|TMPDIR|LANG|USER|LOGNAME|TZ|LC_[A-Z]+|FENEC_HTTP_TOKEN|FENEC_REPLICATION_TOKEN|PWD|SHLVL|_|OLDPWD)$/;
 assert.deepEqual(names.filter((n) => !ALLOWED.test(n)), [], 'only the allowlist (and what the wrapper script\'s own shell adds)');
-const env = Object.fromEntries(readFileSync(SEEN, 'utf8').split('\n').filter(Boolean).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
+const env = seen();
 assert.notEqual(env.FENEC_HTTP_TOKEN, 'leak-old-token', 'the app\'s own token, not one that was in its environment');
 assert.match(env.FENEC_HTTP_TOKEN, /^[A-Za-z0-9_-]{43}$/, '32 random bytes, base64url');
+// No backups set up: no replication token, which would turn /_changes on too; and not the app's own environment's.
+assert.equal(env.FENEC_REPLICATION_TOKEN, undefined, 'a file with no backups set up gets no replication token');
+
+step('its backups set up, the server started next gets a replication token of the app\'s own');
+let n = lines().length;
+cmd({ cmd: 'set-archive', path: SMALL, dir: `${D}/wrap/backups/small` });
+const setUp = await waitFor((l, i) => i >= n && l.what === 'set-archive-result', 30000, 'set up');
+assert.equal(setUp.ok, true, setUp.message);
+assert.match(setUp.message, /next start/, 'the server running now is said to take them from its next start');
+n = lines().length;
+cmd({ cmd: 'close', key: `file:${SMALL}` });
+await waitFor((l, i) => i >= n && l.what === 'server-stopped', 30000, 'the window\'s server stopped');
+n = lines().length;
+cmd({ cmd: 'open', path: SMALL });
+await waitStudio(`file:${SMALL}`, n);
+const backed = seen();
+// The replication token a backup asks the server's image with: the app's own as well, and another.
+assert.notEqual(backed.FENEC_REPLICATION_TOKEN, 'leak-repl');
+assert.match(backed.FENEC_REPLICATION_TOKEN ?? '', /^[A-Za-z0-9_-]{43}$/);
+assert.notEqual(backed.FENEC_REPLICATION_TOKEN, backed.FENEC_HTTP_TOKEN);
 
 step('quit');
 await quit(app);

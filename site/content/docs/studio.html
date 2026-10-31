@@ -437,42 +437,90 @@ its stdin, and it stops cleanly however the app ends.</p>
 
 <h2 id="desktop">Desktop app (beta)</h2>
 
-<p>On a Mac with Apple silicon the studio is also an app: open a database
-file, make a new one, or connect to a server, with no server of your own to
-start. It is not published for download yet; build it from source.</p>
+<p>On a Mac with Apple silicon the studio is also an app: make a database,
+open one, serve it to your apps, back it up, or connect to a server, with no
+server of your own to start. It is not published for download yet; build it
+from source.</p>
 
 <pre data-lang="bash">make studio-desktop
 
 open "integrations/studio-desktop/build/stable-macos-arm64/fenec studio.app"
 </pre>
 
+<figure class="shot">
+<img src="../images/studio-desktop-databases-dark.webp" width="1280" height="800" alt="fenec studio's desktop app, dark: the Databases list with three files, their size, collections, when each was opened and the port two of them are served on, and orders.fenec picked below it, with its rows, collections and dead space, the buttons to open it in the studio, back it up, compact it and reveal it in Finder, and its server's address and settings beside them">
+<figcaption>The databases on this Mac: what each holds, and which are served.</figcaption>
+</figure>
+
 <ul>
-  <li><b>A file.</b> File, Open… (or New Database…, or a double-click in
-    Finder). The app starts a <code>fenec-server</code> it carries, on the
-    file, and opens a window on that server's own <code>/_studio/</code>, so
-    the window does what the studio does in a browser. Closing the window
-    stops the server once it has written its checkpoint.</li>
+  <li><b>A file.</b> File, Open… (or a double-click in Finder). The app
+    starts a <code>fenec-server</code> it carries, on the file, and opens a
+    window on that server's own <code>/_studio/</code>, so the window does
+    what the studio does in a browser. Closing the window stops the server
+    once it has written its checkpoint.</li>
+  <li><b>A new database.</b> A name and a folder, and if you like a first
+    collection (<code>notes</code> with <code>title text, done
+    bool</code>), when a write is safe on disk (every write, every 250 ms, or
+    when the system writes), or a folder of backups to start from. The
+    bundled server makes the file; the app never writes the format itself.</li>
+  <li><b>Serve it to your apps.</b> A port (empty takes any free one, read
+    from the server's <code>listening on:</code> line), this Mac alone or
+    your network, the studio, compaction, <a href="/docs/mcp">MCP</a> and
+    metrics on a port of their own. The sheet shows the command the app runs.
+    The token is made once and kept in the Keychain; the server gets it in
+    its environment, never on its command line; Show, Copy and New token are
+    beside it, and a copied token is taken off the clipboard a minute later if
+    it is still there. Opening a served file opens a window on that server rather
+    than a second one.</li>
+  <li><b>Servers.</b> Each one served, running or stopped: its statements a
+    second, median answer, connections and file size from its own
+    <code>/_metrics</code>, how to connect from curl, JavaScript, Python or a
+    <code>.env</code> (the token stays out), and its output. A server runs
+    until you stop it or quit the app; after a relaunch it is listed stopped,
+    with the settings it ran with, and starts again with one click. Nothing
+    starts at login, and no server outlives the app.</li>
+  <li><b>Backups.</b> A folder for each database's backups: Back up now takes
+    an image of it while it runs (<code>fenec backup</code>), sealed with a key
+    file if you choose one (<code>fenec key</code> makes it), which must be
+    kept outside that folder; Verify reads the folder as a restore would;
+    Restore… makes a new file from any image in it and opens it, and never
+    writes over a file, a served one least of all. The folder is
+    <code>fenec archive</code>'s layout, so the shell's <code>verify</code>,
+    <code>restore</code> and <code>prune</code> read it too. Only a database
+    whose backups are set up gets a replication token, which a backup reads its
+    image with and which turns on <a href="/docs/http-reference#changes"><code>/_changes</code></a>.</li>
   <li><b>A saved server.</b> A name, an address, a token and, for a tenant
     node, a tenant. The token is kept in the Keychain, never in the app's own
-    files, and is sent only to the address it was saved for. The window is on
-    that server's studio, so there is no CORS to set up. The server must run
-    with <code>--studio</code>.</li>
+    files, and is sent only to the address it was saved for: changing the
+    address forgets it. Check now says whether the server answers, in how
+    long, and whether the token is taken. The window is on that server's
+    studio, so there is no CORS to set up. The server must run with
+    <code>--studio</code>.</li>
   <li><b>A message, not a blank window.</b> A file another program has open, a
-    server that stopped, one that cannot be reached, one with no studio and a
-    token it refuses each say so in a window of the app's own, with the way
-    forward.</li>
+    port another program has, a server that stopped, one that cannot be
+    reached, one with no studio and a token it refuses each say so in a window
+    of the app's own, with the way forward.</li>
   <li><b>macOS only for now,</b> Apple silicon, and not yet signed. An app
     you build opens as it is; an unsigned one you downloaded needs
     <code>xattr -cr "fenec studio.app"</code> first.</li>
 </ul>
 
+<figure class="shot">
+<img src="../images/studio-desktop-servers-dark.webp" width="1280" height="800" alt="fenec studio's desktop app, dark: the Servers list with two served databases, and orders.fenec picked: running, its statements a second, median answer, connections and file size, its settings, a curl command to connect with the token left out, and the server's own output">
+<figcaption>A served database: its numbers, how to connect, and what the server says.</figcaption>
+</figure>
+
 <details class="deep"><summary>How the token is kept, and what the build needs</summary>
 <p>A token is never in a URL or on a command line: a file's server is given
-a random one in its environment, and the window hands it to the studio as
+a random one in its environment, a served database's server the one the
+Keychain keeps for that file, and the window hands it to the studio as
 <a href="#host"><code>window.fenecHost</code></a>, frozen and never stored,
 only on that server's origin, before any of the page's code runs. A server the
 app started does not outlive it: its stdin is a pipe the app holds, and the
-server stops when it ends, <code>kill -9</code> of the app included. A studio window cannot call into the app (it has an event bridge that
+server stops when it ends, <code>kill -9</code> of the app included. A backup
+or restore under way is the shell's run, not a server: a quit stops it, and an
+app killed outright leaves it to finish alone. One instance of the app runs at
+a time: a second shows the first's window and quits. A studio window cannot call into the app (it has an event bridge that
 carries a message one way, and nothing else) and cannot leave its server's
 origin: a link to another site opens in your browser. The Keychain keeps the
 token from other users and from the pages, not from another program of yours:

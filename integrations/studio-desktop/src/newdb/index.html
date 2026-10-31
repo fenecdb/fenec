@@ -2,6 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<!-- The app's own page, with the bridge to the main process: its script and
+     style are the bundle's files alone (no inline script, no eval), and it
+     connects only to the bridge's socket on 127.0.0.1 (Electrobun's RPC).
+     Whatever a server or a file name puts in the page is text, and even
+     markup slipped in could neither run nor send anything elsewhere. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' views:; style-src 'self' views:; img-src 'self' views:; connect-src ws://127.0.0.1:*; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>New database</title>
@@ -10,20 +16,65 @@
 <body>
 <main class="dialog">
   <h1>New database</h1>
-  <p class="hint">A new file, opened in its own window. Pick the folder and name it.</p>
+  <p class="hint">One file holds everything: its collections, indexes and history. Nothing else to set up.</p>
   <form id="form" autocomplete="off">
-    <div class="field">
-      <label for="folder">Folder</label>
-      <div class="pick">
-        <input id="folder" name="folder" spellcheck="false" required>
-        <button type="button" id="choose">Choose…</button>
+    <div class="grid2">
+      <div class="field">
+        <label for="name">Name</label>
+        <input id="name" name="name" placeholder="orders" spellcheck="false" required>
+        <span class="hint" id="shown">The file is called <code id="file">orders.fenec</code>.</span>
+      </div>
+      <div class="field">
+        <label for="folder">Folder</label>
+        <div class="pick">
+          <input id="folder" name="folder" spellcheck="false" required>
+          <button type="button" id="choose">Choose…</button>
+        </div>
       </div>
     </div>
-    <div class="field">
-      <label for="name">Name</label>
-      <input id="name" name="name" placeholder="orders" spellcheck="false" required>
-      <span class="hint" id="shown">The file is called <code id="file">orders.fenec</code>.</span>
+
+    <fieldset>
+      <legend>Start from</legend>
+      <label class="choice"><input type="radio" name="start" value="empty" checked><span><span class="strong">Empty</span><span class="hint block">Collections come as you write, or declare a first one here.</span></span></label>
+      <label class="choice"><input type="radio" name="start" value="archive"><span><span class="strong">A backup</span><span class="hint block">Restore the newest image in a folder of backups made by the app, by fenec backup or by fenec archive.</span></span></label>
+    </fieldset>
+
+    <div id="empty-box">
+      <div class="grid2">
+        <div class="field">
+          <label for="coll"><span>First collection <span class="muted">(optional)</span></span></label>
+          <input id="coll" placeholder="notes" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="fields">Its fields</label>
+          <input id="fields" placeholder="title text, done bool" spellcheck="false">
+        </div>
+      </div>
     </div>
+
+    <div id="archive-box" hidden>
+      <div class="field">
+        <label for="archive">Folder of backups</label>
+        <div class="pick"><input id="archive" spellcheck="false"><button type="button" id="archive-choose">Choose…</button></div>
+      </div>
+      <div class="field">
+        <label for="key"><span>Key file <span class="muted">(if they are sealed)</span></span></label>
+        <div class="pick"><input id="key" spellcheck="false" placeholder="none"><button type="button" id="key-choose">Choose…</button></div>
+      </div>
+    </div>
+
+    <fieldset>
+      <legend>When a write is safe on disk</legend>
+      <div class="inline">
+        <label class="radio"><input type="radio" name="sync" value="always"> Every write</label>
+        <label class="radio"><input type="radio" name="sync" value="250" checked> Every 250 ms</label>
+        <label class="radio"><input type="radio" name="sync" value="off"> When the system writes</label>
+      </div>
+      <span class="hint" id="sync-note"></span>
+    </fieldset>
+
+    <label class="radio"><input type="checkbox" id="serve"> <span>Serve it for my apps once it is made <span class="muted">(you pick the port next)</span></span></label>
+
     <p class="err" id="error" role="alert"></p>
     <div class="buttons">
       <button type="button" id="cancel">Cancel</button>
