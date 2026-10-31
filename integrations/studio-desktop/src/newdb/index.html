@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>New database</title>
+<link rel="stylesheet" href="../ui/app.css">
+</head>
+<body>
+<main class="dialog">
+  <h1>New database</h1>
+  <p class="hint">A new file, opened in its own window. Pick the folder and name it.</p>
+  <form id="form" autocomplete="off">
+    <div class="field">
+      <label for="folder">Folder</label>
+      <div class="pick">
+        <input id="folder" name="folder" spellcheck="false" required>
+        <button type="button" id="choose">Choose…</button>
+      </div>
+    </div>
+    <div class="field">
+      <label for="name">Name</label>
+      <input id="name" name="name" placeholder="orders" spellcheck="false" required>
+      <span class="hint" id="shown">The file is called <code id="file">orders.fenec</code>.</span>
+    </div>
+    <p class="err" id="error" role="alert"></p>
+    <div class="buttons">
+      <button type="button" id="cancel">Cancel</button>
+      <button type="submit" id="create" class="primary">Create</button>
+    </div>
+  </form>
+</main>
+<script type="module" src="index.js"></script>
+</body>
+</html>

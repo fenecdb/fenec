@@ -11,7 +11,7 @@ to return, <code>where</code> the rows to keep, <code>order</code> their order,
 and <code>limit</code> and <code>offset</code> the page. Every clause is
 optional, so <code>get films</code> alone is every row.</p>
 
-<p>Run in <a href="quickstart.html#in-the-shell">the shell</a>, answers and all; the timings are from one run.</p>
+<p>Run in <a href="shell.html#quickstart">the shell</a>, answers and all; the timings are from one run.</p>
 
 <pre data-lang="text">fenec&gt; create collection films (title text, year int, rating float, tags [text]);
 collection `films` created
@@ -63,10 +63,11 @@ take a parameter wherever they take a number: a <code>get</code>'s, a
 <code>lookup</code> level's, an inner <code>get</code>'s, and a
 <code>set</code>'s or a <code>del</code>'s that picks its rows.</p>
 
+{{builder "docs: articles a page at a time" "docs: products with their newest reviews" "docs: a page of matches with its brands counted" "docs: ready jobs claimed a page at a time"}}
 <pre data-lang="fenecql">get articles where year = $1 order published desc limit $2 offset $3
 get products limit $1 lookup reviews on product_id order created desc limit $2
-get products match title $1 facet brand top $2 limit $3
-set jobs {owner: $1} where run_at &lt;= now() order run_at limit $2 returning *
+get products match title $1 limit $2 facet brand top $3
+set jobs {owner: $1} where run_at &lt;= now() order run_at asc limit $2 returning *
 </pre>
 
 <ul>
@@ -143,6 +144,7 @@ fields and paths, parameters and functions, with <code>+</code>
 <code>-</code> <code>*</code> <code>/</code>. It answers under the name
 <code>as</code> gives it; a field can be named again the same way.</p>
 
+{{builder "docs: a column worked out" "docs: columns named and worked out" "docs: a column of a case"}}
 <pre data-lang="fenecql">get ticks select sym, px * qty as notional where qty > 100
 get ticks select px as price, bucket(at, 1m) as minute, greatest(px, $1) as floor
 get orders select id, case when total >= 100 then "large" else "small" end as size

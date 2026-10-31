@@ -1,256 +1,168 @@
 <!--
 title: Quickstart — fenecdb
-description: Install fenecdb and run a first query in a few commands: in a browser tab from npm, on a server from Homebrew, an install script, a .deb or .rpm, the Docker image or a release binary and your language's client, or in the shell.
+description: Start fenec-server, make a collection, write two rows, query and search them with curl and from your language, and see them in fenec studio. About five minutes.
 -->
 
+{{moved_script}}
+
 <h1>Quickstart</h1>
-<p class="kicker">Install fenecdb, make a collection, write two rows and query
-them. Pick a path: a browser tab, a server you reach from your language, or the
-shell. Each is a few commands, and shows what you should see.</p>
-
-<p>The steps install release <b>{{version}}</b>, so what they print is what the
-release prints. The rest of these docs describe the repository's
-<code>main</code>, which can be ahead of it.</p>
-
-<h2 id="try">Try it now</h2>
-
-<p>Nothing to install: the <a href="../playground.html">Playground</a> is the
-real engine running in this tab, with three collections to browse, a FenecQL
-editor with examples, and rows you can edit. Nothing you type leaves your
-browser.</p>
-
-<h2 id="in-the-browser">In the browser</h2>
-
-<p>A database in the page. <code>@fenecdb/web</code> is the engine as
-WebAssembly and a dependency-free ES client. You need Node for npm and any
-static file server.</p>
+<p class="kicker">Start the server, write two rows, query and search them with
+curl and from your language, and look at them in the studio. About five
+minutes. For a database in a web page with no server, see <a
+href="quickstart-browser.html">Quickstart: in the browser</a>.</p>
 
 <ol class="steps-doc">
   <li>
-    <p>Install it into an empty folder.</p>
-<pre data-lang="bash">npm install @fenecdb/web</pre>
-  </li>
-  <li>
-    <p>Save this as <code>index.html</code> beside <code>node_modules</code>. It
-    opens a database, makes a collection, writes two rows and shows what two
-    queries return: the rows from 2020 on, newest first, and a search for a
-    word.</p>
-<pre data-lang="html" data-label="index.html">&lt;!doctype html&gt;
-&lt;meta charset="utf-8"&gt;
-&lt;pre id="out"&gt;loading…&lt;/pre&gt;
-&lt;script type="module"&gt;
-import { Fenec } from './node_modules/@fenecdb/web/fenec.js';
+    <p>Install <code>fenec-server</code> and start it on a file. It runs in
+    the foreground, so the next steps go in another terminal.</p>
 
-const db = await Fenec.open('./node_modules/@fenecdb/web/fenec.wasm');
+<div class="langs" data-langs data-key="fenec-install" data-tabs="Install on">
 
-db.run('create collection notes (title text @text, year int @sorted)');
-db.run('put notes {title: $1, year: $2}', ['Dunes', 2021]);
-db.run('put notes {title: $1, year: $2}', ['Night at the oasis', 2024]);
+<div class="lang" data-name="macOS and Linux">
+<pre data-lang="bash">curl -fsSL https://fenecdb.com/install.sh | sh</pre>
+<p>The script puts <code>fenec-server</code> and the shell in
+<code>~/.fenecdb/bin</code> and edits no shell file: it prints the
+<code>export</code> line that puts that directory on your <code>PATH</code>, and
+the next block runs it. Add the line to <code>~/.zshrc</code> or
+<code>~/.bashrc</code> to keep it.</p>
+<details class="deep"><summary>What the install script prints</summary>
+<pre data-lang="text" data-label="its last lines, on an Apple silicon Mac">Installed fenecdb {{version}} (aarch64-apple-darwin) in /Users/you/.fenecdb/bin:
+  fenec          the shell:  fenec scratch.fenec
+  fenec-server   the server: fenec-server --file notes.fenec
+  (fenec-server {{version}})
 
-const { rows } = db.run('get notes where year &gt;= $1 order year desc', [2020]);
-const hits = db.rows('get notes select title match title $1', ['oasis']);
+/Users/you/.fenecdb/bin is not on your PATH. Add it for this shell:
 
-document.querySelector('#out').textContent =
-  JSON.stringify(rows) + '\n' + JSON.stringify(hits);
-&lt;/script&gt;</pre>
-  </li>
-  <li>
-    <p>Serve the folder over HTTP.</p>
-<pre data-lang="bash">python3 -m http.server 8000      # or: npx serve</pre>
-  </li>
-  <li>
-    <p>Open <code>http://localhost:8000</code>. The page shows both answers, as
-    JSON.</p>
-<pre data-lang="text" data-label="the page">[{"id":2,"title":"Night at the oasis","year":2024},{"id":1,"title":"Dunes","year":2021}]
-[{"title":"Night at the oasis","_score":0.62239116}]</pre>
-  </li>
-</ol>
+  export PATH="$HOME/.fenecdb/bin:$PATH"
 
-<div class="note trap">
-  <p><b>It does not open over <code>file://</code>.</b> A page opened from disk
-  stays on <code>loading…</code>: the browser refuses module
-  <code>import</code>s and <code>WebAssembly.instantiateStreaming</code> without
-  an HTTP origin. Any static server works: <code>python3 -m http.server</code>,
-  <code>npx serve</code>, nginx.</p>
-</div>
+and put the same line in your shell's startup file (~/.zshrc, ~/.bashrc
+or ~/.profile) to keep it. For fish: fish_add_path "$HOME/.fenecdb/bin".
 
-<details class="deep"><summary>Bundlers, no npm, and Node</summary>
-<p>Serving <code>node_modules</code> as it is suits a first page. With a bundler
-you import <code>@fenecdb/web</code> and hand <code>Fenec.open</code> the
-module's URL, and a page whose queries run on a server imports
-<code>@fenecdb/web/client</code> and loads no module at all (<a
-href="javascript.html#packages">Which package</a>). No npm: the same files, the
-module and the <code>collate/</code> data beside them, are
-<code>fenec-web-v{{version}}.tar.gz</code> on the <a
-href="https://github.com/fenecdb/fenecdb/releases/tag/v{{version}}">release</a>.</p>
-
-<p>In Node, where <code>fetch</code> cannot resolve a relative path, hand
-<code>Fenec.open</code> the bytes:</p>
-
-<pre data-lang="js">import { readFile } from 'node:fs/promises';
-import { Fenec } from '@fenecdb/web';
-
-const wasm = await readFile(new URL(import.meta.resolve('@fenecdb/web/fenec.wasm')));
-const db = await Fenec.open(wasm);</pre>
-
-<p>The database lives in the tab's memory until you keep it: <code>persist</code>
-writes it to IndexedDB, <code>openFile</code> to a file of the origin private
-file system, and <code>db.live</code> keeps a list on screen in step with the
-rows (<a href="javascript.html#keeping">Keeping a database</a>, <a
-href="javascript.html#state">State in the page</a>). A page can declare its
-collections in code instead, and the open makes them.</p>
+A first query: https://fenecdb.com/docs/quickstart</pre>
 </details>
-
-<h2 id="as-a-server">As a server</h2>
-
-<p><code>fenec-server</code> is one process over one file, and every language
-reaches it over HTTP and JSON. Install it with Homebrew, the install script or
-a package, or start it from the Docker image or a release binary, then talk to
-it with <code>curl</code> and from your language.</p>
-
-<ol class="steps-doc">
-  <li>
-    <p>Start the server with a token. It runs in the foreground when it is
-    not the image, so the next steps go in another terminal.</p>
-
-<div class="langs" data-langs data-key="fenec-install" data-tabs="Install with">
+<pre data-lang="bash">export PATH="$HOME/.fenecdb/bin:$PATH"
+fenec-server --file notes.fenec --studio</pre>
+<pre data-lang="text" data-label="prints">opened: notes.fenec
+fenec-server {{version}}: notes.fenec  [sync=250 ms]
+fenec-http {{version}} listening on: http://127.0.0.1:8080  [no auth]</pre>
+</div>
 
 <div class="lang" data-name="Docker">
-<pre data-lang="bash">docker run -d --name fenecdb -v fenecdata:/data \
-  -p 127.0.0.1:8080:8080 -e FENEC_HTTP_TOKEN=secret \
-  ghcr.io/fenecdb/fenec-server:{{version}}</pre>
-<p>The image holds the server and nothing else; the data lives in the
-<code>fenecdata</code> volume. A container listens beyond localhost, so it asks
-for a token.</p>
-</div>
-
-<div class="lang" data-name="Homebrew">
-<pre data-lang="bash" data-label="install">brew install fenecdb/tap/fenecdb</pre>
-<pre data-lang="bash" data-label="run">FENEC_HTTP_TOKEN=secret fenec-server --file data.fenec</pre>
-<pre data-lang="text" data-label="prints">opened: data.fenec
-fenec-server {{version}}: data.fenec  [sync=250 ms]
-fenec-http {{version}} listening on: http://127.0.0.1:8080  [token]</pre>
-<p>The formula installs <code>fenec-server</code> and <code>fenec</code>, the
-shell, on macOS and Linux (arm64 and x86_64): the release's own binaries,
-checked against their SHA-256, not built on your machine.
-<code>brew upgrade fenecdb</code> takes the next release.</p>
-</div>
-
-<div class="lang" data-name="Install script">
-<pre data-lang="bash" data-label="install">curl -fsSL https://fenecdb.com/install.sh | sh</pre>
-<pre data-lang="bash" data-label="run">export PATH="$HOME/.fenecdb/bin:$PATH"   # the script prints this line
-FENEC_HTTP_TOKEN=secret fenec-server --file data.fenec</pre>
-<pre data-lang="text" data-label="prints">opened: data.fenec
-fenec-server {{version}}: data.fenec  [sync=250 ms]
-fenec-http {{version}} listening on: http://127.0.0.1:8080  [token]</pre>
-<p>It puts <code>fenec-server</code> and <code>fenec</code> in
-<code>~/.fenecdb/bin</code> (<code>FENEC_INSTALL</code> names another
-directory) with no <code>sudo</code>, and edits no shell file: it says how to
-put the directory on your <code>PATH</code> and leaves that to you. It
-downloads the latest release (<code>FENEC_VERSION={{version}}</code> names a
-release) from GitHub over https, with <code>curl</code> or a <code>wget</code>
-that checks certificates, and checks the tarball against the release's
-<code>SHA256SUMS</code> before it unpacks anything. That sum comes from the
-same release as the file, so it catches a damaged or cut-short download, not
-a release someone replaced. For macOS and Linux on arm64 and x86_64. To read
-it before it runs: <code>curl -fsSL https://fenecdb.com/install.sh | less</code>
-(<a href="https://fenecdb.com/install.sh">install.sh</a>).</p>
-</div>
-
-<div class="lang" data-name=".deb and .rpm">
-<pre data-lang="bash" data-label="Debian, Ubuntu">curl -fLO https://github.com/fenecdb/fenecdb/releases/download/v{{version}}/fenecdb_{{version}}-1_amd64.deb   # arm64 on an ARM machine
-sudo apt install ./fenecdb_{{version}}-1_amd64.deb</pre>
-<pre data-lang="bash" data-label="Fedora, RHEL">curl -fLO https://github.com/fenecdb/fenecdb/releases/download/v{{version}}/fenecdb-{{version}}-1.x86_64.rpm   # aarch64 on an ARM machine
-sudo dnf install ./fenecdb-{{version}}-1.x86_64.rpm</pre>
-<pre data-lang="bash" data-label="run">FENEC_HTTP_TOKEN=secret fenec-server --file data.fenec</pre>
-<p>Each release carries a package for amd64 and one for arm64, with its
-checksum in <code>SHA256SUMS</code>; releases after 0.1.11 have them. They
-install <code>fenec</code> and <code>fenec-server</code> in
-<code>/usr/bin</code> and depend on nothing: the binaries are static.</p>
-</div>
-
-<div class="lang" data-name="Release binary">
-<pre data-lang="bash" data-label="download">TARGET=aarch64-apple-darwin   # or x86_64-apple-darwin, aarch64-unknown-linux-musl, x86_64-unknown-linux-musl
-curl -LO https://github.com/fenecdb/fenecdb/releases/download/v{{version}}/fenec-v{{version}}-$TARGET.tar.gz
-tar -xzf fenec-v{{version}}-$TARGET.tar.gz
-cd fenec-v{{version}}-$TARGET</pre>
-<pre data-lang="bash" data-label="run">FENEC_HTTP_TOKEN=secret ./fenec-server --file data.fenec</pre>
-<pre data-lang="text" data-label="prints">opened: data.fenec
-fenec-server {{version}}: data.fenec  [sync=250 ms]
-fenec-http {{version}} listening on: http://127.0.0.1:8080  [token]</pre>
-<p>The folder holds <code>fenec-server</code> and <code>fenec</code>, the
-shell, and is the same download as the shell's below.</p>
+<pre data-lang="bash">docker run --rm --name quickstart -v quickstart:/data -p 127.0.0.1:8080:8080 \
+  ghcr.io/fenecdb/fenec-server:{{version}} \
+  --http 0.0.0.0:8080 --file /data/notes.fenec --studio --insecure</pre>
+<pre data-lang="text" data-label="prints">opened: /data/notes.fenec
+fenec-server {{version}}: /data/notes.fenec  [sync=250 ms]
+fenec-http {{version}} listening on: http://0.0.0.0:8080  [no auth]</pre>
+<p>A container listens beyond localhost, which the server allows only with a
+token or <code>--insecure</code>. Here the port is published to this machine
+alone (<code>127.0.0.1:8080</code>), so the flag opens nothing wider; put a token
+on the server before it is published any further (<a
+href="server.html#security">Security</a>). The file is in the
+<code>quickstart</code> volume.</p>
 </div>
 
 </div>
+
+    <p>The server listens on <code>127.0.0.1:8080</code>, which only this
+    machine reaches, and asks for no token (<code>[no auth]</code>).
+    <code>--studio</code> serves the admin page you will open in step 5. If
+    port 8080 is taken, start it with <code>--http 127.0.0.1:8081</code> (Docker:
+    <code>-p 127.0.0.1:8081:8080</code>) and use that port below. On Windows, use
+    Docker, or WSL with the macOS and Linux steps. Other ways to install:
+    Homebrew, a <code>.deb</code> or <code>.rpm</code>, a tarball, from source,
+    in <a href="install.html">Install</a>.</p>
   </li>
   <li>
-    <p>Check it is up. The route needs no token.</p>
-<pre data-lang="bash">curl -s http://127.0.0.1:8080/_health</pre>
-<pre data-lang="text" data-label="answer">{"ok":true}</pre>
-  </li>
-  <li>
-    <p>Make a collection and write two rows. The language is FenecQL, the
-    values go as parameters, and <code>secret</code> is the token you started
-    it with.</p>
-<pre data-lang="bash">curl -s http://127.0.0.1:8080/query -H 'Authorization: Bearer secret' \
-  -d '{"query": "create collection notes (title text @text, year int @sorted)"}'
-curl -s http://127.0.0.1:8080/query -H 'Authorization: Bearer secret' \
-  -d '{"query": "put notes {title: $1, year: $2}", "params": ["Dunes", 2021]}'
-curl -s http://127.0.0.1:8080/query -H 'Authorization: Bearer secret' \
-  -d '{"query": "put notes {title: $1, year: $2}", "params": ["Night at the oasis", 2024]}'</pre>
+    <p>Make a collection and write two rows. The language is FenecQL: a
+    collection has typed fields, an index on each one you filter, order or
+    search by (<code>@text</code> for words, <code>@sorted</code> for ranges and
+    order, <code>@hash</code> for equality), and the values go as
+    <code>$1</code>, <code>$2</code> parameters, never into the text.</p>
+<pre data-lang="bash">curl -s http://127.0.0.1:8080/query \
+  -d '{"query": "create collection notes (title text @text, year int @sorted, kind text @hash)"}'
+curl -s http://127.0.0.1:8080/query \
+  -d '{"query": "put notes {title: $1, year: $2, kind: $3}", "params": ["Dunes", 2021, "book"]}'
+curl -s http://127.0.0.1:8080/query \
+  -d '{"query": "put notes {title: $1, year: $2, kind: $3}", "params": ["Night at the oasis", 2024, "film"]}'</pre>
 <pre data-lang="text" data-label="answers">{"message":"collection `notes` created"}
 {"affected":1}
 {"affected":1}</pre>
+    <p>curl prints each answer with no line break after it, so in a terminal
+    they run together; they are shown one to a line here.</p>
   </li>
   <li>
-    <p>Read the rows back by a filter and an order, then search the words.</p>
-<pre data-lang="bash">curl -s http://127.0.0.1:8080/query -H 'Authorization: Bearer secret' \
-  -d '{"query": "get notes where year &gt;= $1 order year desc", "params": [2020]}'
-curl -s http://127.0.0.1:8080/query -H 'Authorization: Bearer secret' \
-  -d '{"query": "get notes select title match title $1", "params": ["oasis"]}'</pre>
-<pre data-lang="text" data-label="answers">[{"id":2,"title":"Night at the oasis","year":2024},{"id":1,"title":"Dunes","year":2021}]
+    <p>Read the rows back by a filter and an order, by a kind, then search
+    their words, with a typo in the search.</p>
+<pre data-lang="bash">curl -s http://127.0.0.1:8080/query \
+  -d '{"query": "get notes where year >= $1 order year desc", "params": [2020]}'
+curl -s http://127.0.0.1:8080/query \
+  -d '{"query": "get notes where kind = $1", "params": ["book"]}'
+curl -s http://127.0.0.1:8080/query \
+  -d '{"query": "get notes select title match title $1 fuzzy", "params": ["oasys"]}'</pre>
+<pre data-lang="text" data-label="answers">[{"id":2,"title":"Night at the oasis","year":2024,"kind":"film"},{"id":1,"title":"Dunes","year":2021,"kind":"book"}]
+[{"id":1,"title":"Dunes","year":2021,"kind":"book"}]
 [{"title":"Night at the oasis","_score":0.62239116}]</pre>
+    <p><code>kind</code> is a <code>@hash</code> index, which answers equality
+    and gives the studio something to count by. <code>match</code> searches the
+    words of a <code>@text</code> field, <code>fuzzy</code> forgives a
+    misspelling, and <code>_score</code> says how well the row matched.</p>
   </li>
   <li>
-    <p>Do the same from your language. Each program writes a third row, reads
-    the rows from 2020 on and searches the word, and prints the titles.</p>
+    <p>Do the same from your language, with its client or the HTTP client it
+    already has. Each program writes a third row, reads the rows from 2020 on,
+    searches a word spelled wrong and ends on a refused read, with its status
+    and the server's message. Run it once: it writes the row every time.</p>
 
 <div class="langs" data-langs>
 
 <div class="lang" data-name="Python">
 <pre data-lang="bash" data-label="install">pip install fenecdb   # the standard library alone</pre>
-<pre data-lang="python" data-label="notes.py">from fenecdb import Client
+<pre data-lang="python" data-label="notes.py">from fenecdb import Client, FenecError
 
-db = Client("http://127.0.0.1:8080", token="secret")
+db = Client("http://127.0.0.1:8080")
 
-db.query("put notes {title: $1, year: $2}", ["Sand and stars", 2023])
+db.query("put notes {title: $1, year: $2, kind: $3}", ["Sand and stars", 2023, "book"])
 
 rows = db.query("get notes where year &gt;= $1 order year desc", [2020])
-print([r["title"] for r in rows])
+print("from 2020:", ", ".join(r["title"] for r in rows))
 
-hits = db.query("get notes select title match title $1", ["oasis"])
-print([h["title"] for h in hits])</pre>
-<pre data-lang="text" data-label="python notes.py prints">['Night at the oasis', 'Sand and stars', 'Dunes']
-['Night at the oasis']</pre>
+hits = db.query("get notes select title match title $1 fuzzy", ["oasys"])
+print("search:", ", ".join(h["title"] for h in hits))
+
+try:
+    db.query("get nowhere")
+except FenecError as e:
+    print("refused:", e.status, e)</pre>
+<pre data-lang="bash" data-label="run">python3 notes.py</pre>
 </div>
 
 <div class="lang" data-name="JavaScript">
-<pre data-lang="bash" data-label="install">npm install @fenecdb/web   # in a folder of its own</pre>
-<pre data-lang="js" data-label="notes.mjs">import { connect } from '@fenecdb/web/client';
+<pre data-lang="js" data-label="notes.mjs">async function query(q, params = []) {
+  const res = await fetch('http://127.0.0.1:8080/query', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ query: q, params }),
+  });
+  const body = await res.json();
+  if (!res.ok) throw Object.assign(new Error(body.error), { status: res.status });
+  return body;
+}
 
-const db = connect('http://127.0.0.1:8080', { token: 'secret' });
+await query('put notes {title: $1, year: $2, kind: $3}', ['Sand and stars', 2023, 'book']);
 
-await db.from('notes').insert({ title: 'Sand and stars', year: 2023 });
+const rows = await query('get notes where year &gt;= $1 order year desc', [2020]);
+console.log('from 2020:', rows.map((r) =&gt; r.title).join(', '));
 
-const rows = await db.from('notes').select('title', 'year')
-  .where('year', '&gt;=', 2020).order('year', 'desc').rows();
-console.log(rows.map((r) =&gt; r.title));
+const hits = await query('get notes select title match title $1 fuzzy', ['oasys']);
+console.log('search:', hits.map((h) =&gt; h.title).join(', '));
 
-const hits = await db.from('notes').select('title').match('title', 'oasis').rows();
-console.log(hits.map((h) =&gt; h.title));</pre>
-<pre data-lang="text" data-label="node notes.mjs prints">[ 'Night at the oasis', 'Sand and stars', 'Dunes' ]
-[ 'Night at the oasis' ]</pre>
+try {
+  await query('get nowhere');
+} catch (e) {
+  console.log(`refused: ${e.status} ${e.message}`);
+}</pre>
+<pre data-lang="bash" data-label="run">node notes.mjs   # Node 18 or newer: fetch is built in</pre>
 </div>
 
 <div class="lang" data-name="Go">
@@ -260,8 +172,10 @@ go get github.com/fenecdb/fenecdb/integrations/go   # the standard library alone
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"strings"
 
 	fenecdb "github.com/fenecdb/fenecdb/integrations/go"
 )
@@ -271,11 +185,19 @@ type Note struct {
 	Year  int    `json:"year"`
 }
 
+func titles(notes []Note) string {
+	var out []string
+	for _, n := range notes {
+		out = append(out, n.Title)
+	}
+	return strings.Join(out, ", ")
+}
+
 func main() {
 	ctx := context.Background()
-	db := fenecdb.New("http://127.0.0.1:8080", fenecdb.WithToken("secret"))
+	db := fenecdb.New("http://127.0.0.1:8080")
 
-	if _, err := db.Exec(ctx, "put notes {title: $1, year: $2}", "Sand and stars", 2023); err != nil {
+	if _, err := db.Exec(ctx, "put notes {title: $1, year: $2, kind: $3}", "Sand and stars", 2023, "book"); err != nil {
 		log.Fatal(err)
 	}
 
@@ -283,232 +205,229 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println(rows)
+	fmt.Println("from 2020:", titles(rows))
 
-	hits, err := db.Query(ctx, "get notes select title match title $1", "oasis")
+	hits, err := fenecdb.QueryAs[Note](ctx, db, "get notes select title match title $1 fuzzy", "oasys")
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println(hits[0]["title"])
+	fmt.Println("search:", titles(hits))
+
+	var refused *fenecdb.Error
+	if _, err := db.Query(ctx, "get nowhere"); errors.As(err, &amp;refused) {
+		fmt.Println("refused:", refused.Status, refused.Message)
+	}
 }</pre>
-<pre data-lang="text" data-label="go run . prints">[{Night at the oasis 2024} {Sand and stars 2023} {Dunes 2021}]
-Night at the oasis</pre>
+<pre data-lang="bash" data-label="run">go run .</pre>
+</div>
+
+<div class="lang" data-name="Rust">
+<pre data-lang="bash" data-label="install">cargo new notes &amp;&amp; cd notes
+cargo add ureq@2 --features json
+cargo add serde_json</pre>
+<pre data-lang="rust" data-label="src/main.rs">use serde_json::{json, Value};
+
+fn query(q: &amp;str, params: Value) -&gt; Result&lt;Value, ureq::Error&gt; {
+    Ok(ureq::post("http://127.0.0.1:8080/query")
+        .send_json(json!({"query": q, "params": params}))?
+        .into_json()?)
+}
+
+fn titles(rows: &amp;Value) -&gt; String {
+    let titles: Vec&lt;&amp;str&gt; = rows.as_array().unwrap().iter().filter_map(|r| r["title"].as_str()).collect();
+    titles.join(", ")
+}
+
+fn main() -&gt; Result&lt;(), ureq::Error&gt; {
+    query("put notes {title: $1, year: $2, kind: $3}", json!(["Sand and stars", 2023, "book"]))?;
+
+    let rows = query("get notes where year &gt;= $1 order year desc", json!([2020]))?;
+    println!("from 2020: {}", titles(&amp;rows));
+
+    let hits = query("get notes select title match title $1 fuzzy", json!(["oasys"]))?;
+    println!("search: {}", titles(&amp;hits));
+
+    // A refusal is `Error::Status` with the server's status, its body {"error": ...}.
+    match query("get nowhere", json!([])) {
+        Err(ureq::Error::Status(status, res)) =&gt; {
+            let body: Value = res.into_json()?;
+            println!("refused: {status} {}", body["error"].as_str().unwrap_or_default());
+        }
+        other =&gt; {
+            other?;
+        }
+    }
+    Ok(())
+}</pre>
+<pre data-lang="bash" data-label="run">cargo run</pre>
 </div>
 
 <div class="lang" data-name=".NET">
 <pre data-lang="bash" data-label="install">dotnet new console -o notes &amp;&amp; cd notes
 dotnet add package FenecDb   # HttpClient and System.Text.Json alone</pre>
-<pre data-lang="text" data-label="Program.cs">using FenecDb;
+<pre data-lang="csharp" data-label="Program.cs">using FenecDb;
 
-using var db = new FenecClient("http://127.0.0.1:8080", new() { Token = "secret" });
+using var db = new FenecClient("http://127.0.0.1:8080");
 
-await db.ExecAsync("put notes {title: $1, year: $2}", ["Sand and stars", 2023]);
+await db.ExecAsync("put notes {title: $1, year: $2, kind: $3}", ["Sand and stars", 2023, "book"]);
 
 var rows = await db.QueryAsync&lt;Note&gt;("get notes where year &gt;= $1 order year desc", [2020]);
-Console.WriteLine(string.Join(", ", rows.Select(r =&gt; r.Title)));
+Console.WriteLine("from 2020: " + string.Join(", ", rows.Select(r =&gt; r.Title)));
 
-var hits = await db.QueryAsync&lt;Note&gt;("get notes select title match title $1", ["oasis"]);
-Console.WriteLine(string.Join(", ", hits.Select(h =&gt; h.Title)));
+var hits = await db.QueryAsync&lt;Note&gt;("get notes select title match title $1 fuzzy", ["oasys"]);
+Console.WriteLine("search: " + string.Join(", ", hits.Select(h =&gt; h.Title)));
+
+try
+{
+    await db.QueryAsync("get nowhere");
+}
+catch (FenecException e)
+{
+    Console.WriteLine($"refused: {e.Status} {e.Message}");
+}
 
 record Note(string Title, int Year);</pre>
-<pre data-lang="text" data-label="dotnet run prints">Night at the oasis, Sand and stars, Dunes
-Night at the oasis</pre>
+<pre data-lang="bash" data-label="run">dotnet run</pre>
+</div>
+
+<div class="lang" data-name="Java">
+<pre data-lang="java" data-label="Notes.java">import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.util.ArrayList;
+import java.util.regex.Pattern;
+
+public class Notes {
+    static final HttpClient HTTP = HttpClient.newHttpClient();
+
+    // One FenecQL statement, as the JSON {"query": ..., "params": [...]}.
+    static HttpResponse&lt;String&gt; query(String json) throws Exception {
+        var req = HttpRequest.newBuilder(URI.create("http://127.0.0.1:8080/query"))
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(json))
+            .build();
+        return HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+    }
+
+    // The standard library has no JSON: every "title" of an answer, or its "error".
+    static String find(String key, String body) {
+        var found = new ArrayList&lt;String&gt;();
+        var m = Pattern.compile("\"" + key + "\":\"([^\"]*)\"").matcher(body);
+        while (m.find()) found.add(m.group(1));
+        return String.join(", ", found);
+    }
+
+    public static void main(String[] args) throws Exception {
+        query("""
+            {"query": "put notes {title: $1, year: $2, kind: $3}", "params": ["Sand and stars", 2023, "book"]}""");
+
+        var rows = query("""
+            {"query": "get notes where year &gt;= $1 order year desc", "params": [2020]}""");
+        System.out.println("from 2020: " + find("title", rows.body()));
+
+        var hits = query("""
+            {"query": "get notes select title match title $1 fuzzy", "params": ["oasys"]}""");
+        System.out.println("search: " + find("title", hits.body()));
+
+        var refused = query("""
+            {"query": "get nowhere"}""");
+        System.out.println("refused: " + refused.statusCode() + " " + find("error", refused.body()));
+    }
+}</pre>
+<pre data-lang="bash" data-label="run">java Notes.java   # Java 15 or newer, for the text blocks</pre>
+</div>
+
+<div class="lang" data-name="PHP">
+<pre data-lang="php" data-label="notes.php">&lt;?php
+
+// One FenecQL statement; the answer is its status and the decoded JSON body.
+function query(string $q, array $params = []): array {
+    $ch = curl_init('http://127.0.0.1:8080/query');
+    curl_setopt_array($ch, [
+        CURLOPT_POST =&gt; true,
+        CURLOPT_RETURNTRANSFER =&gt; true,
+        CURLOPT_HTTPHEADER =&gt; ['Content-Type: application/json'],
+        CURLOPT_POSTFIELDS =&gt; json_encode(['query' =&gt; $q, 'params' =&gt; $params]),
+    ]);
+    $body = json_decode(curl_exec($ch), true);
+    return [curl_getinfo($ch, CURLINFO_RESPONSE_CODE), $body];
+}
+
+query('put notes {title: $1, year: $2, kind: $3}', ['Sand and stars', 2023, 'book']);
+
+[, $rows] = query('get notes where year &gt;= $1 order year desc', [2020]);
+echo 'from 2020: ', implode(', ', array_column($rows, 'title')), "\n";
+
+[, $hits] = query('get notes select title match title $1 fuzzy', ['oasys']);
+echo 'search: ', implode(', ', array_column($hits, 'title')), "\n";
+
+[$status, $error] = query('get nowhere');
+echo 'refused: ', $status, ' ', $error['error'], "\n";</pre>
+<pre data-lang="bash" data-label="run">php notes.php   # with the curl extension</pre>
+</div>
+
+<div class="lang" data-name="Ruby">
+<pre data-lang="ruby" data-label="notes.rb">require "json"
+require "net/http"
+
+# One FenecQL statement; the answer is its status and the decoded JSON body.
+def query(q, params = [])
+  res = Net::HTTP.post(URI("http://127.0.0.1:8080/query"),
+                       JSON.generate(query: q, params: params),
+                       "Content-Type" =&gt; "application/json")
+  [res.code.to_i, JSON.parse(res.body)]
+end
+
+query("put notes {title: $1, year: $2, kind: $3}", ["Sand and stars", 2023, "book"])
+
+_, rows = query("get notes where year &gt;= $1 order year desc", [2020])
+puts "from 2020: #{rows.map { |r| r["title"] }.join(", ")}"
+
+_, hits = query("get notes select title match title $1 fuzzy", ["oasys"])
+puts "search: #{hits.map { |h| h["title"] }.join(", ")}"
+
+status, error = query("get nowhere")
+puts "refused: #{status} #{error["error"]}"</pre>
+<pre data-lang="bash" data-label="run">ruby notes.rb</pre>
 </div>
 
 </div>
 
-    <p>Java, PHP, Ruby, Rust, Swift, Kotlin and Dart send the same requests:
-    <a href="languages.html">Your language</a> has each of them.</p>
+    <p>Every program prints the same three lines.</p>
+<pre data-lang="text" data-label="prints">from 2020: Night at the oasis, Sand and stars, Dunes
+search: Night at the oasis
+refused: 404 collection `nowhere`</pre>
+    <p>Java, PHP and Ruby need no package, and Swift, Kotlin and Dart keep the
+    database in the app instead: <a href="languages.html">Your language</a> has
+    each one in full, with its query builder, batches and errors.</p>
+  </li>
+  <li>
+    <p>Open <code>http://127.0.0.1:8080/_studio/</code> in a browser, leave the
+    token empty and press Connect, and pick <code>notes</code> in the sidebar.
+    Your rows are in the grid, with the counts by <code>kind</code> above them.
+    Enter writes a cell and <em>New row</em> adds one.</p>
+
+<figure class="shot">
+<img src="../images/quickstart-studio-dark.webp" width="1280" height="420" alt="fenec studio on the quickstart's server: the notes collection in the sidebar, the counts of book and film above the grid, and its three rows, Dunes from 2021, Night at the oasis from 2024 and Sand and stars from 2023">
+<figcaption>The notes after step 4, in <a href="studio.html">fenec studio</a>.</figcaption>
+</figure>
   </li>
 </ol>
 
-<details class="deep"><summary>Other languages, and the REST routes</summary>
-<p>These are cut down from the programs on <a href="languages.html">Your
-language</a>, which also have the query builders, batches and typed errors.
-Run one twice and the third row is written twice, since a <code>put</code>
-without an id makes a row each time.</p>
+<h2 id="next">Next</h2>
 
-<p>The REST routes read the same collection, and a stream sends the rows a
-filter holds, then each change to them (<a
-href="http-reference.html#subscriptions">Subscriptions</a>):</p>
-
-<pre data-lang="bash">curl -s -H 'Authorization: Bearer secret' \
-  'http://127.0.0.1:8080/notes?select=title,year&amp;year=gte.2020&amp;order=year.desc&amp;limit=10'
-curl -sN -H 'Authorization: Bearer secret' 'http://127.0.0.1:8080/notes/changes?year=gte.2020'</pre>
-
-<p>A release's files are listed with their checksums in
-<code>SHA256SUMS</code>:</p>
-
-<pre data-lang="bash">curl -LO https://github.com/fenecdb/fenecdb/releases/download/v{{version}}/SHA256SUMS
-shasum -a 256 -c --ignore-missing SHA256SUMS    # Linux: sha256sum -c --ignore-missing SHA256SUMS</pre>
-
-<p>There is no TLS in the server: on a network, put a terminator such as Caddy
-or nginx in front. <code>fenec-server --ping</code> is the health check for a
-container. Tokens, durability, limits and containers are on <a
-href="server.html">Server</a>; every route is on <a href="http-reference.html">HTTP
-reference</a>. Past one machine, a read replica and archives are on <a
-href="replication.html">Replication</a>, a file per tenant behind a router, in
-one region or several, on <a href="sharding.html">Tenants and sharding</a>, and
-the systemd units, alert rules and runbook to run them on machines of your own
-in <a href="sharding-reference.html#deploying">Deploying it</a>.</p>
-</details>
-
-<h2 id="in-the-shell">In the shell</h2>
-
-<p><code>fenec</code> opens a database file and runs FenecQL on it, one
-statement at a time. It comes with every way of installing the server above,
-beside it: <code>brew install fenecdb/tap/fenecdb</code>, <code>curl -fsSL
-https://fenecdb.com/install.sh | sh</code>, the packages and the release
-tarball.</p>
-
-<ol class="steps-doc">
-  <li>
-    <p>Download the release and go into its folder. Skip this if you already
-    have it from the server's steps, or installed it with Homebrew, the script
-    or a package: then <code>fenec</code> is on your <code>PATH</code> (the
-    script says how to put it there) and the steps below run
-    <code>fenec</code> where they say <code>./fenec</code>.</p>
-<pre data-lang="bash">TARGET=aarch64-apple-darwin   # or x86_64-apple-darwin, aarch64-unknown-linux-musl, x86_64-unknown-linux-musl
-curl -LO https://github.com/fenecdb/fenecdb/releases/download/v{{version}}/fenec-v{{version}}-$TARGET.tar.gz
-tar -xzf fenec-v{{version}}-$TARGET.tar.gz
-cd fenec-v{{version}}-$TARGET</pre>
-  </li>
-  <li>
-    <p>Open a file of its own. Not the server's <code>data.fenec</code>: two
-    processes over one file would corrupt it.</p>
-<pre data-lang="bash">./fenec notes.fenec</pre>
-<pre data-lang="text" data-label="prints">fenecdb {{version}} — notes.fenec
-`.help` for help, `.quit` to exit</pre>
-  </li>
-  <li>
-    <p>At the prompt, make a collection, each field typed and the ones you
-    filter, order and search by indexed, and write two rows. A write ends at a
-    <code>;</code>.</p>
-<pre data-lang="text">fenec&gt; create collection notes (title text @text, year int @sorted)
-collection `notes` created
-fenec&gt; put notes {title: "Dunes", year: 2021};
-1 records (16.04µs)
-fenec&gt; put notes {title: "Night at the oasis", year: 2024};
-1 records (4.50µs)</pre>
-  </li>
-  <li>
-    <p>Read them back by a filter and an order, then search the words. The
-    timings are yours.</p>
-<pre data-lang="text">fenec&gt; get notes where year &gt;= 2020 order year desc
-id  title               year
---  ------------------  ----
-2   Night at the oasis  2024
-1   Dunes               2021
-(2 rows, 40.29µs)
-fenec&gt; get notes select title match title "oasis"
-title               _score
-------------------  ------
-Night at the oasis  0.6224
-(1 rows, 859.79µs)
-fenec&gt; .quit</pre>
-  </li>
-</ol>
-
-<details class="deep"><summary>Shell flags and multi-line statements</summary>
-<pre data-lang="bash">./fenec notes.fenec                          # interactive
-./fenec notes.fenec -c 'get notes limit 5'
-echo 'get notes' | ./fenec notes.fenec
-./fenec notes.fenec &lt; seed.fenecql           # a script</pre>
-
-<p>Inside the shell: <code>.help</code> <code>.tables</code> <code>.stats</code>
-<code>.functions</code> <code>.save &lt;path&gt;</code> <code>.checkpoint</code>
-<code>.quit</code>.</p>
-
-<p>A statement may run over several lines, and the shell runs it only
-once nothing after it can go on with it. Typed, a read or a schema change
-written on one line runs at Enter. A write, and a read written over
-several lines, wait for the next line: one that goes on with them —
-<code>where</code>, <code>order</code>, <code>and</code> — joins them, and
-an empty line or another statement runs them first. A <code>;</code> after
-a statement runs it at once. So <code>del notes</code> with <code>where id
-= 3</code> on the line under it deletes one row. A <code>.</code> command
-leaves a waiting statement waiting — <code>.tables</code> to look a name
-up before the <code>where</code> — and <code>.quit</code> leaves it
-unrun.</p>
-
-<p>Piped from a file, a statement runs once the next one begins, and a
-paste is read the same way, its lines all there at once — a
-<code>.</code> command in either waits behind the statement before it,
-and runs once that has. <code>-c</code> reads its text whole, as
-<code>POST /query</code> does, so a text that does not parse runs
-nothing. A line that begins no statement — a <code>where</code> after a
-read that already ran at Enter, a <code>wher</code> mistyped, a clause
-written past a <code>;</code> — is refused, and so is the statement before
-it, which it may have meant to go on with: <code>del notes; where id =
-3</code> deletes nothing.</p>
-
-<p>A paste the terminal delivers in pieces further apart than 40 ms is
-read as typed lines, and a pasted statement whose last line has no
-newline yet waits for Enter like a typed one.</p>
-
-<p>Releases up to 0.1.10 do not have these rules: they run every line whose
-brackets close, so there <code>del notes</code> deletes every row before a
-<code>where</code> under it is refused. Ending each write with a
-<code>;</code>, as the session above does, behaves the same in both.</p>
-
-<p>Fields and indexes can come later too, with no row rewritten:
-<code>alter collection notes add field mood text</code>, then
-<code>create index on notes (mood) @hash</code> over the rows already there
-(<a href="fenecql-schema.html#changing-a-collection">Changing a collection</a>).
-Search finds words typed wrong and half typed with <code>fuzzy</code> and
-<code>prefix</code> (<a href="fenecql-search.html#typos">Typos and words begun</a>), and
-<code>highlight()</code> and <code>snippet()</code> mark what matched (<a
-href="fenecql-search.html#highlights">Highlights and snippets</a>).</p>
-</details>
-
-<h2 id="apps">In an app, or in Rust</h2>
-
-<ul>
-  <li><b>Swift, Kotlin and Flutter.</b> The database is a file on the device,
-    with live queries driving the UI and an optional replica of a server:
-    SwiftPM <code>github.com/fenecdb/fenecdb</code>, the AAR
-    <code>com.fenecdb:fenecdb-android</code>, <code>flutter pub add
-    fenecdb_flutter</code>. <a href="mobile.html">Mobile and native apps</a>
-    has a todo list in all three.</li>
-  <li><b>Rust.</b> <code>fenec-core</code> is the engine as a library, with no
-    dependencies: <a href="embedding.html">Embedded Rust</a>.</li>
-</ul>
-
-<h2 id="next">Next steps</h2>
-
-<ul>
-  <li id="search-by-meaning"><b>Search by meaning.</b> A <code>vector&lt;N&gt;</code>
-    field and an <code>@hnsw</code> index add <code>near</code> beside
-    <code>match</code>, and <code>fuse</code> ranks both together: <a
-    href="fenecql-vector.html#the-vector-clause">The vector clause</a>, <a
-    href="fenecql-search.html#hybrid">Hybrid search</a>, <a
-    href="http-reference.html#vector-search">Vector search</a> over HTTP and <a
-    href="javascript.html#search">A search page</a> in the browser. The vectors come from your
-    embedding model: load them first and build the index after, as <a
-    href="concepts.html#bulk-load-first-index-after">Bulk load first, index
-    after</a> says.</li>
-  <li id="bring-your-own-data"><b>Bring your own data.</b> <code>fenec import</code>
-    copies a SQLite file or a PostgreSQL table into a collection, schema and
-    indexes included, and <code>--follow</code> keeps a PostgreSQL copy up to
-    date as the table changes: <a href="import.html">Import</a>.</li>
-  <li id="generate-typescript-from-the-file"><b>Types from the schema.</b>
-    <code>fenec types</code> writes TypeScript, Python, Go or C# types from a
-    database file, so code and database cannot drift apart: <a
-    href="javascript.html#typescript">TypeScript</a>.</li>
-  <li><b>Your language.</b> The same flow in Java, PHP, Ruby and Rust, and
-    each client's batches, retries and subscriptions: <a
-    href="languages.html">Your language</a>.</li>
-  <li><b>The language.</b> Statements, types, operators and indexes:
-    <a href="fenecql.html">FenecQL</a>; coming from SQL, <a
-    href="sql.html">From SQL</a>.</li>
-  <li><b>Running it.</b> Tokens, durability, limits and containers: <a
-    href="server.html">Server</a>; then <a
-    href="replication.html">Replication</a>.</li>
-  <li><b>How it works.</b> Segments, the mapped file and one writer: <a
-    href="concepts.html">How it works</a>.</li>
-  <li id="build"><b>Build it yourself,</b> or work on it: <a
-    href="build.html">Build from source</a>.<span id="make-targets-worth-knowing"></span></li>
-  <li><b>Examples.</b> One small app, Notes, in every language, each a folder
-    to clone and run: <a
-    href="https://github.com/fenecdb/fenecdb/tree/main/examples">examples</a>.</li>
+<ul class="cards">
+  <li><a href="quickstart-browser.html">Quickstart: in the browser</a>
+    <p>The same engine in a web page, with no server: a Vite project, one package and a script.</p></li>
+  <li><a href="shell.html">The shell</a>
+    <p>Run FenecQL on a file from a prompt, to learn the language or to look inside a file.</p></li>
+  <li><a href="fenecql.html">FenecQL</a>
+    <p>The language, from a first write to a lookup and a total.</p></li>
+  <li><a href="sync.html">Sync</a>
+    <p>A replica in the page or the app that reads without the network and writes on its own.</p></li>
+  <li><a href="install.html">Install</a>
+    <p>Homebrew, a package, a tarball, the image, a package for your language, or a build from source.</p></li>
+  <li><a href="server.html">Server</a>
+    <p>Tokens, durability, limits and containers, for running it for real.</p></li>
 </ul>

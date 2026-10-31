@@ -457,9 +457,28 @@ class Client:
 
     def consumer(self, name: str, since: int | None = None) -> dict:
         """Makes `name` a consumer at the last write on disk, or at `since`,
-        or moves it there: once it has done with every write up to it."""
+        and returns where it stands, `{"name", "since"}`. One that is there
+        already stays where it stands -- `since` is a new consumer's start
+        -- so a program can call this every time it starts and go on from
+        where it stopped; a `since` ahead of where it stands is a
+        `FenecError` (409), a commit sent the old way. `move_consumer`
+        moves one."""
         body = json.dumps({} if since is None else {"since": since}).encode()
         return self._post(f"/_changes/consumers/{_seg(name)}", body, "application/json")
+
+    def move_consumer(self, name: str, since: int) -> dict:
+        """Moves `name` to `since`: on, once it has done with every write up
+        to it (a commit), or back, to read from there again, and returns
+        where it stands after -- where it was, for a commit past nothing but
+        consumers' own commits, which reads the same writes. A consumer that
+        is not there is a `FenecError` (404): `consumer` makes one."""
+        body = json.dumps({"since": since}).encode()
+        req = urllib.request.Request(
+            f"{self.url}/_changes/consumers/{_seg(name)}", data=body, method="PATCH"
+        )
+        req.add_header("Content-Type", "application/json")
+        with self._open(req, self.timeout) as resp:
+            return json.load(resp)
 
     def consumers(self) -> list:
         """Each consumer: its `name`, `since`, and how many writes `behind`."""
@@ -475,9 +494,9 @@ class Client:
     def follow(self, consumer: str, *, limit: int = 1000, wait: float = 10.0) -> Iterator[list]:
         """Each batch of writes for `consumer`, made if it is new, committed
         once the loop asks for the next: a batch the loop did not finish is
-        read again, so each write comes at least once."""
-        if not any(c["name"] == consumer for c in self.consumers()):
-            self.consumer(consumer)
+        read again, so each write comes at least once. Started again, it
+        goes on from the last batch committed."""
+        self.consumer(consumer)
         while True:
             got = self.changes(consumer=consumer, limit=limit, wait=wait)
             # Nothing read, nothing committed: a commit is a write, which
@@ -485,7 +504,7 @@ class Client:
             # would write once a wait.
             if got.writes:
                 yield got.writes
-                self.consumer(consumer, got.next)
+                self.move_consumer(consumer, got.next)
 
     def _open(self, req: urllib.request.Request, timeout: float):
         if self.token:

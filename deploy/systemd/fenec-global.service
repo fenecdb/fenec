@@ -44,7 +44,9 @@ TimeoutStopSec=10s
 
 # Descriptors: a client's connection each (--max-connections 1000) and a
 # pooled one to a node for each in flight, the directory's replication and
-# its standbys' streams -- 2 x 1000, with room. Raise with them.
+# its standbys' streams, and the refused connections held open while their
+# requests are read off (512 at most) -- 2 x 1000 + 512, with room. Raise
+# with them.
 LimitNOFILE=8192
 # Threads: a connection each, under systemd's DefaultTasksMax unless set.
 TasksMax=4096

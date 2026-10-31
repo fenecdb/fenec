@@ -1,0 +1,360 @@
+name: desktop
+
+# fenec studio as a desktop app (integrations/studio-desktop, beta, macOS on
+# Apple silicon): the bundled fenec-server and the app built, the unit tests
+# and every scripted check run against the app on a macOS runner, which has
+# the window server they drive. Nothing here is a required check: a change
+# outside these paths cannot break the app, and the macOS minutes are spent
+# only where it could.
+#
+# SIGNING is deliberate, and a maintainer's: the `sign` job runs only when this
+# workflow is started by hand (workflow_dispatch) from main, in the GitHub
+# Environment `desktop-signing`, and only if that Environment holds every
+# secret below; otherwise it ends at its first step with a notice. A pull
+# request, a push, or a dispatch from another branch never reaches a secret.
+#
+# What a maintainer sets up, once, IN THIS ORDER (RELEASING.md has the commands):
+#   1. The Environment, with its rules, FIRST: Settings > Environments > New
+#      environment: `desktop-signing`, a required reviewer (so a dispatch waits
+#      for a person) and deployment branches limited to `main` (so the code that
+#      is signed is main's). A secret added to an Environment that has no rules
+#      yet is readable by any job that names it, from any branch.
+#   2. Then, in that Environment, not in the repository's secrets, so that no
+#      other job can read them:
+#        ELECTROBUN_DEVELOPER_ID      the certificate's name, "Developer ID Application: Name (TEAMID)"
+#        MACOS_CERTIFICATE_P12        that certificate and its key, a .p12 file, base64
+#        MACOS_CERTIFICATE_PASSWORD   the .p12's password
+#        ELECTROBUN_APPLEAPIKEY       an App Store Connect API key's id
+#        ELECTROBUN_APPLEAPIISSUER    its issuer id
+#        ELECTROBUN_APPLEAPIKEY_P8    its AuthKey_<id>.p8 file, base64 (written to a file in the
+#                                     runner's temp directory, whose path is ELECTROBUN_APPLEAPIKEYPATH)
+#
+# The signing job's first step asks GitHub for the Environment's rules with the
+# job's own token and fails, before anything else, unless it has a required
+# reviewer and deployment branches limited to `main` alone. Whether that token
+# may read them is GitHub's to say (the Environments API asks for administration
+# rights, which a workflow's token cannot be given): where it may not, the step
+# says so in a warning and goes on, and the order above is all that stands
+# between a secret and a job without rules. The job still ends at its next step
+# if a secret is missing.
+#
+# Started by hand with a release's tag (`release: v0.1.12`), the signing job
+# bundles that release's server (its SHA-256 checked against the release's
+# SHA256SUMS), builds the app signed and notarized, holds the result to what
+# Gatekeeper would (codesign, spctl, stapler) and to the same hook check the
+# unsigned build passes, and uploads the DMG; a separate job, which holds the
+# only write permission of the workflow and none of the secrets, attaches that
+# DMG to the release. Nothing unsigned is ever attached. The README in
+# integrations/studio-desktop lists what a first signed build still has to be
+# verified for.
+on:
+  pull_request:
+    paths:
+      - 'integrations/studio-desktop/**'
+      - 'studio/**'
+      # The server the app bundles is built from these, and the studio's
+      # pages are embedded in it by fenec-http.
+      - 'crates/fenec-server/**'
+      - 'crates/fenec-http/**'
+      - 'crates/fenec-core/**'
+      - '.github/workflows/desktop.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'integrations/studio-desktop/**'
+      - 'studio/**'
+      # The server the app bundles is built from these, and the studio's
+      # pages are embedded in it by fenec-http.
+      - 'crates/fenec-server/**'
+      - 'crates/fenec-http/**'
+      - 'crates/fenec-core/**'
+      - '.github/workflows/desktop.yml'
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'A release tag (v0.1.12) to bundle the server of, sign the app with, and attach the DMG to. Empty: this checkout, nothing attached.'
+        required: false
+        default: ''
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  app:
+    name: app (build, unit tests, checks)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Where the checks keep their data, reports and logs, so a failure can upload them.
+      - name: Where the checks write
+        run: echo "SD_DIR=$RUNNER_TEMP/fenec-desktop-checks" >> "$GITHUB_ENV"
+
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: macos-latest-desktop-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: macos-latest-desktop-cargo-
+
+      # The build tool (Hutch, its Bun, the Electrobun runtime) goes into this
+      # directory, not the home one (scripts/electrobun.mjs), 130 to 210 MB
+      # that Electrobun's own release hosts and the checks need not fetch again.
+      # scripts/electrobun.mjs holds what is in it to hutch-pin.json on every
+      # run, so a restored cache is not trusted for being one.
+      - uses: actions/cache@v6
+        with:
+          path: integrations/studio-desktop/.hutch-home
+          key: desktop-hutch-${{ hashFiles('integrations/studio-desktop/package-lock.json', 'integrations/studio-desktop/hutch.config.ts', 'integrations/studio-desktop/hutch-pin.json') }}
+
+      # The saved servers' tokens go to the Keychain, which the checks
+      # exercise: a keychain of their own, unlocked, the default.
+      - name: A keychain for the checks
+        run: |
+          security create-keychain -p '' "$RUNNER_TEMP/checks.keychain-db"
+          security set-keychain-settings -lut 21600 "$RUNNER_TEMP/checks.keychain-db"
+          security unlock-keychain -p '' "$RUNNER_TEMP/checks.keychain-db"
+          security list-keychains -d user -s "$RUNNER_TEMP/checks.keychain-db"
+          security default-keychain -s "$RUNNER_TEMP/checks.keychain-db"
+
+      # The server (cargo build --release -p fenec-server), the release app,
+      # the sources type-checked and the unit tests, the test variant, and the
+      # checks. No signing variable is set here, so the build is unsigned.
+      - name: Build and check
+        timeout-minutes: 30
+        run: make studio-desktop-test
+
+      - name: The logs of the checks
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-check-logs
+          path: ${{ runner.temp }}/fenec-desktop-checks/logs
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # Unsigned, and from a build, not a download: a Mac opens what it built
+      # itself. A browser's download of this artifact is quarantined, and then
+      # macOS asks to be told it is safe (`xattr -cr` on the app, or Open
+      # Anyway in System Settings). For a reviewer to try.
+      - name: The unsigned DMG
+        uses: actions/upload-artifact@v7
+        with:
+          name: fenec-studio-unsigned-dmg
+          path: integrations/studio-desktop/artifacts/*.dmg
+          retention-days: 7
+          if-no-files-found: error
+
+  sign:
+    name: sign and notarize
+    needs: app
+    # By hand, from main: a dispatch of another branch would sign that branch's
+    # code with the certificate. (The Environment's own branch rule says the
+    # same where a maintainer set it.)
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    environment: desktop-signing
+    permissions:
+      contents: read
+    outputs:
+      signed: ${{ steps.done.outputs.signed }}
+    env:
+      # A secret cannot be tested in a step's `if`; this says whether they are all there.
+      HAVE: ${{ secrets.ELECTROBUN_DEVELOPER_ID != '' && secrets.MACOS_CERTIFICATE_P12 != '' && secrets.MACOS_CERTIFICATE_PASSWORD != '' && secrets.ELECTROBUN_APPLEAPIKEY != '' && secrets.ELECTROBUN_APPLEAPIISSUER != '' && secrets.ELECTROBUN_APPLEAPIKEY_P8 != '' }}
+      RELEASE: ${{ github.event.inputs.release }}
+    steps:
+      # First of all, before a secret is used for anything: does the Environment
+      # have the rules the comment above asks for?
+      - name: The Environment has a reviewer and is limited to main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          api="repos/$GITHUB_REPOSITORY/environments/desktop-signing"
+          if ! environment=$(gh api "$api" 2>"$RUNNER_TEMP/rules.err") || ! policies=$(gh api "$api/deployment-branch-policies" 2>>"$RUNNER_TEMP/rules.err"); then
+            echo "::warning::the job's token cannot read the rules of the Environment desktop-signing ($(tr '\n' ' ' < "$RUNNER_TEMP/rules.err" | cut -c1-160)), so they are not checked here: they must have been set up before the secrets were (see the header of this workflow and RELEASING.md)"
+            exit 0
+          fi
+          problems=""
+          custom=$(printf '%s' "$environment" | jq -r '.deployment_branch_policy.custom_branch_policies // false')
+          [ "$custom" = true ] || problems="$problems deployment branches are not limited to selected branches;"
+          names=$(printf '%s' "$policies" | jq -r '[.branch_policies[]? | select((.type // "branch") == "branch") | .name] | sort | join(",")')
+          [ "$names" = main ] || problems="$problems the branches allowed are '$names', not main alone;"
+          reviewers=$(printf '%s' "$environment" | jq '[.protection_rules[]? | select(.type == "required_reviewers") | (.reviewers // []) | length] | add // 0')
+          [ "$reviewers" -gt 0 ] || problems="$problems no required reviewer;"
+          if [ -n "$problems" ]; then
+            echo "::error::the Environment desktop-signing is not set up as the header of this workflow says:$problems nothing is signed. Set its rules first, then its secrets (RELEASING.md)."
+            exit 1
+          fi
+          echo "the Environment has $reviewers required reviewer(s) and is limited to: $names"
+
+      - name: Are the signing secrets in the Environment?
+        id: have
+        run: |
+          echo "available=$HAVE" >> "$GITHUB_OUTPUT"
+          if [ "$HAVE" != true ]; then
+            echo "::notice::the Environment desktop-signing does not hold all six signing secrets, so nothing is signed (see the header of this workflow)"
+          fi
+
+      # The input goes into a make variable, which make expands (`$(shell ...)`),
+      # and into a release's name: only a release's name gets past this.
+      - name: The release asked for is a release's name
+        id: release
+        if: steps.have.outputs.available == 'true'
+        run: |
+          set -eu
+          if [ -n "$RELEASE" ] && ! printf '%s' "$RELEASE" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::release is a tag such as v0.1.12"
+            exit 1
+          fi
+          echo "version=${RELEASE#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7
+        if: steps.have.outputs.available == 'true'
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned toolchain
+        if: steps.have.outputs.available == 'true'
+        run: rustup show
+
+      - uses: actions/setup-node@v7
+        if: steps.have.outputs.available == 'true'
+        with:
+          node-version: '22'
+
+      # No cache here: this job holds the secrets, and what a cache restores was
+      # written by runs that do not.
+
+      # The certificate goes into a keychain of its own, which is deleted at
+      # the end, and may be used by `codesign` and `security`, not by any
+      # program (`-A` would). The key file for notarization goes into the
+      # runner's temp directory.
+      - name: Import the certificate
+        if: steps.have.outputs.available == 'true'
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          ELECTROBUN_APPLEAPIKEY_P8: ${{ secrets.ELECTROBUN_APPLEAPIKEY_P8 }}
+        run: |
+          set -eu
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          pass=$(uuidgen)
+          echo "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$pass" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$pass" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -f pkcs12 -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$pass" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" login.keychain
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          echo "$ELECTROBUN_APPLEAPIKEY_P8" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+          chmod 600 "$RUNNER_TEMP/AuthKey.p8"
+
+      - name: Build, sign and notarize
+        if: steps.have.outputs.available == 'true'
+        timeout-minutes: 45
+        env:
+          ELECTROBUN_DEVELOPER_ID: ${{ secrets.ELECTROBUN_DEVELOPER_ID }}
+          ELECTROBUN_APPLEAPIKEY: ${{ secrets.ELECTROBUN_APPLEAPIKEY }}
+          ELECTROBUN_APPLEAPIISSUER: ${{ secrets.ELECTROBUN_APPLEAPIISSUER }}
+          STUDIO_SERVER: ${{ steps.release.outputs.version }}
+        run: |
+          set -eu
+          export ELECTROBUN_APPLEAPIKEYPATH="$RUNNER_TEMP/AuthKey.p8"
+          # A release's own server, its SHA-256 checked against the release's
+          # SHA256SUMS, when a release is named; this checkout's otherwise.
+          make studio-desktop STUDIO_SERVER="$STUDIO_SERVER"
+
+      # The same hook check the unsigned build passes, on the bundle that ships.
+      - name: The signed bundle holds none of the test hooks
+        if: steps.have.outputs.available == 'true'
+        run: node integrations/studio-desktop/scripts/checks/release.mjs
+
+      # What Gatekeeper will say on a Mac that has never seen this app, asked
+      # here: the signature, the hardened runtime and the Developer ID on the
+      # bundled fenec-server (each its own grep: one is not the other), and the
+      # notarization ticket stapled to the app and to the DMG.
+      - name: Hold the result to what Gatekeeper checks
+        if: steps.have.outputs.available == 'true'
+        run: |
+          set -eu
+          cd integrations/studio-desktop
+          app="build/stable-macos-arm64/fenec studio.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dv --verbose=4 "$app/Contents/Resources/app/bin/fenec-server" > "$RUNNER_TEMP/server-signature.txt" 2>&1
+          cat "$RUNNER_TEMP/server-signature.txt"
+          grep -E 'flags=.*runtime' "$RUNNER_TEMP/server-signature.txt"
+          grep -F 'Authority=Developer ID Application' "$RUNNER_TEMP/server-signature.txt"
+          spctl --assess --type execute --verbose=4 "$app"
+          xcrun stapler validate "$app"
+          for dmg in artifacts/*.dmg; do
+            xcrun stapler validate "$dmg"
+            spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
+          done
+
+      - uses: actions/upload-artifact@v7
+        if: steps.have.outputs.available == 'true'
+        with:
+          name: fenec-studio-signed-dmg
+          path: integrations/studio-desktop/artifacts/*.dmg
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Signed
+        id: done
+        if: steps.have.outputs.available == 'true'
+        run: echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Remove the certificate and the key
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
+          rm -f "$RUNNER_TEMP/AuthKey.p8" "$RUNNER_TEMP/certificate.p12"
+
+  # The only job with permission to write to the repository, and it holds no
+  # secret and runs nothing from a download but `gh`: a DMG that passed the
+  # signing job's checks, and a release it names.
+  attach:
+    name: attach the signed DMG to the release
+    needs: sign
+    if: needs.sign.outputs.signed == 'true' && github.event.inputs.release != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: fenec-studio-signed-dmg
+          path: dist
+
+      - name: Attach
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ github.event.inputs.release }}
+        run: |
+          set -eu
+          printf '%s' "$RELEASE" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::release is a tag such as v0.1.12"; exit 1; }
+          version="${RELEASE#v}"
+          for dmg in dist/*.dmg; do
+            mv "$dmg" "dist/fenec-studio-v$version-$(basename "$dmg")"
+          done
+          gh release upload "v$version" dist/fenec-studio-v"$version"-*.dmg --clobber -R "$GITHUB_REPOSITORY"

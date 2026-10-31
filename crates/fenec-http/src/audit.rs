@@ -8,7 +8,7 @@
 //! when, over what and from where:
 //!
 //! ```text
-//! {"at":"2026-10-01T09:30:12.041Z","event":"refused","level":"warn","proto":"http","peer":"10.0.0.7:53112","request_id":"9f2c41d07ab35e18","method":"POST","path":"/query"}
+//! {"at":"2026-10-01T09:30:12.041Z","event":"refused","level":"warn","proto":"http","peer":"10.0.0.7:53112","request_id":"9f2c41d07ab35e18","method":"POST","path":"/query","reason":"the token names no audience (aud) this server takes"}
 //! {"at":"2026-10-01T09:30:12.310Z","event":"schema","level":"info","proto":"http","peer":"10.0.0.7:53112","request_id":"5d0e7c2a91f4b366","statement":"create collection notes (title text)","failed":false}
 //! ```
 //!
@@ -108,6 +108,19 @@ thread_local! {
     // router forwarded it: the answer's head says so ([`VERIFIED_HEADER`]),
     // since the router holds no keys and keeps the client's count.
     static VERIFIED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    // Why the request this thread serves was refused its token, as the 401
+    // says it ([`refusal`]): the `refused` line names the check that failed
+    // -- an issuer, an audience, an expiry -- and never a value of the
+    // token, every reason being a text of the server's own.
+    static REASON: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+/// The reason the request this thread serves is refused its token, for its
+/// `refused` line: one of the server's own texts, never the token's. Set
+/// where the 401 is made, and let go by [`request`] as the next request
+/// begins, so a line never names a reason of the request before.
+pub fn refusal(why: &'static str) {
+    REASON.with(|r| r.set(Some(why)));
 }
 
 /// The header a node's answer to a forwarded request carries when a token
@@ -163,6 +176,7 @@ pub fn request(req: &crate::http::Request, mark: Option<&str>) -> Option<IpAddr>
     // The request before on this connection -- the router's pool hands one
     // connection to many clients -- verified nothing of this one's.
     VERIFIED.with(|v| v.set(false));
+    REASON.with(|r| r.set(None));
     client
 }
 
@@ -440,13 +454,14 @@ pub fn http(req: &crate::http::Request, status: u16, peer: Option<std::net::Sock
     let path = req.target.split('?').next().unwrap_or("");
     if status == 401 {
         REFUSED.fetch_add(1, Ordering::Relaxed);
-        event(
-            "refused",
-            &[
-                ("method", Field::Text(req.method.name())),
-                ("path", Field::Text(path)),
-            ],
-        );
+        let mut fields = vec![
+            ("method", Field::Text(req.method.name())),
+            ("path", Field::Text(path)),
+        ];
+        if let Some(why) = REASON.with(|r| r.take()) {
+            fields.push(("reason", Field::Text(why)));
+        }
+        event("refused", &fields);
         // Forwarded by the router, which waits it out by the client's
         // address: counted here, by the router's, it would hold every
         // client of the router to one count. Sent by the global entry, by

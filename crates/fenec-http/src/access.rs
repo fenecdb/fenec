@@ -20,10 +20,18 @@
 //! ```
 //!
 //! A rule without `for` applies to every token; one with it, to tokens whose
-//! `role` claim names that role (a text, or a list holding it). Rules on one
-//! collection widen each other, as permissive policies do. A collection no
-//! rule grants a token anything does not exist as far as that token can
-//! tell.
+//! `role` claim -- or the claim `--jwt-role-claim` names -- names that role
+//! (a text, or a list holding it); a role of more than one word, or holding
+//! a `#`, is quoted: `for "Account Admin"`. Rules on one collection widen
+//! each other, as permissive policies do. A collection no rule grants a
+//! token anything does not exist as far as that token can tell. A `#`
+//! outside quotes starts a comment.
+//!
+//! **A claim's name** is letters, digits and `_` as they stand
+//! (`$jwt.sub`), or any other in double quotes: `$jwt."cognito:groups"`,
+//! `$jwt."https://example.com/roles"`. A top-level claim alone: a path into
+//! a nested object is refused ([`claim_name`] says why), and so is an
+//! unquoted name running on into `-` or `:` (`$jwt.x-hasura-user-id`).
 //!
 //! **Grants** are `read`, `insert`, `update` and `delete`, and `write` is
 //! the three writes. `update(balance, held)` grants an update of those
@@ -100,6 +108,15 @@
 //! 'lobby']` those and one more -- and a text claim there is a list of one.
 //! A token whose claim lists more than [`MAX_CLAIM_VALUES`] is refused.
 //!
+//! **A claim names someone or is not there.** A rule naming a claim the
+//! token lacks does not apply, and neither does one naming a claim the
+//! token holds as `null`, as `""`, as an object, as a list where the rule
+//! reads one value, or as a list holding any of those ([`usable`]): bound,
+//! `owner = $jwt.sub` given `null` read every row with no owner. A rule
+//! only grants, so one that does not apply grants nothing. The tenant claim
+//! is the one whose absence widens (`--jwt-unbound-tenants`): held as a
+//! value naming no tenant, it reaches none. A `sub` of `""` is no subject.
+//!
 //! **A rule may read another collection** through `in (get ...)`, its
 //! claims bound inside the inner `get` as anywhere in the filter:
 //!
@@ -152,6 +169,16 @@
 //! rotation: add the new key, sign with it, and take the old one out once
 //! the tokens it signed have expired. A file that no longer reads keeps the
 //! keys read last.
+//!
+//! **Whom a token is for.** A provider's keys sign every token it issues,
+//! for every app of a tenant, team or pool: a good signature says who
+//! issued a token, not that it was issued for this database. Told issuers,
+//! audiences or clients ([`Demands`]: `--jwt-issuer`, `--jwt-audience`,
+//! `--jwt-client`), the server takes only a token whose `iss` is one of
+//! them, whose `aud` (a text or a list) holds one, whose `azp` -- or
+//! `client_id`, where it names no `azp` -- is one; told none, it asks
+//! nothing of them, as before. A refusal is 401 naming the check, never the
+//! token's value.
 
 use crate::crypto::{b64url_decode, b64url_encode, ct_eq, hmac_sha256, P256Key, RsaKey};
 use fenec_core::prelude::*;
@@ -207,6 +234,10 @@ pub struct Access {
     /// Emptied when the keys change, since a key taken out must take its
     /// tokens with it; `exp` and `nbf` are asked on every request.
     verified: [Mutex<HashMap<Box<str>, Claims>>; SHARDS],
+    /// [`Demands::role_claim`], shared with each [`Scope`] for `/_whoami`
+    /// to read the roles by: a reference count a request, where the name
+    /// copied was an allocation.
+    role_claim: Arc<str>,
     demands: Demands,
 }
 
@@ -229,6 +260,30 @@ pub struct Demands {
     /// there: a policy's `owner = $jwt.sub` matches the same user in every
     /// tenant's file, so a token for one tenant read every other.
     pub unbound_tenants: bool,
+    /// The issuers a token's `iss` must be one of (`--jwt-issuer`); none
+    /// asks nothing of it. A provider's keys sign every token it issues:
+    /// one key file read by servers of more than one provider's -- an `oct`
+    /// key shared, a file of several providers' keys -- takes any of their
+    /// tokens. Compared as written, a trailing `/` and all (Auth0's issuer
+    /// ends in one).
+    pub issuers: Vec<String>,
+    /// The audiences a token's `aud` -- a text, or a list -- must hold one
+    /// of (`--jwt-audience`); none asks nothing of it. One issuer's keys
+    /// sign for every app it serves -- a Cloudflare Access team's every
+    /// application, a Cognito pool's every app client, an Auth0 tenant's
+    /// every API -- and a token for another is told apart by its `aud`.
+    pub audiences: Vec<String>,
+    /// The clients a token's `azp`, or its `client_id` where it names no
+    /// `azp`, must be one of (`--jwt-client`); none asks nothing of it.
+    /// Cognito's access tokens carry the app client's id in `client_id`,
+    /// and an `aud` only when bound to a resource server; Auth0's,
+    /// Keycloak's and Clerk's name the app in `azp` (Clerk's leave it out
+    /// where the request carried no `Origin`).
+    pub clients: Vec<String>,
+    /// The claim a rule's `for <role>` reads (`--jwt-role-claim`, `role`
+    /// unless told): a text, or a list holding the role. A provider names
+    /// its own -- Cognito's `cognito:groups`, Auth0's a namespaced URL.
+    pub role_claim: String,
 }
 
 impl Default for Demands {
@@ -238,7 +293,52 @@ impl Default for Demands {
             max_age: None,
             tenant_claim: "tenant".into(),
             unbound_tenants: false,
+            issuers: Vec::new(),
+            audiences: Vec::new(),
+            clients: Vec::new(),
+            role_claim: "role".into(),
         }
+    }
+}
+
+/// What a 401 says of a token the demands refuse: the check it failed,
+/// never the value the token holds -- which a refused request's own sender
+/// knows, and a log or a proxy in between need not.
+const NO_ISSUER: &str = "the token names no issuer (iss) this server takes";
+const NO_AUDIENCE: &str = "the token names no audience (aud) this server takes";
+const NO_CLIENT: &str = "the token names no client (azp, or client_id) this server takes";
+
+impl Demands {
+    /// Whether `claims` name an issuer, an audience and a client this
+    /// server takes, where it was told any. An empty text names none, as
+    /// an empty token is none: a server told `""` takes no token.
+    fn whom(&self, claims: &[(String, Value)]) -> std::result::Result<(), &'static str> {
+        let claim = |name: &str| claims.iter().find(|(k, _)| k == name).map(|(_, v)| v);
+        let one_of = |v: Option<&Value>, list: &[String]| match v {
+            Some(Value::Text(t)) => !t.is_empty() && list.iter().any(|x| x == t),
+            _ => false,
+        };
+        if !self.issuers.is_empty() && !one_of(claim("iss"), &self.issuers) {
+            return Err(NO_ISSUER);
+        }
+        if !self.audiences.is_empty() {
+            // RFC 7519: a list of texts, or a single text.
+            let held = match claim("aud") {
+                Some(Value::List(l)) => l.iter().any(|a| one_of(Some(a), &self.audiences)),
+                a => one_of(a, &self.audiences),
+            };
+            if !held {
+                return Err(NO_AUDIENCE);
+            }
+        }
+        // `azp` where the token names one: a token naming both is judged
+        // by the party it was issued to, not by a `client_id` beside it.
+        if !self.clients.is_empty()
+            && !one_of(claim("azp").or_else(|| claim("client_id")), &self.clients)
+        {
+            return Err(NO_CLIENT);
+        }
+        Ok(())
     }
 }
 
@@ -404,6 +504,10 @@ struct Rule {
     /// `/_whoami` shows a token it applies to.
     text: Option<Arc<str>>,
     claims: Vec<String>,
+    /// Beside each of `claims`, whether the filter reads it as a list
+    /// wherever it reads it -- in an `in`'s list, or as the list `has`
+    /// looks in -- so that a token may give a list there ([`usable`]).
+    lists: Vec<bool>,
     role: Option<String>,
     /// The collections its inner `get`s read, at any depth: what a ring of
     /// rules reading each other is found by at startup ([`ring`]).
@@ -429,6 +533,10 @@ pub struct Scope {
     /// Whether a read rule of the token names its fields (`read(a, b)`):
     /// a token none of whose do takes the path it took before them.
     fielded: bool,
+    /// The token's claims and the claim a rule's `for` reads, for
+    /// `/_whoami` to say which roles the server took (the studio shows
+    /// them): read there alone, so a request pays two reference counts.
+    roles: (Claims, Arc<str>),
 }
 
 #[derive(Clone)]
@@ -496,7 +604,7 @@ impl Access {
         let mut append_only = Vec::new();
         let mut lines = Vec::new();
         for (n, line) in policy.lines().enumerate() {
-            let line = line.split('#').next().unwrap_or("").trim();
+            let line = uncommented(line).trim();
             if line.is_empty() {
                 continue;
             }
@@ -537,13 +645,20 @@ impl Access {
             rules,
             append_only: append_only.into(),
             verified: Default::default(),
+            role_claim: Arc::from(Demands::default().role_claim.as_str()),
             demands: Demands::default(),
         })
     }
 
-    /// The same keys and policy, holding tokens to `demands`.
+    /// The same keys and policy, holding tokens to `demands`. A token kept
+    /// passed the demands it was checked under ([`Access::check`]), so
+    /// those kept are let go.
     pub fn demanding(mut self, demands: Demands) -> Access {
+        self.role_claim = Arc::from(demands.role_claim.as_str());
         self.demands = demands;
+        for v in &self.verified {
+            v.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        }
         self
     }
 
@@ -579,17 +694,48 @@ impl Access {
     /// A token for `claims`, a JSON object -- what `fenec-server --mint-token`
     /// prints.
     /// Signed with the first HS256 key, its `kid` named. Claims naming no
-    /// `exp` get one [`MINTED_FOR`] seconds from now: a server refuses a
-    /// token without one ([`Demands::require_exp`]).
+    /// `exp` get one [`MINTED_FOR`] seconds from now -- or `--jwt-max-age`
+    /// from now where that is sooner: a server refuses a token without one
+    /// ([`Demands::require_exp`]) and one further ahead than its age. On a
+    /// server told an issuer, an audience or a client, claims naming none
+    /// get the first it was told (`iss`, `aud`, `azp`). Either way, it
+    /// mints no token it would refuse.
     pub fn mint(&self, claims: &str) -> std::result::Result<String, String> {
         let parsed = fenec_core::json::parse_object(claims).map_err(|e| e.to_string())?;
+        let mut more = String::new();
+        let mut stamp = |name: &str, value: &str| {
+            if !parsed.iter().any(|(k, _)| k == name) {
+                more.push_str(&format!(",\"{name}\":{value}"));
+            }
+        };
+        let life = self
+            .demands
+            .max_age
+            .map_or(MINTED_FOR, |m| m.min(MINTED_FOR));
+        stamp("exp", &(unix_now() + life).to_string());
+        let d = &self.demands;
+        for (name, told) in [
+            ("iss", &d.issuers),
+            ("aud", &d.audiences),
+            ("azp", &d.clients),
+        ] {
+            if let Some(first) = told.first() {
+                let mut text = String::new();
+                fenec_core::json::escape_into(&mut text, first);
+                stamp(name, &text);
+            }
+        }
         let stamped;
-        let claims = if parsed.iter().any(|(k, _)| k == "exp") {
+        let claims = if more.is_empty() {
             claims
         } else {
             let open = claims.trim().strip_suffix('}').unwrap_or("{").trim_end();
-            let comma = if open.ends_with('{') { "" } else { "," };
-            stamped = format!(r#"{open}{comma}"exp":{}}}"#, unix_now() + MINTED_FOR);
+            let more = if open.ends_with('{') {
+                &more[1..]
+            } else {
+                &more
+            };
+            stamped = format!("{open}{more}}}");
             &stamped
         };
         let keys = self.keys.read().unwrap_or_else(|e| e.into_inner()).clone();
@@ -620,8 +766,9 @@ impl Access {
     pub fn scope(&self, token: &str, now: u64) -> std::result::Result<Scope, &'static str> {
         let claims = self.verify(token, now)?;
         let claim = |name: &str| claims.iter().find(|(k, _)| k == name).map(|(_, v)| v);
-        // A role is a text, or a list of them, the token holding each.
-        let has_role = |role: &str| match claim("role") {
+        // A role is a text, or a list of them, the token holding each, in
+        // the claim the server reads roles from (`role` unless told).
+        let has_role = |role: &str| match claim(&self.demands.role_claim) {
             Some(Value::Text(r)) => r == role,
             Some(Value::List(l)) => l.iter().any(|v| v.as_text() == Some(role)),
             _ => false,
@@ -632,15 +779,19 @@ impl Access {
                 continue;
             }
             // A rule naming a claim the token lacks does not apply: a filter
-            // with a hole in it would match rows it was never meant to.
+            // with a hole in it would match rows it was never meant to. Nor
+            // does one naming a claim the token holds as `null`, `""` or a
+            // value the rule cannot compare where it reads it ([`usable`]):
+            // bound, each was such a hole. A rule grants and never takes
+            // away, so one that does not apply grants nothing.
             let mut values = Vec::with_capacity(r.claims.len());
-            for c in &r.claims {
+            for (c, &list) in r.claims.iter().zip(&r.lists) {
                 match claim(c) {
                     Some(Value::List(l)) if l.len() > MAX_CLAIM_VALUES => {
                         return Err("a list claim the policy reads holds more than 1 000 values")
                     }
-                    Some(v) => values.push(v.clone()),
-                    None => continue 'rules,
+                    Some(v) if usable(v, list) => values.push(v.clone()),
+                    _ => continue 'rules,
                 }
             }
             rules.push(Bound {
@@ -660,18 +811,33 @@ impl Access {
             Scope::held(&mut rules);
         }
         // Anything but a text or a list of texts names no tenant: a number
-        // or an object compared as text could be made to match.
+        // or an object compared as text could be made to match. Only a
+        // token without the claim names none, which `--jwt-unbound-tenants`
+        // takes for every tenant: one holding it as `null`, `""`, a number
+        // or a list of no tenant's name is held to none, since the issuer
+        // meant to bind it -- `"tenant": user.tenant` minted `null` for a
+        // user without one, and that token reached every tenant.
         let tenants = match claim(&self.demands.tenant_claim) {
-            Some(Value::Text(t)) => Some(vec![t.clone()]),
+            None => None,
+            Some(Value::Text(t)) if !t.is_empty() => Some(vec![t.clone()]),
             Some(Value::List(l)) => Some(
                 l.iter()
                     .filter_map(|v| match v {
-                        Value::Text(t) => Some(t.clone()),
+                        Value::Text(t) if !t.is_empty() => Some(t.clone()),
                         _ => None,
                     })
                     .collect(),
             ),
-            _ => None,
+            Some(_) => Some(Vec::new()),
+        };
+        // An empty claim name is none (`--jwt-tenant-claim ""` is refused
+        // at the start): read as the claim no token holds, it left every
+        // token unbound, and `--jwt-unbound-tenants` took each for every
+        // tenant. A library's `Demands` holding one binds every token to
+        // none.
+        let tenants = match self.demands.tenant_claim.is_empty() {
+            true => Some(Vec::new()),
+            false => tenants,
         };
         let expires = match claim("exp") {
             Some(Value::Int(i)) => Some((*i).max(0) as u64 * 1000),
@@ -682,8 +848,11 @@ impl Access {
             .iter()
             .any(|r| r.ops & READ != 0 && r.read_fields.is_some());
         Ok(Scope {
+            // `""` is no one: taken for a subject, its Idempotency-Keys were
+            // kept under the server token's own, whose answers it was then
+            // replayed.
             subject: match claim("sub") {
-                Some(Value::Text(s)) => Some(s.clone()),
+                Some(Value::Text(s)) if !s.is_empty() => Some(s.clone()),
                 _ => None,
             },
             expires,
@@ -693,6 +862,7 @@ impl Access {
             unbound: self.demands.unbound_tenants,
             append_only: Arc::clone(&self.append_only),
             fielded,
+            roles: (Arc::clone(&claims), Arc::clone(&self.role_claim)),
         })
     }
 
@@ -790,6 +960,11 @@ impl Access {
             });
         }
         let claims = Arc::new(object(body)?);
+        // Asked once, before the token is kept, as its signature is: the
+        // demands are fixed with the `Access`, unlike the time `exp` is
+        // asked against. After the signature, so a token no key signed is
+        // told nothing of what this server takes.
+        self.demands.whom(&claims)?;
         #[cfg(test)]
         held::at(token);
         let mut kept = self.verified[shard(token)]
@@ -888,13 +1063,8 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
     if every_read {
         read_fields = None;
     }
-    let mut role = None;
-    let words: Vec<&str> = rest.split_whitespace().collect();
-    if words.len() >= 2 && words[words.len() - 2] == "for" {
-        role = Some(words[words.len() - 1].to_string());
-        let cut = rest.rfind("for").unwrap();
-        rest = &rest[..cut];
-    }
+    let role;
+    (rest, role) = role_of(rest)?;
     let rest = rest.trim();
     let mut claims = Vec::new();
     let mut reads = Vec::new();
@@ -905,21 +1075,32 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         let text = rest
             .strip_prefix("where")
             .ok_or_else(|| format!("expected `where <filter>`, got `{rest}`"))?;
-        if text.contains("$1") || text.contains("$2") {
-            return Err("parameters are `$jwt.<claim>` in a policy".into());
+        // A parameter the policy writes itself stands for whichever claim
+        // the rewrite below numbers so: `d = $3` after three claims was
+        // taken as the third, and after fewer bound nothing, panicking every
+        // request under the rule. Refused wherever it stands, a string's
+        // text among them, rather than told apart from one by a second
+        // reading of the lexer's.
+        if let Some(at) = text
+            .as_bytes()
+            .windows(2)
+            .position(|w| w[0] == b'$' && w[1].is_ascii_digit())
+        {
+            let n: String = text[at + 1..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            return Err(format!(
+                "`${n}`: a policy names its parameters by claim, `$jwt.<claim>`, and \
+                 numbers none of its own"
+            ));
         }
         // `$jwt.sub` becomes parameter $1, the next claim $2, ...
         let mut out = String::new();
         let mut s = text;
         while let Some(at) = s.find("$jwt.") {
             out.push_str(&s[..at]);
-            let name: String = s[at + 5..]
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            if name.is_empty() {
-                return Err("`$jwt.` names no claim".into());
-            }
+            let (name, len) = claim_name(&s[at + 5..])?;
             let k = match claims.iter().position(|c| *c == name) {
                 Some(k) => k,
                 None => {
@@ -938,7 +1119,7 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
             } else {
                 out.push_str(&format!("${}", k + 1));
             }
-            s = &s[at + 5 + name.len()..];
+            s = &s[at + 5 + len..];
         }
         out.push_str(s);
         let stmt = fenec_ql::parse_one(&format!("get _ where {out}"))
@@ -974,6 +1155,10 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         (true, Some(f)) => relaxed(f.clone(), &|name| name.starts_with(NEW)),
         _ => None,
     };
+    let mut alone = vec![false; claims.len()];
+    if let Some(f) = &filter {
+        read_alone(f, &mut alone);
+    }
     Ok(Rule {
         collection: (collection != "*").then(|| collection.to_string()),
         ops,
@@ -985,9 +1170,194 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         transition,
         text,
         claims,
+        lists: alone.iter().map(|a| !a).collect(),
         role,
         reads,
     })
+}
+
+/// Marks in `alone` each claim `e` reads as one value somewhere: anywhere
+/// but an `in`'s list, which [`bind`] spreads a list claim into, and the
+/// list `has` looks in -- inner `get`s' filters, where a rule's claims
+/// also go, among them.
+fn read_alone(e: &Expr, alone: &mut [bool]) {
+    match e {
+        Expr::Param(k) => alone[*k] = true,
+        Expr::In(x, items) => {
+            read_alone(x, alone);
+            for i in items.iter().filter(|i| !matches!(i, Expr::Param(_))) {
+                read_alone(i, alone);
+            }
+        }
+        Expr::Has(x, y) => {
+            if !matches!(**x, Expr::Param(_)) {
+                read_alone(x, alone);
+            }
+            read_alone(y, alone);
+        }
+        Expr::InSelect(x, sel) => {
+            read_alone(x, alone);
+            if let Some(f) = &sel.filter {
+                read_alone(f, alone);
+            }
+        }
+        e => e.each_child(&mut |c| read_alone(c, alone)),
+    }
+}
+
+/// Whether a claim's value is one a rule can be held to where it reads it
+/// (`list`: only ever as a list, [`Rule::lists`]): a text that is not
+/// empty, a finite number or a bool, or there a list of those. Anything
+/// else is taken for a claim the token lacks, and the rule naming it does
+/// not apply. Bound as it came, `"sub": null` made `owner = $jwt.sub` the
+/// filter `owner = null`, which every row whose owner is null or missing
+/// matches -- every row written before `alter collection notes add field
+/// owner text` -- and an app minting `null` for an anonymous user handed
+/// each of them those rows, to read, `set` and `del`; `""` read the rows an
+/// app stored with no owner as `""`, and a `null` in a list claim the rows
+/// `room in [...]` found with no room. An object compares with nothing a
+/// filter holds a field to, nor a list where one value is read: neither
+/// names anyone, so neither is let stand for someone.
+fn usable(v: &Value, list: bool) -> bool {
+    match v {
+        Value::Text(t) => !t.is_empty(),
+        Value::Int(_) | Value::Bool(_) => true,
+        Value::Float(f) => f.is_finite(),
+        Value::List(items) => list && items.iter().all(|i| usable(i, false)),
+        _ => false,
+    }
+}
+
+/// The claim `$jwt.` names at the start of `rest`, and the bytes it takes
+/// there: letters, digits and `_` as they stand (`$jwt.sub`), or any other
+/// name in double quotes -- `$jwt."cognito:groups"`, `$jwt."https://example.com/roles"`
+/// -- where a `.`, a `:` or a `/` is part of the name, never a path.
+///
+/// A top-level claim alone. A path into a nested object
+/// (`$jwt.app_metadata.role`) is refused rather than read: providers keep
+/// what a user may edit of themselves in such objects (Supabase's and
+/// Auth0's `user_metadata`) beside what only the app may (`app_metadata`),
+/// a word apart in a rule, and one reading the wrong object lets a user
+/// grant themselves its rows. A claim at the top is one the provider was told to
+/// sign there.
+fn claim_name(rest: &str) -> std::result::Result<(String, usize), String> {
+    let (name, len) = match rest.strip_prefix('"') {
+        Some(quoted) => {
+            let close = quoted
+                .find('"')
+                .ok_or("`$jwt.\"` is not closed: a quoted claim is `$jwt.\"<name>\"`")?;
+            let name = &quoted[..close];
+            // A token's member names are read unescaped; one holding `"`
+            // or `\` is no provider's, and a policy that could write one
+            // would be read two ways.
+            if name.contains('\\') {
+                return Err(format!(
+                    "`$jwt.\"{name}\"`: a quoted claim name is taken as written, with no `\\`"
+                ));
+            }
+            (name.to_string(), close + 2)
+        }
+        None => {
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            let len = name.len();
+            // `$jwt.x-hasura-user-id` read as the claim `x` minus the field
+            // `hasura`... and parsed: the rule held a subtraction no one
+            // wrote. A provider's names hold `-` and `:`; quoted, they are
+            // the name.
+            if rest[len..].starts_with(['-', ':']) {
+                let written: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | ':'))
+                    .collect();
+                return Err(format!(
+                    "`$jwt.{written}`: a claim named with `-` or `:` is read whole only quoted -- \
+                     quote it: `$jwt.\"{written}\"` (an operator after a claim is spaced: \
+                     `$jwt.{name} - 1`)"
+                ));
+            }
+            (name, len)
+        }
+    };
+    if name.is_empty() {
+        let why = "`$jwt.` names no claim: `$jwt.sub`, or `$jwt.\"cognito:groups\"` for a name \
+                   of other characters";
+        return Err(why.into());
+    }
+    let path = rest[len..]
+        .strip_prefix('.')
+        .is_some_and(|p| p.starts_with(|c: char| c.is_alphanumeric() || c == '_' || c == '"'));
+    if path {
+        let written: String = rest
+            .chars()
+            .take_while(|c| !c.is_whitespace() && !matches!(c, ')' | ',' | ']'))
+            .collect();
+        return Err(format!(
+            "`$jwt.{written}`: a policy reads a token's top-level claims alone -- a nested \
+             object is where a provider keeps what a user may edit of themselves, and a path \
+             into it would let one grant themselves rows; have the provider sign the claim at \
+             the top of the token"
+        ));
+    }
+    Ok((name, len))
+}
+
+/// A policy line up to its comment: the first `#` outside double or single
+/// quotes. Cut at the first `#` anywhere, `$jwt."https://example.com/#user"` lost
+/// the rest of its line and its rule failed to parse, as did a filter's
+/// `'#general'`; a quoted role (`for "Team #1"`) is read whole too.
+fn uncommented(line: &str) -> &str {
+    let mut quote = None;
+    let mut escaped = false;
+    for (i, c) in line.char_indices() {
+        match quote {
+            // FenecQL's texts escape with `\`; a quoted claim name or role
+            // holds none, and is refused where it does.
+            Some(_) if std::mem::take(&mut escaped) => {}
+            Some(_) if c == '\\' => escaped = true,
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '#' => return &line[..i],
+            None if c == '"' || c == '\'' => quote = Some(c),
+            None => {}
+        }
+    }
+    line
+}
+
+/// A rule's `for <role>` and the rule before it: the last word `for`
+/// standing alone, then the role -- a word, or any name in double quotes
+/// (`for "Account Admin"`), which a provider's group names need. Found by
+/// words, never by letters: cut at the last `for` in the line,
+/// `for platform-admins` lost its role's own letters and
+/// `for information-security` was refused at startup.
+fn role_of(rest: &str) -> std::result::Result<(&str, Option<String>), String> {
+    let t = rest.trim_end();
+    // A filter may end in a quoted text as well: the quotes are a role only
+    // where the word before them is `for`.
+    let quoted = t
+        .strip_suffix('"')
+        .and_then(|s| s.rfind('"').map(|open| (&s[..open], &s[open + 1..], true)));
+    let Some((before, role, quoted)) = quoted.or_else(|| {
+        t.rsplit_once(char::is_whitespace)
+            .map(|(b, r)| (b, r, false))
+    }) else {
+        return Ok((rest, None));
+    };
+    let Some(head) = before.trim_end().strip_suffix("for") else {
+        return Ok((rest, None));
+    };
+    if !(head.is_empty() || head.ends_with(char::is_whitespace)) {
+        return Ok((rest, None));
+    }
+    if quoted && (role.is_empty() || role.contains('\\')) {
+        return Err(format!(
+            "`for \"{role}\"` names no role: a quoted role is a name, taken as written"
+        ));
+    }
+    Ok((head, Some(role.to_string())))
 }
 
 /// The collections the inner `get`s of a rule's filter read, at any depth,
@@ -1545,6 +1915,7 @@ impl Scope {
     pub fn reaches(&self, name: &str) -> std::result::Result<(), &'static str> {
         match &self.tenants {
             Some(names) if names.iter().any(|n| n == name) => Ok(()),
+            Some(names) if names.is_empty() => Err("this token's tenant claim names no tenant"),
             Some(_) => Err("this token is for another tenant"),
             None if self.unbound => Ok(()),
             None => Err("this token names no tenant, and this node serves tenants"),
@@ -1552,7 +1923,8 @@ impl Scope {
     }
 
     /// What the token may do, as `/_whoami` answers it: its `sub`, the
-    /// tenants its claim names, and each rule that applies to it -- the
+    /// roles its role claim holds, the tenants its claim names, and each
+    /// rule that applies to it -- the
     /// collection, the grants, the fields an update may change, the fields
     /// a read shows and the rows, the filter as the policy writes it. A
     /// token is shown its own rules and no other's: a rule for a role it
@@ -1565,7 +1937,32 @@ impl Scope {
             Some(s) => escape_into(out, s),
             None => out.push_str("null"),
         }
-        out.push_str(",\"tenants\":");
+        // The roles a rule's `for` was asked of, from the claim the server
+        // reads them from: the studio showed the token's own `role`, which
+        // under `--jwt-role-claim` is a claim like any other.
+        out.push_str(",\"roles\":[");
+        let (claims, name) = &self.roles;
+        let held = claims
+            .iter()
+            .find(|(k, _)| k == name.as_ref())
+            .map(|(_, v)| v);
+        let roles: &[Value] = match held {
+            Some(Value::List(l)) => l,
+            Some(v @ Value::Text(_)) => std::slice::from_ref(v),
+            _ => &[],
+        };
+        let mut first = true;
+        for role in roles
+            .iter()
+            .filter_map(Value::as_text)
+            .filter(|r| !r.is_empty())
+        {
+            if !std::mem::take(&mut first) {
+                out.push(',');
+            }
+            escape_into(out, role);
+        }
+        out.push_str("],\"tenants\":");
         texts_into(out, self.tenants.as_deref());
         out.push_str(",\"unbound\":");
         out.push_str(if self.unbound { "true" } else { "false" });
@@ -1719,6 +2116,7 @@ impl Scope {
             unbound: self.unbound,
             append_only: Arc::clone(&self.append_only),
             fielded: self.fielded,
+            roles: (Arc::clone(&self.roles.0), Arc::clone(&self.roles.1)),
         })
     }
 
@@ -2925,6 +3323,240 @@ mod tests {
         }
     }
 
+    /// An HS256 token for `claims` exactly as given: `mint` stamps what
+    /// claims leave out.
+    fn signed(claims: &str) -> String {
+        let head = b64url_encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let body = b64url_encode(claims.as_bytes());
+        let sig = hmac_sha256(SECRET, format!("{head}.{body}").as_bytes());
+        format!("{head}.{body}.{}", b64url_encode(&sig))
+    }
+
+    /// Told issuers, audiences and clients, a token is taken only where it
+    /// names one of each; told none, whatever it names, or not.
+    #[test]
+    fn whom_a_token_is_for_is_asked_where_told() {
+        let told = |d: Demands| access("").demanding(d);
+        let ask = |a: &Access, claims: &str| a.verify(&signed(claims), 1_000).map(|_| ());
+        let iss = told(Demands {
+            issuers: vec!["https://a.example/".into(), "https://b.example".into()],
+            ..Demands::default()
+        });
+        assert_eq!(
+            ask(&iss, r#"{"iss":"https://a.example/","exp":2000}"#),
+            Ok(())
+        );
+        assert_eq!(
+            ask(&iss, r#"{"iss":"https://b.example","exp":2000}"#),
+            Ok(())
+        );
+        for wrong in [
+            r#"{"iss":"https://a.example","exp":2000}"#,
+            r#"{"iss":"https://c.example","exp":2000}"#,
+            r#"{"iss":["https://a.example/"],"exp":2000}"#,
+            r#"{"iss":null,"exp":2000}"#,
+            r#"{"exp":2000}"#,
+        ] {
+            assert_eq!(ask(&iss, wrong), Err(NO_ISSUER), "{wrong}");
+        }
+
+        let aud = told(Demands {
+            audiences: vec!["notes-api".into()],
+            ..Demands::default()
+        });
+        assert_eq!(ask(&aud, r#"{"aud":"notes-api","exp":2000}"#), Ok(()));
+        assert_eq!(
+            ask(&aud, r#"{"aud":["other","notes-api"],"exp":2000}"#),
+            Ok(())
+        );
+        for wrong in [
+            r#"{"aud":"other","exp":2000}"#,
+            r#"{"aud":["other"],"exp":2000}"#,
+            r#"{"aud":[],"exp":2000}"#,
+            r#"{"aud":{"notes-api":true},"exp":2000}"#,
+            r#"{"exp":2000}"#,
+        ] {
+            assert_eq!(ask(&aud, wrong), Err(NO_AUDIENCE), "{wrong}");
+        }
+
+        // `azp` where the token names one, `client_id` (Cognito's access
+        // tokens) where it names none.
+        let client = told(Demands {
+            clients: vec!["app-1".into()],
+            ..Demands::default()
+        });
+        assert_eq!(ask(&client, r#"{"azp":"app-1","exp":2000}"#), Ok(()));
+        assert_eq!(ask(&client, r#"{"client_id":"app-1","exp":2000}"#), Ok(()));
+        for wrong in [
+            r#"{"azp":"app-2","client_id":"app-1","exp":2000}"#,
+            r#"{"client_id":"app-2","exp":2000}"#,
+            r#"{"aud":"app-1","exp":2000}"#,
+        ] {
+            assert_eq!(ask(&client, wrong), Err(NO_CLIENT), "{wrong}");
+        }
+
+        // An empty text names nothing: a server told one takes no token.
+        let empty = told(Demands {
+            issuers: vec![String::new()],
+            ..Demands::default()
+        });
+        assert_eq!(ask(&empty, r#"{"iss":"","exp":2000}"#), Err(NO_ISSUER));
+
+        // Told none, nothing is asked of them.
+        let open = access("");
+        assert_eq!(
+            ask(&open, r#"{"iss":5,"aud":{},"azp":[],"exp":2000}"#),
+            Ok(())
+        );
+
+        // A token kept before the demands were is let go by them.
+        let a = access("");
+        let t = signed(r#"{"iss":"https://c.example","exp":2000}"#);
+        assert!(a.verify(&t, 1_000).is_ok());
+        let a = a.demanding(Demands {
+            issuers: vec!["https://a.example/".into()],
+            ..Demands::default()
+        });
+        assert_eq!(a.verify(&t, 1_000).unwrap_err(), NO_ISSUER);
+
+        // A refusal names the check, never the value the token holds.
+        for why in [NO_ISSUER, NO_AUDIENCE, NO_CLIENT] {
+            assert!(!why.contains("example") && !why.contains("app-"), "{why}");
+        }
+
+        // A token minted here is one the server takes: the first of each
+        // stamped where the claims name none, never over one they name.
+        let all = told(Demands {
+            issuers: vec!["https://a.example/".into()],
+            audiences: vec!["notes-api".into(), "x".into()],
+            clients: vec!["app-1".into()],
+            ..Demands::default()
+        });
+        let minted = all.mint(r#"{"sub":"alice"}"#).unwrap();
+        assert!(all.verify(&minted, unix_now()).is_ok());
+        let body = minted.split('.').nth(1).unwrap();
+        let body = String::from_utf8(b64url_decode(body).unwrap()).unwrap();
+        assert!(
+            body.contains(r#""iss":"https://a.example/""#)
+                && body.contains(r#""aud":"notes-api""#)
+                && body.contains(r#""azp":"app-1""#),
+            "{body}"
+        );
+        let other = all.mint(r#"{"sub":"alice","aud":"y"}"#).unwrap();
+        assert_eq!(all.verify(&other, unix_now()).unwrap_err(), NO_AUDIENCE);
+        assert!(all.mint("{}").is_ok() && all.mint(" { } ").is_ok());
+    }
+
+    /// `for <role>` reads the claim the server names, a text or a list
+    /// holding the role; `role` unless told.
+    #[test]
+    fn a_role_is_read_from_the_claim_named() {
+        let policy = "notes read for editors\n";
+        let reads = |a: &Access, claims: &str| {
+            a.scope(&a.mint(claims).unwrap(), 0)
+                .unwrap()
+                .readable("notes")
+        };
+        let plain = access(policy);
+        assert!(reads(&plain, r#"{"sub":"a","role":"editors"}"#));
+        assert!(reads(&plain, r#"{"sub":"a","role":["x","editors"]}"#));
+        assert!(!reads(
+            &plain,
+            r#"{"sub":"a","cognito:groups":["editors"]}"#
+        ));
+        let groups = access(policy).demanding(Demands {
+            role_claim: "cognito:groups".into(),
+            ..Demands::default()
+        });
+        assert!(reads(
+            &groups,
+            r#"{"sub":"a","cognito:groups":["editors"]}"#
+        ));
+        assert!(reads(&groups, r#"{"sub":"a","cognito:groups":"editors"}"#));
+        // The claim named, and no other: `role` is a claim like any there.
+        assert!(!reads(&groups, r#"{"sub":"a","role":"editors"}"#));
+        assert!(!reads(
+            &groups,
+            r#"{"sub":"a","cognito:groups":["readers"]}"#
+        ));
+        // Neither a number nor an object compared as text.
+        assert!(!reads(
+            &groups,
+            r#"{"sub":"a","cognito:groups":{"editors":1}}"#
+        ));
+    }
+
+    /// `$jwt."<name>"` names a claim of any characters, top-level; a path
+    /// into a nested one is refused at startup.
+    #[test]
+    fn a_quoted_claim_name_is_read_whole() {
+        let a = access(
+            "notes read where team in $jwt.\"cognito:groups\"\n\
+             posts read,write where owner = $jwt.\"https://example.com/user\" and org = $jwt.org\n\
+             docs read where owner = $jwt.\"sub\"\n",
+        );
+        let s = a
+            .scope(
+                &a.mint(
+                    r#"{"sub":"alice","org":"o1","cognito:groups":["t1","t2"],"https://example.com/user":"u9"}"#,
+                )
+                .unwrap(),
+                0,
+            )
+            .unwrap();
+        let Some(Some(Expr::In(_, items))) = s.filter("notes", READ) else {
+            panic!("an in list");
+        };
+        assert_eq!(
+            items,
+            vec![
+                Expr::Lit(Value::Text("t1".into())),
+                Expr::Lit(Value::Text("t2".into()))
+            ]
+        );
+        let Some(Some(Expr::And(owner, _))) = s.filter("posts", INSERT) else {
+            panic!("an and");
+        };
+        let Expr::Cmp(CmpOp::Eq, _, v) = *owner else {
+            panic!("owner = ...");
+        };
+        assert_eq!(*v, Expr::Lit(Value::Text("u9".into())));
+        let Some(Some(Expr::Cmp(CmpOp::Eq, _, v))) = s.filter("docs", READ) else {
+            panic!("owner = ...");
+        };
+        assert_eq!(*v, Expr::Lit(Value::Text("alice".into())));
+        // `$jwt."sub"` and `$jwt.sub` are one claim, one parameter.
+        let r = rule(r#"notes read where owner = $jwt."sub" or editor = $jwt.sub"#).unwrap();
+        assert_eq!(r.claims, vec!["sub".to_string()]);
+        // A dot inside the quotes is part of the name.
+        let r = rule(r#"notes read where owner = $jwt."a.b""#).unwrap();
+        assert_eq!(r.claims, vec!["a.b".to_string()]);
+
+        for (bad, says) in [
+            ("notes read where x = $jwt.app_metadata.role", "top-level"),
+            (
+                r#"notes read where x = $jwt."app_metadata".role"#,
+                "top-level",
+            ),
+            (
+                r#"notes read where x = $jwt.app_metadata."role""#,
+                "top-level",
+            ),
+            (
+                r#"notes read where x in $jwt."https://x/".roles"#,
+                "top-level",
+            ),
+            (r#"notes read where x = $jwt."open"#, "not closed"),
+            (r#"notes read where x = $jwt."""#, "names no claim"),
+            (r#"notes read where x = $jwt."a\"b""#, "no `\\`"),
+            ("notes read where x = $jwt.", "names no claim"),
+            ("notes read where x = $jwt.'sub'", "names no claim"),
+        ] {
+            let e = Access::new(SECRET, bad).err().unwrap_or_default();
+            assert!(e.contains(says), "{bad}: {e}");
+        }
+    }
+
     /// `in $jwt.rooms` takes a list claim's values, and a token listing
     /// more than the bound is refused.
     #[test]
@@ -2970,5 +3602,350 @@ mod tests {
             .collect();
         let claims = format!(r#"{{"sub":"a","rooms":[{}]}}"#, many.join(","));
         assert!(a.scope(&a.mint(&claims).unwrap(), 0).is_err());
+    }
+
+    /// A claim held as `null`, `""`, an object, a list where one value is
+    /// read or a list holding any of those is a claim the token lacks: the
+    /// rule naming it does not apply. Where a rule reads a claim as a list
+    /// alone -- an `in`'s list, the list `has` looks in -- a list is a
+    /// value, every value in it one.
+    #[test]
+    fn a_claim_no_rule_can_compare_is_no_claim() {
+        let a = access(
+            "notes read where owner = $jwt.sub\n\
+             rooms read where id in [$jwt.rooms, 0]\n\
+             posts read where $jwt.rooms has room\n\
+             mixed read where room in $jwt.rooms or owner = $jwt.rooms\n\
+             teams read where team in (get members select team where user = $jwt.sub)\n\
+             members read where user = $jwt.sub\n",
+        );
+        let lists = |name: &str| {
+            let r = a
+                .rules
+                .iter()
+                .find(|r| r.collection.as_deref() == Some(name));
+            r.unwrap().lists.clone()
+        };
+        assert_eq!(lists("notes"), [false]);
+        assert_eq!(lists("rooms"), [true]);
+        assert_eq!(lists("posts"), [true]);
+        assert_eq!(lists("mixed"), [false]);
+        assert_eq!(lists("teams"), [false]);
+
+        let readable = |claims: &str| {
+            let s = a.scope(&a.mint(claims).unwrap(), 0).unwrap();
+            ["notes", "rooms", "posts", "mixed", "teams"]
+                .into_iter()
+                .filter(|c| s.readable(c))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            readable(r#"{"sub":"a","rooms":["r1",2]}"#),
+            ["notes", "rooms", "posts", "teams"]
+        );
+        assert_eq!(readable(r#"{"sub":"a","rooms":"r1"}"#).len(), 5);
+        assert_eq!(readable(r#"{"sub":7,"rooms":[]}"#).len(), 4);
+        assert_eq!(readable(r#"{"sub":true,"rooms":1.5}"#).len(), 5);
+        for nobody in [
+            r#"{"sub":null,"rooms":null}"#,
+            r#"{"sub":"","rooms":""}"#,
+            r#"{"sub":{"id":"a"},"rooms":{"r":1}}"#,
+            r#"{"sub":["a"],"rooms":["r1",null]}"#,
+            r#"{"sub":[],"rooms":["r1",""]}"#,
+            r#"{"sub":[null],"rooms":[["r1"]]}"#,
+            r#"{"rooms":["r1",{"r":1}]}"#,
+        ] {
+            assert!(readable(nobody).is_empty(), "{nobody}");
+        }
+        // A parameter of the policy's own stood for whichever claim the
+        // rewrite numbered so -- `$3` after three claims for the third --
+        // and after fewer for nothing, panicking every request.
+        for bad in [
+            "notes read where owner = $3",
+            "notes read where owner = $jwt.sub or x = $2",
+            "notes read where a = $jwt.a or b = $jwt.b or c = $jwt.c or d = $3",
+            "notes read where title = \"$1\"",
+        ] {
+            let why = Access::new(SECRET, bad).err().expect(bad);
+            assert!(why.contains("by claim, `$jwt.<claim>`"), "{bad}: {why}");
+        }
+    }
+
+    /// `""` is no one: a subject of `""` kept its Idempotency-Keys under
+    /// the server token's. A tenant claim present but naming no tenant
+    /// reaches none, even where a token without the claim reaches every one.
+    #[test]
+    fn an_empty_subject_is_none_and_a_tenant_claim_naming_none_reaches_none() {
+        let a = access("").demanding(Demands {
+            unbound_tenants: true,
+            ..Demands::default()
+        });
+        let scope = |claims: &str| a.scope(&a.mint(claims).unwrap(), 0).unwrap();
+        assert_eq!(scope(r#"{"sub":""}"#).subject(), None);
+        assert_eq!(scope(r#"{"sub":5}"#).subject(), None);
+        assert_eq!(scope(r#"{"sub":"a"}"#).subject(), Some("a"));
+        assert_eq!(scope(r#"{"sub":"a"}"#).reaches("acme"), Ok(()));
+        assert_eq!(scope(r#"{"tenant":["acme",""]}"#).reaches("acme"), Ok(()));
+        assert_eq!(
+            scope(r#"{"tenant":"acme"}"#).reaches("globex"),
+            Err("this token is for another tenant")
+        );
+        for none in ["null", "\"\"", "0", "false", "{}", "[]", "[null, \"\", 3]"] {
+            assert_eq!(
+                scope(&format!(r#"{{"tenant":{none}}}"#)).reaches("acme"),
+                Err("this token's tenant claim names no tenant"),
+                "{none}"
+            );
+        }
+    }
+
+    /// A token for another app as an adversary would send one: a member
+    /// given twice, an audience or issuer differing by case, Unicode form,
+    /// a slash or white space, an `azp` that is no text beside a matching
+    /// `client_id` -- each refused; and no spelling of a policy reaches a
+    /// member of an object claim.
+    #[test]
+    fn whom_a_token_is_for_is_not_told_by_near_spellings() {
+        let told = |d: Demands| access("").demanding(d);
+        let ask = |a: &Access, claims: &str| a.verify(&signed(claims), 1_000).map(|_| ());
+        let aud = told(Demands {
+            audiences: vec!["notes-api".into()],
+            issuers: vec!["https://idp.example/".into()],
+            clients: vec!["app-1".into()],
+            ..Demands::default()
+        });
+        let base = r#""iss":"https://idp.example/","azp":"app-1","exp":2000"#;
+        // A member given twice is no token: neither the first nor the last
+        // is believed.
+        assert!(ask(
+            &aud,
+            &format!(r#"{{"aud":"other","aud":"notes-api",{base}}}"#)
+        )
+        .is_err());
+        assert!(ask(
+            &aud,
+            &format!(r#"{{"aud":"notes-api","aud":"other",{base}}}"#)
+        )
+        .is_err());
+        // Case and Unicode form are not folded; a trailing slash is not
+        // trimmed; nor is white space.
+        for wrong in ["Notes-api", "notes-api/", " notes-api", "notes\u{2010}api"] {
+            assert!(
+                ask(&aud, &format!(r#"{{"aud":"{wrong}",{base}}}"#)).is_err(),
+                "{wrong}"
+            );
+        }
+        assert!(ask(
+            &aud,
+            r#"{"aud":"notes-api","iss":"HTTPS://idp.example/","azp":"app-1","exp":2000}"#
+        )
+        .is_err());
+        // A list holding the audience beside values of other kinds is
+        // taken (lenient: RFC 7519 says a list of texts).
+        assert!(ask(&aud, &format!(r#"{{"aud":[null,5,"notes-api"],{base}}}"#)).is_ok());
+        // `azp` held as null, a list or "" is judged as `azp`: a matching
+        // `client_id` beside it does not stand in for it.
+        for azp in ["null", r#"["app-1"]"#, r#""""#, r#"{"app-1":1}"#] {
+            let claims = format!(
+                r#"{{"aud":"notes-api","iss":"https://idp.example/","azp":{azp},"client_id":"app-1","exp":2000}}"#
+            );
+            assert_eq!(ask(&aud, &claims), Err(NO_CLIENT), "{claims}");
+        }
+
+        // `$jwt."a.b"` reads the top-level claim of that name, never the
+        // member `b` of an object `a`.
+        let a = access(r#"notes read where owner = $jwt."a.b""#);
+        let nested = a
+            .scope(&a.mint(r#"{"a":{"b":"alice"}}"#).unwrap(), 0)
+            .unwrap();
+        assert!(!nested.readable("notes"));
+        let flat = a.scope(&a.mint(r#"{"a.b":"alice"}"#).unwrap(), 0).unwrap();
+        assert!(flat.readable("notes"));
+        // Nor can FenecQL reach a member of an object claim another way.
+        for bad in [
+            "notes read where owner = $jwt.a.b",
+            r#"notes read where owner = $jwt."a"."b""#,
+            r#"notes read where owner = $jwt."a".b"#,
+            r#"notes read where owner = $jwt.a."b""#,
+            "notes read where owner = $jwt.a.0",
+            "notes read where owner = $jwt.a->>'b'",
+            "notes read where owner = $jwt.a['b']",
+            // `json_extract($jwt.a, 'b')` parses, and is an unknown
+            // function at the first row: no builtin reads an object member.
+        ] {
+            if let Ok(a) = Access::new(SECRET, bad) {
+                let s = a.scope(&a.mint(r#"{"a":{"b":"alice"}}"#).unwrap(), 0);
+                if let Ok(s) = s {
+                    let f = s.filter("notes", READ);
+                    panic!("{bad}: parsed, filter {f:?}");
+                }
+            }
+        }
+    }
+
+    /// A role is the word after the last `for` standing alone, or a quoted
+    /// name: a provider's group `platform-admins` or
+    /// `information-security` holds the letters `for`, and was cut at
+    /// them -- refused at startup, or read as another role.
+    #[test]
+    fn a_role_holding_for_is_read_whole() {
+        for (line, want) in [
+            ("notes read for platform-admins", "platform-admins"),
+            (
+                "notes read where owner = $jwt.sub for platform-admins",
+                "platform-admins",
+            ),
+            (
+                "notes read for information-security",
+                "information-security",
+            ),
+            ("notes read for for", "for"),
+            (r#"notes read for "Account Admin""#, "Account Admin"),
+            (
+                r#"notes read where x = "y" for "Team #1"  # a comment"#,
+                "Team #1",
+            ),
+            ("notes read\twhere owner = $jwt.sub\tfor\tops", "ops"),
+        ] {
+            let r = rule(uncommented(line).trim());
+            assert!(r.is_ok(), "{line}: {:?}", r.err());
+            assert_eq!(r.unwrap().role.as_deref(), Some(want), "{line}");
+        }
+        // A filter ending in a quoted text has no role, nor does a word
+        // ending in `for`.
+        for line in [
+            r#"notes read where title = "for""#,
+            r#"notes read where title = "x for""#,
+            "notes read where owner = $jwt.sub or x = platformfor",
+        ] {
+            let r = rule(line);
+            assert_eq!(r.ok().and_then(|r| r.role), None, "{line}");
+        }
+        let a = access(r#"notes read for "Account Admin""#);
+        let reads = |claims: &str| {
+            a.scope(&a.mint(claims).unwrap(), 0)
+                .unwrap()
+                .readable("notes")
+        };
+        assert!(reads(r#"{"role":["Account Admin"]}"#));
+        assert!(!reads(r#"{"role":"Account"}"#));
+        assert!(Access::new(SECRET, r#"notes read for """#).is_err());
+    }
+
+    /// A `#` inside quotes is no comment: a quoted claim holding a URL's
+    /// fragment, and a filter's text holding one, are read whole.
+    #[test]
+    fn a_quoted_claim_holding_a_hash_is_read_whole() {
+        let a = Access::new(
+            SECRET,
+            "notes read where owner = $jwt.\"https://example.com/#user\"  # the user\n\
+             chans read where name = '#general' # every member's\n",
+        );
+        let a = a.unwrap_or_else(|e| panic!("{e}"));
+        let s = a
+            .scope(
+                &a.mint(r##"{"https://example.com/#user":"u1"}"##).unwrap(),
+                0,
+            )
+            .unwrap();
+        let Some(Some(Expr::Cmp(CmpOp::Eq, _, v))) = s.filter("notes", READ) else {
+            panic!("owner = ...");
+        };
+        assert_eq!(*v, Expr::Lit(Value::Text("u1".into())));
+        let Some(Some(Expr::Cmp(CmpOp::Eq, _, v))) = s.filter("chans", READ) else {
+            panic!("name = ...");
+        };
+        assert_eq!(*v, Expr::Lit(Value::Text("#general".into())));
+        assert_eq!(uncommented("a # b"), "a ");
+        assert_eq!(uncommented(r##"a "x\"#y" # z"##), r##"a "x\"#y" "##);
+    }
+
+    /// `--jwt-tenant-claim "$CLAIM"` with CLAIM unset was taken at the
+    /// start, and with `--jwt-unbound-tenants` a token naming tenant `acme`
+    /// reached every tenant: no token holds a claim named "". The flag is
+    /// refused empty; a library's `Demands` holding one binds no token.
+    #[test]
+    fn an_empty_tenant_claim_binds_no_token() {
+        let a = access("").demanding(Demands {
+            tenant_claim: String::new(),
+            unbound_tenants: true,
+            ..Demands::default()
+        });
+        let s = a
+            .scope(&a.mint(r#"{"sub":"a","tenant":"acme"}"#).unwrap(), 0)
+            .unwrap();
+        assert!(s.reaches("beta").is_err(), "a token for acme reached beta");
+        assert!(s.reaches("acme").is_err());
+    }
+
+    /// A claim named with `-` or `:`, unquoted, ran on as arithmetic or
+    /// failed as FenecQL: refused, saying to quote it.
+    #[test]
+    fn an_unquoted_claim_running_into_a_dash_is_refused() {
+        for (bad, quoted) in [
+            (
+                "notes read where owner = $jwt.x-hasura-user-id",
+                r#"$jwt."x-hasura-user-id""#,
+            ),
+            (
+                "notes read where team in $jwt.cognito:groups",
+                r#"$jwt."cognito:groups""#,
+            ),
+            ("notes read where n = $jwt.n-1", r#"$jwt."n-1""#),
+        ] {
+            let e = Access::new(SECRET, bad).err().unwrap_or_default();
+            assert!(e.contains(&format!("quote it: `{quoted}`")), "{bad}: {e}");
+        }
+        assert!(Access::new(SECRET, "notes read where n = $jwt.n - 1").is_ok());
+        assert!(Access::new(SECRET, r#"notes read where x = $jwt."x-hasura-user-id""#).is_ok());
+    }
+
+    /// `/_whoami` names the roles the server read, from the claim it reads
+    /// them from: under `--jwt-role-claim`, `role` is no role.
+    #[test]
+    fn whoami_names_the_roles_read_from_the_role_claim() {
+        let roles = |a: &Access, claims: &str| {
+            let s = a.scope(&a.mint(claims).unwrap(), 0).unwrap();
+            let mut out = String::new();
+            s.summary_into(&mut out);
+            let at = out.find("\"roles\":").unwrap() + 8;
+            out[at..at + out[at..].find(']').unwrap() + 1].to_string()
+        };
+        let plain = access("");
+        assert_eq!(roles(&plain, r#"{"role":"ops"}"#), r#"["ops"]"#);
+        assert_eq!(roles(&plain, r#"{"role":["a",5,"","b"]}"#), r#"["a","b"]"#);
+        assert_eq!(roles(&plain, r#"{"sub":"x"}"#), "[]");
+        let groups = access("").demanding(Demands {
+            role_claim: "cognito:groups".into(),
+            ..Demands::default()
+        });
+        assert_eq!(
+            roles(&groups, r#"{"role":"ops","cognito:groups":["editors"]}"#),
+            r#"["editors"]"#
+        );
+        assert_eq!(roles(&groups, r#"{"role":"ops"}"#), "[]");
+    }
+
+    /// Under `--jwt-max-age` below an hour, a token `mint` signs lives that
+    /// long: an hour's was refused by the server that minted it.
+    #[test]
+    fn a_minted_token_lives_no_longer_than_the_server_takes() {
+        let a = access("").demanding(Demands {
+            max_age: Some(600),
+            ..Demands::default()
+        });
+        let now = unix_now();
+        let t = a.mint(r#"{"sub":"a"}"#).unwrap();
+        assert!(a.verify(&t, now).is_ok());
+        assert!(a.verify(&t, now + 601).is_err());
+        let long = access("").demanding(Demands {
+            max_age: Some(86_400),
+            ..Demands::default()
+        });
+        let t = long.mint(r#"{"sub":"a"}"#).unwrap();
+        assert!(
+            long.verify(&t, now + MINTED_FOR + 1).is_err(),
+            "an hour still"
+        );
     }
 }

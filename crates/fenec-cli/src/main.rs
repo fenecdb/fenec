@@ -6,6 +6,7 @@
 //! fenec data.fenec -c "get docs limit 5"
 //! echo "get docs" | fenec data.fenec
 //! fenec data.fenec < script.fenecql
+//! fenec --version              `fenec <version>`, and nothing opened
 //! ```
 //!
 //! A statement may run over several lines; [`Reader`] says when one runs.
@@ -24,6 +25,10 @@ mod types;
 use fenec_core::prelude::*;
 use fenec_ql::{Reading, Refusal, Rest};
 use std::io::{self, BufRead, IsTerminal, Write};
+
+const USAGE: &str = r#"usage: fenec [file.fenec] [-c "<query>"]
+       fenec -V, --version              prints `fenec <version>` and exits
+"#;
 
 const HELP: &str = r#"
 FenecQL summary
@@ -169,7 +174,17 @@ fn main() {
                 command = args.get(i).cloned();
             }
             "-h" | "--help" => {
-                println!("usage: fenec [file.fenec] [-c \"<query>\"]{HELP}{IMPORT_HELP}{BACKUP_HELP}{MCP_HELP}{TYPES_HELP}{SHELL_HELP}");
+                println!(
+                    "{USAGE}{HELP}{IMPORT_HELP}{BACKUP_HELP}{MCP_HELP}{TYPES_HELP}{SHELL_HELP}"
+                );
+                return;
+            }
+            // Read as `--help` is, a flag wherever one stands (never `-c`'s
+            // text), and answered before the file is opened: a package's
+            // check, or a script asking which release it has, opens nothing.
+            // `fenec version` stays a file named `version`, as any word is.
+            "-V" | "--version" => {
+                println!("fenec {}", env!("CARGO_PKG_VERSION"));
                 return;
             }
             other if !other.starts_with('-') => path = Some(other.to_string()),

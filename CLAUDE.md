@@ -31,7 +31,7 @@ make packaging-test    # site/install.sh against a release of its own on localho
 make version V=X.Y.Z   # one version wherever a release reads it (RELEASING.md)
 make agents-md     # AGENTS.md written again from this file
 make builder-golden   # integrations/builder-golden.json written again from the JS builder (web/golden.mjs)
-make docs-builder     # the SDKs' tests of the FenecQL pages' builder tabs written again (site/builder_tabs.py)
+make docs-builder     # the SDKs' tests of the site's builder tabs written again (site/builder_tabs.py)
 make schema-golden    # integrations/schema-golden.json written again through the module (web/schema-golden.mjs)
 make types-check  # web/fenec.d.ts held to web/fenec.js and a caller's code under tsc --strict, then docs-types
 make studio-highlight   # studio/highlight.js and the Grafana data source's copy written again from site/highlight.js
@@ -254,7 +254,11 @@ leading from an archive's end never lands among its changes
 
 **[`/_changes` reads the writes on disk, documents and all](docs/design/replication.md#change-data-capture)**
 (`Database::changes_in`): only what an fsync covered, never with writes
-missing (410); a scoped token is refused.
+missing (410); a scoped token is refused. A consumer is made by a `POST`,
+which never moves one that is there (200 at its place, 409 for a `since`
+ahead of it), and moved by a `PATCH` alone, which makes none
+(`cdc::make`, `cdc::commit`); on a tenant each is a write held against a
+move and the lease (`consumer_write`).
 
 **[A read can wait for a write on a replica](docs/design/replication.md#fenec-after)**
 (`Hub::reached`): served once the database holds that change or 504
@@ -359,7 +363,11 @@ transitions (`new.`, granting `update` alone), and `append-only` binds
 every scoped token. A scoped stream tells deletions only of ids it sent, a
 scoped poll's tag digests its answer (`content_tag`), a scoped `match`
 scores its rows alone (`Match::within`), and the algorithm is the key's,
-never the token's.
+never the token's. A claim held as `null`, `""` or a value its rule cannot
+compare (`usable`) is a claim the token lacks: the rule naming it does
+not apply and no filter is bound to it. A tenant claim naming no tenant
+reaches none, a `sub` of `""` is no subject, and a policy writing a `$<n>`
+of its own is refused at startup.
 
 **[A field a read rule withholds is held out of what a statement
 does.](docs/design/access.md#field-lists)** `fields::hold` and
@@ -380,6 +388,19 @@ reading one, or `new.` or `expired()` in one are refused at startup
 names.](docs/design/access.md#tenant-binding)** `route_tenant` asks it,
 and no route below `/t/<t>/` may skip it; every tenant's database installs
 the `Check` hook (`Tenants::check_scoped_writes`).
+
+**[A token is taken only from the issuers, for the audiences and clients,
+a server was told.](docs/design/access.md#whom-a-token-is-for)**
+`Demands::whom` asks `iss`, `aud` (a text or a list) and `azp` (else
+`client_id`) in `Access::check`, after the signature and before a token is
+kept, so every route meets it through `authenticate`; a refusal is 401
+naming the check, never the token's value, clears no wait, and its audit
+line names the check (`audit::refusal`). A server told none takes every
+token its keys sign (said at the start under `--jwt-keys`), and a `--jwt-*`
+flag without keys is refused. A policy names top-level claims alone, quoted
+where not a word (`claim_name`): a path into a nested object, or an
+unquoted name running into `-` or `:`, is refused at startup, never read; a
+role is the word after the last `for` or a quoted name (`role_of`).
 
 **[An empty token is no token.](docs/design/access.md#empty-tokens)**
 A variable set empty is unset (`env_secret`, fenec-shard's `env`); a token
@@ -473,9 +494,16 @@ byte for byte (`tests/query_json.rs`).
 ceiling is.](docs/design/http.md#connections-without-a-thread)** Both accept
 loops spawn through `accept::spawn`, which hands back the stream of a thread
 the system refused, and `accept::refuse` answers it on the accepting thread,
-non-blocking, then reads off what arrived so the close is no reset, counted
-by `reason` and marked `Fenec-Unserved`, which the entry and relays take as
-unrun, as a standby's 409 marked `Fenec-Follows`.
+non-blocking, counted by `reason` and marked `Fenec-Unserved`, which the
+entry and relays take as unrun, as a standby's 409 marked `Fenec-Follows`.
+Its writing shut after the answer, it goes to the process's one lingering
+thread (`accept::linger`), which reads off its request until the client
+ends it, so no request meets a closed socket's reset. It is closed at once,
+the old way, only with no lingering thread, an answer not sent whole, or
+512 held (`most_held`: a quarter of `RLIMIT_NOFILE` where fewer); a body
+past 1 MiB, or a client still writing after 2 s, meets the reset after its
+answer. A new accept loop calls `accept::ready()`, which makes the thread,
+and `accept::widen` (a queue of 1 024) before its first accept.
 
 ### The HNSW graph
 
@@ -989,14 +1017,41 @@ merge cannot hold exactly, and refuses (413) past its bounds, never cuts.
 not.](docs/design/integrations.md#integrations)** A builder change starts
 in `web/builder.js` and a case in `golden.mjs`, then every SDK's follows,
 held to `integrations/builder-golden.json`; `make types-check` holds
-`fenec.d.ts` to `fenec.js`. A FenecQL page's builder tab is a golden
-case's chain rendered by `site/builder_tabs.py`, never written by hand:
-its statement held to the page's, the JS and Python tabs run by its
+`fenec.d.ts` to `fenec.js`. A builder tab on the site (a FenecQL page's,
+Your language's tour) is a golden case's chain rendered by
+`site/builder_tabs.py`, never written by hand: its statement held to the
+page's or written from the case, the JS and Python tabs run by its
 `--check`, the others tests of their SDKs (`make docs-builder`); a
 builder's API change owes its renderer. Go's and .NET's SDKs bound a
 request by its context or token, never the HTTP client's timeout; a
 store checks its names against FenecQL's and passes values as
 parameters.
+
+**[The desktop app is a window on a studio a `fenec-server` serves, one server per
+file.](docs/design/integrations.md#studio-desktop)** `integrations/studio-desktop`
+(Electrobun, macOS, beta) starts a server in one place (`server.ts`), its
+token in the environment, never argv, the rest of the environment an
+allowlist, and a pipe on its stdin the app holds (`--exit-on-stdin-close`, so no
+server outlives the app, `kill -9` included); a token reaches a page in one
+(`session.ts`: a frozen `window.fenecHost`, defined only where
+`location.origin` is the server's, never stored). A studio window is `sandbox: true` (the
+event bridge only) and held to its origin, and every window with the RPC
+bridge is held to its own `views://` folder (`holdTo`): a navigation anywhere
+else is refused. A saved server's token is in the Keychain alone, with the
+address it was saved for (`token.ts`), is never sent to another address or
+along a redirect, and every failure is a notice window, never a native alert
+(that blocks the main process, and every server's supervision with it). A
+window's data store is its own, and Electrobun's `clearStorageData("all")` does
+nothing: a removed connection's is cleared with the explicit list of kinds
+(`STORE_KINDS`), after its window is closed, and `checks/storage.mjs` reads it
+back from outside. The shipped bundle holds none of the test hooks: a new
+environment read in the shipped app is a hook unless it is behind
+`__TESTABLE__` (`checks/release.mjs`). The toolchain is fetched into
+`.hutch-home/`, never `~/.hutch` or a shell file, and held to `hutch-pin.json`
+(`scripts/electrobun.mjs`): Hutch's archive and binaries, and a digest of the
+Electrobun runtime, Bun and Cottontail Hutch fetches, checked before a build;
+signing runs only by hand, from main, in an Environment made with its reviewer
+and `main` rule before its secrets are (`desktop.yml`, RELEASING.md).
 
 **[Grafana's data source binds a dashboard's values; it never splices
 them.](docs/design/integrations.md#grafana)** Names become `$n`s

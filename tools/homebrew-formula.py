@@ -61,13 +61,34 @@ class Fenecdb < Formula
   end
 
   test do
-    # Neither binary has a version flag: fenec-server names its version on the
-    # first line of --help, and the shell is run on a script, in memory.
-    assert_match "fenec-server #{{version}}", shell_output("#{{bin}}/fenec-server --help 2>&1")
-    script = "create collection t (n int)\\nput t {{id: 1, n: 7}}\\nget t\\n"
+{test}    script = "create collection t (n int)\\nput t {{id: 1, n: 7}}\\nget t\\n"
     assert_match(/^1\\s+7$/, pipe_output("#{{bin}}/fenec", script))
   end
 end
+"""
+
+# The first release whose binaries take `--version`: each says
+# `<name> <version>` on stdout and exits 0. The formula of a release before it
+# -- whichever of those the tap holds, or one written again for an older tag
+# -- must still pass `brew test`, so it reads the version where those
+# binaries put it, the first line of `fenec-server --help`, on stderr;
+# `fenec --version` there is an unknown option, and that formula comes out as
+# it did before the flag. tools/linux-packages-check.sh cuts over at the same
+# release.
+VERSION_FLAG = (0, 1, 13)
+
+# Put into TEMPLATE as they are: their braces are Ruby's, not format()'s.
+TEST_VERSION_FLAG = """\
+    # Each binary names its version on stdout, and the shell is run on a
+    # script, in memory.
+    assert_equal "fenec #{version}", shell_output("#{bin}/fenec --version").chomp
+    assert_equal "fenec-server #{version}", shell_output("#{bin}/fenec-server --version").chomp
+"""
+
+TEST_HELP_LINE = """\
+    # Neither binary has a version flag: fenec-server names its version on the
+    # first line of --help, and the shell is run on a script, in memory.
+    assert_match "fenec-server #{version}", shell_output("#{bin}/fenec-server --help 2>&1")
 """
 
 
@@ -111,7 +132,13 @@ def render(version, sums, repo=REPO):
     text = ""
     for outer in ("on_macos", "on_linux"):
         text += f"  {outer} do\n" + "".join(blocks[outer]) + "  end\n\n"
-    return TEMPLATE.format(repo=repo, version=version, blocks=text.rstrip("\n") + "\n")
+    test = TEST_VERSION_FLAG if has_version_flag(version) else TEST_HELP_LINE
+    return TEMPLATE.format(repo=repo, version=version, blocks=text.rstrip("\n") + "\n", test=test)
+
+
+def has_version_flag(version):
+    """Whether release X.Y.Z's binaries take `--version` (VERSION_FLAG)."""
+    return tuple(int(n) for n in version.split(".")) >= VERSION_FLAG
 
 
 def read_formula(text):

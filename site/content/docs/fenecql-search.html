@@ -12,7 +12,7 @@ matches your words, and the rest of a search box hangs off it:
 <code>highlight()</code> and <code>snippet()</code> for where the words are,
 and <code>facet</code> for counts beside the page.</p>
 
-<p>Run in <a href="quickstart.html#in-the-shell">the shell</a>, answers and all; the timings are from one run.</p>
+<p>Run in <a href="shell.html#quickstart">the shell</a>, answers and all; the timings are from one run.</p>
 
 <pre data-lang="text">fenec&gt; create collection articles (title text @text, body text @text, year int @sorted, topic text @hash);
 collection `articles` created
@@ -315,10 +315,11 @@ query that asks none runs as it did, <code>match</code> 0.06 ms either way
 matches — not only the page — for a filter sidebar: how many results each
 brand, color or tag has.</p>
 
-<pre data-lang="fenecql">get products where price &lt; 500 facet brand, color limit 20
-get products match title $1 where price &lt; 500 facet brand top 10, tags limit 20
+{{builder "docs: a page of products with brands and colours counted" "docs: a page of matches with brands and tags counted" "docs: phones counted by brand" "docs: products counted by origin alone"}}
+<pre data-lang="fenecql">get products where price &lt; 500 limit 20 facet brand, color
+get products where price &lt; 500 match title $1 limit 20 facet brand top 10, tags
 get products where category = "phones" count facet brand
-get products facet meta.origin top 5 limit 0
+get products limit 0 facet meta.origin top 5
 </pre>
 
 <pre data-lang="json">{"rows": [ ... ],
@@ -376,9 +377,10 @@ counts a facet over the rows the query selects with the filter's own
 conditions on that field left out; the page, and every other facet, stay
 the query's.</p>
 
+{{builder "docs: red tents of two brands with their facets"}}
 <pre data-lang="fenecql">get products where category = "tents" and brand in ["acme", "nova"] and color = "red"
+  order price asc limit 24
   facet brand disjunctive, color disjunctive, material
-  order price limit 24
 </pre>
 
 <p>Here <code>brand</code> counts over the red tents of every brand,

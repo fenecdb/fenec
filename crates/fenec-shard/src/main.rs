@@ -150,6 +150,9 @@ usage: fenec-shard [options]
                             read, past the wait its Fenec-After asks for;
                             one that does not is let be for 5 s, its
                             region's reads going home  default: 2000
+  -V, --version             print `fenec-shard <version>` on stdout and exit
+                            0, before the directory is opened or the address
+                            bound
 
 The token is also read from the FENEC_SHARD_TOKEN environment variable, the
 entry's from FENEC_SHARD_ENTRY_TOKEN and the replication token from
@@ -342,6 +345,13 @@ fn main() {
             }
             "--help" | "-h" => {
                 fenec_http::log!("fenec-shard {}\n\n{USAGE}", fenec_core::VERSION);
+                return;
+            }
+            // As fenec-server reads it: where `--help` is, on stdout, and
+            // before the directory is opened or the address bound, which
+            // come once every argument has been read.
+            "--version" | "-V" => {
+                println!("fenec-shard {}", env!("CARGO_PKG_VERSION"));
                 return;
             }
             other => fail(&format!("unknown option: {other}\n\n{USAGE}")),
