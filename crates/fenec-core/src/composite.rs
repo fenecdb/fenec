@@ -604,6 +604,20 @@ impl CompositeIndex {
         Some(out)
     }
 
+    /// Part `part`'s type as `SortedIndex::by_kind` reads it: a json part,
+    /// whose values are of every kind -- and a part of a type the parts key
+    /// as json -- says nothing of them.
+    pub fn part_type(&self, part: usize) -> Option<DataType> {
+        Some(match self.parts.get(part)?.kind {
+            Kind::Int => DataType::Int,
+            Kind::Time => DataType::Timestamp,
+            Kind::Float => DataType::Float,
+            Kind::Bool => DataType::Bool,
+            Kind::Text => DataType::Text,
+            Kind::Json => return None,
+        })
+    }
+
     /// Narrows `r`, the range on part `part`, by `field <op> v`; `false`,
     /// narrowing nothing, where the part's keys cannot say `v` exactly.
     pub fn narrow(

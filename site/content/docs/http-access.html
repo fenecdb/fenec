@@ -407,9 +407,25 @@ messages   read,insert  where room in (get members select room where user = $jwt
     or as a list where the rule reads one value: <code>"sub": null</code>
     is no subject, and <code>owner = $jwt.sub</code> does not become
     <code>owner = null</code>, which every row with no owner matches. A
-    number and a bool are values like any other. A policy names its
+    number and a bool are values like any other. A claim a rule compares
+    by order (<code>level &lt;= $jwt.clearance</code>) admits only values
+    of its own kind, under a <code>not</code> too: given
+    <code>"top"</code>, no number is below it. A row with no value answers
+    as the rule written out: <code>not (level &gt; $jwt.c)</code> admits
+    the rows with no <code>level</code>. A text claim that reads as a
+    time, such as <code>"2026-07-01T00:00:00Z"</code>, orders a time field
+    by time (from year 0) and a text field as text. A rule reading another
+    collection through <code>not in (get ...)</code> builds its list as the
+    other collection's rules allow under that <code>not</code>, so a deny
+    list holds out what it held out before. A claim inside a call or
+    arithmetic (<code>lower($jwt.email)</code>, <code>$jwt.iat *
+    1000</code>) and an ordered comparison with a claim used as a value
+    stop the server at startup: mint the claim as the rule compares it. A
+    claim as the pattern of <code>like</code>, <code>ilike</code> or
+    <code>not like</code> (<code>path like $jwt.home</code>) is taken, as
+    is its <code>escape</code>. A policy names its
     parameters by claim alone: one writing <code>$1</code> or
-    <code>$3</code> of its own stops the server at startup. A
+    <code>$3</code> of its own stops the server at startup too. A
     subscription is checked when it opens, and
     ended at its token's <code>exp</code> with
     <code>event: error</code> and

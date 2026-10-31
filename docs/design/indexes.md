@@ -209,7 +209,27 @@ sign-bit flip, floats through order-preserving bits with `-0.0` folded onto
 compares equal to everything, so it matches every inclusive comparison and no
 strict one, and an index holding one is never walked for `order`. A literal the
 key space cannot express exactly (`12.5` against an `int`, an int past 2^53
-against a `timestamp`) is left out of the range and evaluated per row. Ties come
+against a `timestamp`) is left out of the range and evaluated per row. One of
+another kind than a typed field's, which `cmp_value` orders the field's values
+against by kind alone (`level > true`, `level < ""`, `t >= ""` where `""` reads
+as no time), is true of every value or of none (`SortedIndex::by_kind`), so it
+is no bound or an empty range (`Range::close`) and the range stays exact,
+natively -- the browser module, where no scoped rule writes one, evaluates it
+row by row as before, 611 bytes smaller: the
+edges a scoped token's ordered rule is held to its claim's kind by (`level <= 5
+and level > true`, access.md) were evaluated row by row, and a count over 20
+001 of 200 000 rows in process went 44 us -> 790 us, +0.35 us with the verdict,
+what any second comparison costs (`level > -1` the same; `make policy-bench
+ARGS=ranges`). Its unit test holds each verdict to `compare` over values of
+every kind, and `tests/sorted.rs` has filters of another kind's literals. The
+edge such a rule writes below a text claim that reads as a time is `x >= ""
+or x >= "0000-01-01"` (a time and an int order alike against every value
+but that text, so no edge ANDed in takes every text and every time), which
+`answer_filter` folds to the side the field's declared type reads
+(`fold_kinds`, natively, asked only where `kind_splits` finds one): the
+second for a `timestamp` field, the first for any other -- the same rows,
+the `or`'s every row, and a comparison the range says as a key, where the
+`or` left a count over the range to test every row of it. Ties come
 out in ascending id both ways, since that is the order the scan leaves them in
 -- a descending walk reverses each run of equal keys. A walk tests the rest of
 the filter row by row and gives up past an eighth of the collection, so a filter
@@ -256,7 +276,16 @@ can say makes a span each, `MAX_SPANS` (256) at most together -- narrows the
 part after them by its comparisons, and calls the plan exact when it took
 every term and nothing is apart; any term it did not take is tested row by
 row, so a literal it cannot say (`null`, `12.5` against an int) changes
-nothing. `filter_candidates` takes its spans by exact count, two searches
+nothing -- but one of another kind than a typed part's is true of every
+value or of none (`SortedIndex::by_kind` over `CompositeIndex::part_type`,
+natively, as `@sorted` takes it): true, it is taken where the part is fixed
+or ranged, whose values are of its kind, and false leaves no span. Left to
+be tested, the edge a scoped token's rule holds a claim to its kind by
+(`level > true` beside `team = $jwt.team and level <= $jwt.c`) read every
+row of the span a count was answered from: 285 us over 5 000 of 200 000
+rows against the server token's 0.85, 1.3 with the verdict (three runs in
+turns against the build before; `make policy-bench ARGS=ranges` has the
+case). `filter_candidates` takes its spans by exact count, two searches
 each, under a range's rule; `walk_composite` an `order` on the parts after
 the fixed ones in their directions or every one reversed (an `in`'s part is
 no fixed one for an order), the spans merged by the order's parts
