@@ -96,7 +96,7 @@ sync-scenarios-check:
 builder-golden:
 	node web/golden.mjs
 
-## The SDKs' tests of the FenecQL pages' builder tabs written again: each
+## The SDKs' tests of the site's builder tabs written again: each
 ## Go, .NET, Swift, Kotlin and Dart tab as the page shows it, which that
 ## SDK's tests run (site/builder_tabs.py; its --check runs the JavaScript
 ## and Python tabs and fails while these are behind the pages)

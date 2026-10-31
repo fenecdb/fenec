@@ -115,11 +115,13 @@ fn in_front_of(n: &Node, cors: Option<&str>) -> u16 {
 }
 
 /// An address nothing listens on: a crashed node, seen from the router.
+/// Port 1, which no test's server takes: a port the system picked and that
+/// was let go of was taken again by another test's router running beside
+/// this one, and the request forwarded there was answered its 404, no
+/// tenant `acme` in its directory (once in 50 runs of the file, three cores
+/// beside six busy loops).
 fn dead_addr() -> String {
-    let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = dead.local_addr().unwrap().to_string();
-    drop(dead);
-    addr
+    "127.0.0.1:1".into()
 }
 
 struct Answer {
@@ -289,17 +291,63 @@ fn the_connection_ceiling_tells_a_page_when_to_come_back() {
     assert_eq!(&first, b"HTTP/1.1 404");
 
     // The refusal is written as the connection is taken, before a request
-    // is read, and the connection closed: a request written after it met
-    // the closed socket (`EPIPE`) one run in about sixty. Read alone.
-    let mut refused = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    refused
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
-    let r = read_answer(&mut refused);
+    // is read; closed with it, a request written after it met the closed
+    // socket (`EPIPE`) one run in about sixty, and is read off now
+    // (`a_request_written_after_the_routers_refusal_...`).
+    let r = ask(port, "GET", "/nosuch", Some(APP), "");
     assert_eq!(r.status, 503, "{}", r.body);
     r.tells(APP);
     assert_eq!(r.one("retry-after"), Some("1"));
     assert!(r.body.contains(r#""retry_after":1"#), "{}", r.body);
+    drop(held);
+}
+
+/// A client past the router's ceiling writing its request as the answer
+/// comes -- a request sent after its answer and end included, head and
+/// body apart as Python's `http.client` writes them -- is read off and its
+/// connection ended with no reset. Closed with its answer, the router's
+/// socket reset the head and the body's write failed `EPIPE`, the 503
+/// unread: 300 such clients writing through a router at a ceiling of 100
+/// read 2 939 503s and 22 957 broken pipes of 25 921 refusals (Linux). The
+/// body is larger than a send buffer -- macOS's 128 KiB, Linux's first
+/// 16 KiB -- so written to a socket that is gone, its write waits for room
+/// that never comes and the reset ends it every time.
+#[test]
+fn a_request_written_after_the_routers_refusal_is_read_off_not_reset() {
+    const BODY: usize = 512 << 10;
+    let port = router(Directory::in_memory(), None, 1);
+    let mut held = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    held.set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    write!(held, "GET /nosuch HTTP/1.1\r\nHost: t\r\n\r\n").unwrap();
+    let mut first = [0u8; 12];
+    held.read_exact(&mut first).unwrap();
+    assert_eq!(&first, b"HTTP/1.1 404");
+    for i in 0..3 {
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        // The answer and its end: where the refusal closed the socket, it
+        // had closed it by then.
+        let r = read_answer(&mut c);
+        assert_eq!(r.status, 503, "{}", r.body);
+        assert_eq!(r.one("retry-after"), Some("1"));
+        let head =
+            format!("POST /t/acme/query HTTP/1.1\r\nHost: t\r\nContent-Length: {BODY}\r\n\r\n");
+        c.write_all(head.as_bytes())
+            .unwrap_or_else(|e| panic!("{i}: the head: {e}"));
+        c.write_all(&vec![b' '; BODY])
+            .unwrap_or_else(|e| panic!("{i}: the body: {e}"));
+        c.shutdown(std::net::Shutdown::Write)
+            .unwrap_or_else(|e| panic!("{i}: the end: {e}"));
+        // Over either way -- the end acknowledged, or reset -- a
+        // connection has no peer.
+        let by = Instant::now() + Duration::from_secs(30);
+        while c.peer_addr().is_ok() {
+            assert!(Instant::now() < by, "the connection never ended");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(c.take_error().unwrap().is_none(), "{i}: reset");
+    }
     drop(held);
 }
 

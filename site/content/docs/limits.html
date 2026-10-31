@@ -490,7 +490,10 @@ encryption of its own.</p>
     the middle; a client that goes away does not cancel it.</li>
   <li><b>A ceiling, not a pool.</b> Every connection is an OS thread.
     <code>--max-connections</code> rejects the excess with 503 rather than
-    queueing it; put a proxy in front if you want a queue. A connection
+    queueing it; put a proxy in front if you want a queue. The refused
+    client's request is read off after the 503 and its connection ended
+    without a reset, so any HTTP library reads the answer and its
+    <code>Retry-After</code>. A connection
     the process can make no thread for — at its thread limit, below the
     ceiling — is answered the same 503, with <code>Retry-After</code>, and
     counted (<code>fenec_connections_refused_total{reason="no_thread"}</code>).</li>

@@ -678,6 +678,23 @@ fn unbound_tokens_are_taken_only_when_the_node_is_told() {
         Some(&format!("Bearer {acme}")),
     );
     assert_eq!(r.status, 200, "{}", r.text());
+    // Only a token without the claim is unbound: one holding it as `null`
+    // -- `"org": user.org` minted for a user without one -- or as a value
+    // naming no tenant meant to be bound, and reaches none.
+    for org in ["null", "\"\"", "5", "{}", "[]", "[5, null, \"\"]"] {
+        let token = access
+            .mint(&format!(r#"{{"sub":"alice","org":{org}}}"#))
+            .unwrap();
+        let r = call(
+            n.port,
+            "GET",
+            "/t/globex/notes",
+            b"",
+            Some(&format!("Bearer {token}")),
+        );
+        assert_eq!(r.status, 403, "{org}: {}", r.text());
+        assert!(r.text().contains("names no tenant"), "{org}: {}", r.text());
+    }
 }
 
 /// A scoped write to a tenant is checked as one to a single database: the

@@ -2670,14 +2670,19 @@ mod tests {
     }
 
     /// A node answering each connection as it takes it, before it reads a
-    /// byte -- its accept loop at its thread limit
-    /// (`fenec_http::accept::refuse`) -- and closing it: every write sent
-    /// there is answered its 503, the node having run none. Head and body
-    /// went in two `write`s, and on Linux the reset the closed socket sent
-    /// the head back failed the body's, the 503 unread: a send in 30 000 a
-    /// broken pipe idle, 11 to 37% on three cores beside six busy loops.
-    /// Either fix alone holds it (one `writev`; the answer read after a
-    /// failed write), so it fails only with both taken out.
+    /// byte -- its accept loop at its thread limit -- and closing it at
+    /// once: every write sent there is answered its 503, the node having
+    /// run none. Head and body went in two `write`s, and on Linux the reset
+    /// the closed socket sent the head back failed the body's, the 503
+    /// unread: a send in 30 000 a broken pipe idle, 11 to 37% on three
+    /// cores beside six busy loops. Either fix alone holds it (one
+    /// `writev`; the answer read after a failed write), so it fails only
+    /// with both taken out. A node now holds a refused connection and reads
+    /// its request off (`fenec_http::accept::refuse`), and resets none, but
+    /// one closes it at once still past the descriptors it holds them with,
+    /// with no thread to hold them on, and a node from before in a rolling
+    /// upgrade closes every one: the stand-in is such a node
+    /// (`refuse_at_once`). With `refuse` it passed with both fixes out.
     #[test]
     fn a_node_refusing_a_connection_as_it_takes_it_is_answered_by_its_refusal() {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2686,7 +2691,8 @@ mod tests {
             for c in l.incoming() {
                 let Ok(c) = c else { continue };
                 let answer = fenec_http::http::Response::retry_after(503, "no thread", 1);
-                fenec_http::accept::refuse(c, answer, fenec_http::accept::Refusal::NoThread);
+                let why = fenec_http::accept::Refusal::NoThread;
+                fenec_http::accept::refuse_at_once(c, answer, why);
             }
         });
         let pool = Pool::new(Duration::from_secs(10));

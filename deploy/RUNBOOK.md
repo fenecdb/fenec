@@ -179,7 +179,11 @@ tenants it holds replicas of -- one each, for as long as they follow --
 and its archivers. A node holding the replicas of 1 000 tenants holds
 1 000 of its connections for them alone; size it as 1 000 tenants of
 replicas, the clients' peak and a quarter more, and raise `LimitNOFILE`
-and `TasksMax` with it (65 536 and 16 384 leave room for 4 000).
+and `TasksMax` with it (65 536 and 16 384 leave room for 4 000). A
+connection refused past the ceiling holds its descriptor while its
+request is read off, 2 s at most and 512 a process at most (a quarter of
+`LimitNOFILE` where that is fewer): count 512 more descriptors, a node's
+and a router's alike.
 `FenecConnectionsNearCeiling` fires at four fifths. A router's ceiling (its
 default, 1 000) is its clients' and the regions' relays.
 `FenecNoThreadForConnection` fires once a process could make no thread for

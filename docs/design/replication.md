@@ -236,9 +236,52 @@ last write 409, and `wait` waits on the feed's `Condvar` for a write. A
 scoped token is refused: its filter could not hold back the deletion of a
 row it never saw. A consumer with no state of its own has the server keep
 where it is (`/_changes/consumers/<name>`, rows of `_consumers`, made by a
-`POST` at the last write on disk -- read from "now" each time, it missed
-what came between two reads -- and moved by a `POST` of `since`), each
-write at least once; the stream leaves `_consumers`' own writes out, the
+`POST` at the last write on disk or the `since` it names -- read from
+"now" each time, it missed what came between two reads -- and moved by a
+`PATCH` of `since` alone), each write at least once. A `POST` of a
+consumer that is there writes nothing and answers 200 with where it
+stands, for no `since` or one at or behind it: that is where a new one
+starts, as Kafka reads `auto.offset.reset` only for a group with no
+committed offset. A `since` ahead of it is 409 naming its place
+(`cdc::ahead`): it is a commit sent as a `POST`, as every commit was
+before, and answered 200 an older client -- the Python SDK's, the recipes
+of the time -- read the same page for ever, told nothing (a review ran
+50 identical pages). The `POST` was the commit too, and one with no body moved a
+consumer that was there to the last write on disk: a relay or a follower
+making its consumer at each start, the natural way to write one, skipped
+every write made while it was stopped -- found writing the recipes, whose
+pages made a consumer only where `GET /_changes/consumers` listed none.
+Answering a consumer that is there 409, as Redis's `XGROUP CREATE`
+answers `BUSYGROUP`, was rejected: every caller takes that error for a
+success, and one making its consumer from the first write (`{"since":
+0}`) would fail every start but the first; a caller that must know it
+made the consumer reads 201 from 200. A `PATCH` of a consumer that is not
+there is 404, never a make, so a commit racing a `DELETE` makes none
+again. Both run under the write lock (`cdc::changed`), which refuses each
+on a following database -- its consumers are its primary's, and a `POST`
+of one that is there, writing nothing, had passed there, leaving a relay
+pointed at a replica to fail at its first commit -- and wait for the file's
+durability before the answer even where they wrote nothing, so a consumer
+another request made a moment before is not answered as there before its
+fsync. Each answers where the consumer stands after it -- a commit past
+nothing but cursors writes nothing and leaves it where it was, which
+reads the same writes, and answered as sent it named a place no list and
+no later `POST` found -- and `Fenec-Seq`, so a read sent after it
+(`Fenec-After`) to a replica finds the consumer as it left it. A `since`
+is taken up to the last write the database holds (`change_seq` under the
+lock), as a read's cursor is (`Tail::Ahead`), not the last on disk: the
+feed drops chunks by size whether or not they are on disk, so a 410
+names `oldest - 1`, which may be ahead of the disk, and a commit held to
+the disk refused the one place the consumer was told to go on from. Taken,
+the commit's row lands after it, a read from it waits for the disk, and a
+crash hands the writes after it over again, never skips them. On a tenant
+node a consumer's write is the tenant's (`consumer_write`): held against a
+move's freeze (`Tenant::enter`) and told to come back (503) while the
+tenant is frozen or its lease is out, then asked of the lease as it is
+answered. Run past the gate, one sent during a move landed on the source
+after its export and was lost at the flip, and a make lost so was made
+again later at the last write on disk, past every write in between. The
+stream leaves `_consumers`' own writes out, the
 cursor going past them, and a `wait` waits on past them rather than answer
 nothing at once, while a commit to where nothing but cursors were written
 since the consumer's place writes nothing (`unmoved`, the change ring's

@@ -33,7 +33,8 @@ POST   /batch                   one query body per line (NDJSON)
 GET    /_metrics                counters and gauges, Prometheus's text format
 GET    /_changes?since=N        every write on disk after N, a JSON line each (--cdc)
 GET    /_changes?consumer=C     from where consumer C committed
-POST   /_changes/consumers/C    body: {"since": N} -- make C, or move it
+POST   /_changes/consumers/C    make C (201), at {"since": N} or the last write; one already there stays put (200; a since ahead of it: 409)
+PATCH  /_changes/consumers/C    body: {"since": N} -- move C: commit what it read, or go back
 GET    /_changes/consumers      each consumer, where it is and how far behind
 DELETE /_changes/consumers/C
 GET    /_whoami                 who the server takes the token for, and the rules that apply to it
@@ -576,9 +577,11 @@ all, one JSON object a line, from any write the server still keeps.</p>
   <code>wait</code> is how long an answer with nothing in it waits for a
   write first, in milliseconds, 30 000 at most.</li>
   <li>The server keeps as many writes as <code>--replication-buffer</code>
-  holds (64 MiB unless given). A cursor further back is answered 410 with
-  the first <code>since</code> it does serve, never with writes missing
-  from the middle; one past the last write — another database's cursor, or
+  holds (64 MiB unless given), written to disk or not yet. A cursor further
+  back is answered 410 with the first <code>since</code> it does serve —
+  which may be a write not on disk yet, whose read waits for it — never
+  with writes missing from the middle; one past the last write — another
+  database's cursor, or
   this one restored — 409. The feed starts at the change counter when the
   server starts.</li>
   <li><code>op</code> is <code>put</code>, <code>del</code>,
@@ -608,12 +611,20 @@ far it got.</p>
 <pre data-lang="bash">curl -X POST http://127.0.0.1:8080/_changes/consumers/search-index
 curl -i 'http://127.0.0.1:8080/_changes?consumer=search-index&amp;wait=10000'
 # Fenec-Next: 42 -- index the lines, then:
-curl -X POST http://127.0.0.1:8080/_changes/consumers/search-index -d '{"since": 42}'
+curl -X PATCH http://127.0.0.1:8080/_changes/consumers/search-index -d '{"since": 42}'
 </pre>
 
 <ul>
   <li><b>At least once:</b> a crash between reading and committing means
     those writes come again.</li>
+  <li><b>Safe to create at every start:</b> a <code>POST</code> creates a
+    consumer that is not there (201) and leaves one that is where it
+    stands (200, with its <code>since</code>), so a relay that creates its
+    consumer each time it starts goes on from where it stopped.</li>
+  <li><b>Moved only by a <code>PATCH</code>:</b> forward to commit, or back
+    to read again. A <code>POST</code> whose <code>since</code> is ahead of
+    an existing consumer is a commit sent the old way, and is refused with
+    409 naming where the consumer stands.</li>
 </ul>
 
 <details class="deep"><summary>How a stored consumer cursor works</summary>
@@ -621,19 +632,50 @@ curl -X POST http://127.0.0.1:8080/_changes/consumers/search-index -d '{"since":
 it is, as a Kafka consumer group keeps its committed offset. Made with a
 <code>POST</code> — at the last write on disk unless the body names a
 <code>since</code> — it reads with <code>?consumer=</code> from where it
-stands, and moves once it has done with what it read.</p>
+stands, and moves with a <code>PATCH</code> of <code>since</code> once it
+has done with what it read, or back to a <code>since</code> it wants to
+read from again.</p>
+
+<p>A <code>POST</code> to a consumer that is there already changes nothing
+and answers 200 with where it stands; only a consumer it makes is 201. The
+<code>since</code> in its body is where a <em>new</em> consumer starts, as
+Kafka's <code>auto.offset.reset</code> applies only to a group with no
+committed offset, so a program can make its consumer with
+<code>{"since": 0}</code> every time it starts and still go on from its
+last commit. A <code>since</code> ahead of where an existing consumer
+stands is 409, <code>{"error": …, "since": &lt;where it stands&gt;}</code>:
+it is a commit sent as a <code>POST</code>, and answered 200 its client
+would read the same page forever. A program that must know it made the
+consumer reads the status. A <code>PATCH</code> of a consumer that is not
+there is 404 rather than making it: the <code>POST</code> is the one way to
+make one. Both answer with where the consumer stands afterwards and with
+<code>Fenec-Seq</code>, as a write does, so a read sent after it
+(<code>Fenec-After</code>), to a replica too, finds it there. A commit past
+nothing but other commits writes nothing and leaves the consumer where it
+was, which reads the same writes; its answer says so. A
+<code>since</code> past the last write the database holds is 409 for
+either.</p>
 
 <p>So a consumer has each write at least once, and a write again after a
 crash between reading it and committing. The cursors are rows of a
 <code>_consumers</code> collection, written as any write is — on disk
 before the answer under <code>--sync always</code>, and on the replicas —
 and their own writes are left out of the stream, the cursor going past
-them. A read with <code>wait</code> waits on past them too, so a consumer's
+them. A replica reads from where the primary's consumer stands, refuses to
+make, move or delete one (403), and once promoted goes on from the same
+place. On a tenant node they are the tenant's writes: while it is being
+moved, or its node's lease is out, each is answered 503 to come back. A
+read with <code>wait</code> waits on past them too, so a consumer's
 own commit does not wake its next read, and a commit past nothing but
 cursors writes nothing: a consumer that commits after every answer, an
 empty one too, sits idle while nothing else is written. An unknown consumer is 404 rather than read from "now" each time,
-which would miss what is written between two reads; a commit past the last
-write on disk is 409. <code>GET /_changes/consumers</code> lists each
+which would miss what is written between two reads. A consumer further
+behind than the server keeps is 410 with the first <code>since</code> it
+does keep, as a cursor is; a <code>PATCH</code> there goes on from it. The
+server keeps writes by their size, written to disk or not yet, so that
+<code>since</code> can be ahead of the last write on disk: a
+<code>PATCH</code> takes it, and the read from there waits for the disk.
+<code>GET /_changes/consumers</code> lists each
 consumer's <code>since</code> and how many writes it is
 <code>behind</code>.</p>
 </details>

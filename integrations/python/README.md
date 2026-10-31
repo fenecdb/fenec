@@ -118,8 +118,11 @@ async with AsyncClient("http://127.0.0.1:8080", token="...") as db:
 
 Every write on the server's disk (`fenec-server --cdc`), for a consumer whose
 cursor the server keeps -- each batch committed once the loop comes back
-for the next, so each write comes at least once -- and the same handed on
-to another program or a webhook:
+for the next, so each write comes at least once, and a loop started again
+goes on from the last batch committed -- and the same handed on to another
+program or a webhook. `db.consumer(name)` makes one where there is none and
+leaves one that is there where it stands; `db.move_consumer(name, since)`
+moves it:
 
 ```python
 for batch in db.follow("search-index"):
