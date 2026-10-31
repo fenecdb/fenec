@@ -98,7 +98,14 @@ an install waits up to `RELEASE_WAIT` for it to go (`lock::hold_within`,
 woken by each lock's drop): a follower's thread ending, a linking slice or
 the graph keeper's append holds the database a moment after the registry
 let the tenant go, and the open that follows a close, a delete or a follow
-was refused for nothing. Another process's hold is refused at once. A
+was refused for nothing (`a_reopen_waits_for_what_still_holds_the_database`,
+its holder kept at a gate until the open is seen waiting,
+`lock::waiting_for`). Another process's hold is refused at once. What holds
+a database for longer -- a compact or a warm-up beside the queries, for
+their whole run -- keeps its tenant from closing (`Tenant::db_in_use`):
+closed when idle or for memory meanwhile, the database outlived the tenant
+with its lock, and every request's open waited the 5 s and answered 500. A
+delete or a follow meanwhile waits the same 5 s for it, then is refused. A
 `fenec restore --tenants` holds each file it writes across its check and
 its rename, as an install does. An in-process
 "restart" in `lease_stalls.rs`, which leaked its registry with its
@@ -121,10 +128,20 @@ is not using. `fenec-shard` holds its directory file's lock, and
 a region's copy of the global directory's, for the life of the process, as
 `fenec-server --file` does.
 
-The lock file is named past a link to the file (`lock_path`): a symbolic
+A file opened through a symbolic link is the file the link leads to
+(`fs::resolved`, which the sink's open and `lock_path` both ask): a symbolic
 link in the file's place is followed to what it names, links to links too,
 one `lstat` where it is none -- a directory reached through a link needs
-nothing, since the lock file's name goes through the same link. A hard link
+nothing, since the files beside go through the same link. The sink keeps
+the resolved path, so a checkpoint and a compact rename their image over the
+file and the link stays a link; so do a restore, a backup, `.save` and a
+tenant's install. Before, the lock was named past the link but the sink
+renamed over the link itself (#420's review): after `fenec-server --file
+link.fenec` compacted, `link.fenec` was a regular file, a shell over it took
+that file's lock beside the server, wrote, and the file ended `corrupt:
+unknown record kind 120` (`a_file_served_through_a_link_stays_one_file_across_a_compact`).
+Not `canonicalize`: 20 us more an open, and an error for a file not made
+yet. A hard link
 is a name of its own and takes a lock of its own: no name tells the two
 apart. A record lock does not reach across a file system that does not pass
 it on: a process inside a Docker Desktop container and one on the Mac over

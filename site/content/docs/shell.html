@@ -83,8 +83,9 @@ are refused alike, and so are <code>fenec import</code> into the file, a
 it. Where the lock cannot be taken at all, in a directory you may only read,
 the refusal points to <code>--read-only</code>, which takes no lock and writes
 nothing: it reads the file as it stood at the open, beside a server writing it,
-and refuses every write and <code>.checkpoint</code>. A symbolic link to a
-file takes the file's lock; a hard link, a Docker Desktop bind mount and a
+and refuses every write and <code>.checkpoint</code>. A file opened through a
+symbolic link is the file the link leads to, for its lock and for the
+checkpoints and compacts that write it anew, the link left a link; a hard link, a Docker Desktop bind mount and a
 network file system keeping no locks are not seen through, so open a file from
 one side of those only. On Linux, after the machine went down
 and before a server or the shell opens the file to write it again, it may lack

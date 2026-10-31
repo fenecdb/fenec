@@ -282,6 +282,67 @@ fn a_shell_beside_a_server_is_refused_and_the_file_stays_whole() {
     assert_eq!(again.stop(), 0);
 }
 
+/// A file served through a symbolic link, as #420's reviewer found it: a
+/// compact and a checkpoint renamed their image over the link, which was a
+/// file of its own from then on, so a shell over the link took that file's
+/// lock beside the server, wrote, and the file ended `corrupt: unknown
+/// record kind 120`. Each renames over the file the link leads to now: the
+/// link stays a link, the shell is refused through it and by the file's
+/// own name after a compact, and a checkpoint at the server's stop and the
+/// shell's `.checkpoint` keep it so, every row in the one file.
+#[test]
+#[cfg(unix)]
+fn a_file_served_through_a_link_stays_one_file_across_a_compact() {
+    let Some(bin) = server_bin() else {
+        eprintln!("passed over: no fenec-server beside {BIN}");
+        return;
+    };
+    let d = Dir::new("served-link");
+    let (real, link) = (d.file("real.fenec"), d.file("link.fenec"));
+    std::os::unix::fs::symlink("real.fenec", &link).unwrap();
+    let is_link = || {
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    };
+    let server = Server::start(&bin, &link);
+    for q in [
+        "create collection notes (body text, e vector<2> @hnsw)",
+        r#"put notes {id: 1, body: "one", e: [1, 0]}"#,
+        r#"put notes {id: 2, body: "two", e: [0, 1]}"#,
+        "del notes where id = 1",
+        "compact",
+    ] {
+        let (status, body) = server.run("/query", q);
+        assert_eq!(status, 200, "{q}: {body}");
+    }
+    assert!(is_link(), "the compact renamed over the link");
+    let pid = format!("(fenec-server, pid {})", server.child.id());
+    let put = r#"put notes {id: 9, body: "shell", e: [1, 1]}"#;
+    refused(&fenec(&[&link, "-c", put]), &link, &pid, "through the link");
+    refused(
+        &fenec(&[&real, "-c", put]),
+        &real,
+        &pid,
+        "by the file's name",
+    );
+    let (status, body) = server.run("/query", r#"put notes {id: 3, body: "three", e: [1, 1]}"#);
+    assert_eq!(status, 200, "{body}");
+    // Its stop checkpoints the graph: another rewrite.
+    assert_eq!(server.stop(), 0);
+    assert!(is_link(), "the checkpoint renamed over the link");
+    let out = piped(&[&link], ".checkpoint\n");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(is_link(), "the shell's checkpoint renamed over the link");
+    for p in [&link, &real] {
+        assert_eq!(
+            ids(&fenec(&[p, "-c", "get notes select id order id"])),
+            [2, 3]
+        );
+    }
+}
+
 /// A `--dir` node's tenant file, as #414's reviewer found it: the node took
 /// no lock, so `fenec T/acme.fenec -c 'put ...'` beside it wrote, and the
 /// node's next writes left the file unreadable (`corrupt: unknown record

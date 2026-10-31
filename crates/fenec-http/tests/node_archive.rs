@@ -1196,8 +1196,9 @@ fn a_tenant_made_again_while_the_stream_is_busy_is_noticed() {
     );
 }
 
-/// A closed tenant written after it closed -- by a holder of its database,
-/// as the `@ttl` sweeper is -- then opened, written and closed again while
+/// A closed tenant written after it closed -- by a holder of its database
+/// that took it after the close looked, as the `@ttl` sweeper may -- then
+/// opened, written and closed again while
 /// the stream was busy, is read again when the stream comes to it rather
 /// than taken where it closed: the archive reaches it.
 #[test]
@@ -1211,7 +1212,11 @@ fn a_closed_tenant_written_past_its_close_reaches_its_archive() {
     let db = Arc::clone(&x.db);
     let image = n.tenants.export("x").unwrap();
     drop(x);
+    // Closed past this holder, as one that took the database after the
+    // close looked: a tenant whose database is held stays open otherwise.
+    fenec_http::tenants::late_holders::close_past("x");
     close_all(&n.tenants, 1);
+    fenec_http::tenants::late_holders::forget("x");
     // Busy first, so the write past the close is told of while it cannot
     // look, and the tenant opens again ahead of the archive.
     arm(&gate);

@@ -164,34 +164,16 @@ fn key(_: &std::fs::Metadata) -> (u64, u64) {
 }
 
 /// The lock file of the database at `path`: `<file>.lock` beside the file
-/// the path names, a symbolic link in its place followed to what it links
-/// to, links to links too -- named as written, a shell through a link to
-/// a served file took a lock of its own and wrote beside the server. A
-/// directory reached through a link needs nothing: the lock file's name
-/// goes through the same link to the same directory. So the path is
-/// resolved no further than its last name, one `lstat` where it is no link:
-/// resolved whole (`canonicalize`), it was 20 us of a 50 us hold, a node
-/// opening a tenant paying it each time. Hard links are two names for one
-/// file that no name tells apart: each has a lock of its own.
+/// the path names once a symbolic link in its place is followed
+/// (`fenec_core::fs::resolved`), the file the open writes and a checkpoint
+/// renames over -- named as written, a shell through a link to a served
+/// file took a lock of its own and wrote beside the server. Hard links are
+/// two names for one file that no name tells apart: each has a lock of its
+/// own.
 pub fn lock_path(path: impl AsRef<std::path::Path>) -> std::path::PathBuf {
-    let mut real = path.as_ref().to_path_buf();
-    // As many links as the system follows in one path before it gives up.
-    for _ in 0..40 {
-        match std::fs::symlink_metadata(&real) {
-            Ok(m) if m.file_type().is_symlink() => match std::fs::read_link(&real) {
-                Ok(to) if to.is_absolute() => real = to,
-                Ok(to) => {
-                    let dir = real.parent().map(std::path::Path::to_path_buf);
-                    real = dir.unwrap_or_default().join(to);
-                }
-                Err(_) => break,
-            },
-            _ => break,
-        }
-    }
     // Joined as the system's bytes, not as text: a lossy name would be
     // another file.
-    let mut name = real.into_os_string();
+    let mut name = fenec_core::fs::resolved(path.as_ref()).into_os_string();
     name.push(".lock");
     name.into()
 }
@@ -238,11 +220,33 @@ pub fn hold_within(path: impl AsRef<std::path::Path>, wait: Duration) -> Result<
         if left.is_zero() {
             return Err(Refused::Held);
         }
+        // Noted under the guard the wait lets go of, so a test that sees
+        // it ([`waiting_for`]) sees a hold that will be woken.
+        lock_waiting().push(name.clone());
         locked = LET_GO
             .wait_timeout(locked, left)
             .unwrap_or_else(|e| e.into_inner())
             .0;
+        let mut waiting = lock_waiting();
+        if let Some(i) = waiting.iter().position(|n| *n == name) {
+            waiting.swap_remove(i);
+        }
     }
+}
+
+/// The lock files a [`hold_within`] in this process waits for.
+static WAITING: Mutex<Vec<std::path::PathBuf>> = Mutex::new(Vec::new());
+
+fn lock_waiting() -> MutexGuard<'static, Vec<std::path::PathBuf>> {
+    WAITING.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether a [`hold_within`] in this process waits for `path`'s lock to be
+/// let go: what a test holding the holder at a gate waits for before it
+/// opens it, so the hold is known to have waited.
+pub fn waiting_for(path: impl AsRef<std::path::Path>) -> bool {
+    let name = lock_path(path);
+    lock_waiting().contains(&name)
 }
 
 /// Takes the lock file `name` no lock of this process holds, under
@@ -623,13 +627,13 @@ mod tests {
         let t = Instant::now();
         assert!(matches!(hold_within(&p, wait), Err(Refused::Held)));
         assert!(t.elapsed() >= wait);
-        let (started, began) = std::sync::mpsc::channel();
         let q = p.clone();
-        let waiter = std::thread::spawn(move || {
-            started.send(()).unwrap();
-            hold_within(&q, Duration::from_secs(600)).map(drop)
-        });
-        began.recv().unwrap();
+        let waiter =
+            std::thread::spawn(move || hold_within(&q, Duration::from_secs(600)).map(drop));
+        // Let go only once the hold waits for it.
+        while !waiting_for(&p) {
+            std::thread::yield_now();
+        }
         drop(first);
         assert!(waiter.join().unwrap().is_ok());
         drop(hold(&p).unwrap());

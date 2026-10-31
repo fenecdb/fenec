@@ -348,3 +348,41 @@ fn dropping_a_collection_keeps_the_file_readable() {
     assert_eq!(ids(&mut db, "b"), vec![1]);
     cleanup(dir, path);
 }
+
+/// A database opened through a symbolic link -- one made before its file,
+/// relative, as `ln -s` makes one -- is the file the link leads to
+/// (`fs::resolved`): a compact and a checkpoint rename their image over
+/// that file and leave the link a link. Renamed over the link, the image
+/// was a file of its own, and a second opener through the link wrote
+/// beside the first.
+#[cfg(all(unix, feature = "std-fs"))]
+#[test]
+fn a_rewrite_through_a_link_renames_over_the_file_it_leads_to() {
+    let (dir, real) = tmp_path("link");
+    let link = dir.join("link.fenec");
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink("data.fenec", &link).expect("link");
+    assert_eq!(fenec_core::fs::resolved(&link), real);
+    let is_link = || {
+        std::fs::symlink_metadata(&link)
+            .expect("link")
+            .file_type()
+            .is_symlink()
+    };
+    let mut db = fenec_core::fs::open(&link).expect("open");
+    run(
+        &mut db,
+        "create collection n (i int); put n {i: 1}; put n {i: 2}; del n where i = 1; compact",
+    );
+    assert!(is_link(), "the compact renamed over the link");
+    run(&mut db, "put n {i: 3}");
+    db.checkpoint().expect("checkpoint");
+    assert!(is_link(), "the checkpoint renamed over the link");
+    run(&mut db, "put n {i: 4}");
+    drop(db);
+    let mut db = fenec_core::fs::open(&real).expect("open");
+    assert_eq!(ids(&mut db, "n").len(), 3);
+    drop(db);
+    let _ = std::fs::remove_file(link);
+    cleanup(dir, real);
+}

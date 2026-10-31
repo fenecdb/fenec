@@ -110,7 +110,8 @@ These are deliberate, and README explains each one:
   `fenec-shard`'s directory, the native library and every `fenec` way that
   writes a file (the shell, `mcp --file`, `import`, a backup or restore into
   a file) take `<file>.lock` (an `fcntl` record lock, `fenec_abi::lock`) and
-  refuse a file another holds; a symbolic link to the file takes its lock.
+  refuse a file another holds; a file opened through a symbolic link is the
+  file it leads to, for its lock and every rewrite alike.
   Embedded Rust's `fs::open` takes none, a hard link is a name with a lock of
   its own, and a record lock does not cross a Docker Desktop bind mount or a
   network file system that keeps no locks: one process over each is the
