@@ -1269,25 +1269,47 @@ pub fn render_batch(results: &[Response2], version: &'static str) -> Response {
 /// permanently separate the client's optimistic local state from the
 /// server.
 pub fn render_batch_error(e: &Error, completed: usize, version: &'static str) -> Response {
-    render_batch_stop(status_of(e), &e.to_string(), completed, completed, version)
+    render_batch_stop(stop_of(e), completed, completed, version)
+}
+
+/// Why a batch stopped: the status, the words, and the reason a statement's
+/// `require <n> else '<reason>'` gave where that refused it.
+pub type Stop = (u16, String, Option<String>);
+
+/// An engine error as the [`Stop`] it makes of a batch.
+pub fn stop_of(e: &Error) -> Stop {
+    (status_of(e), e.to_string(), e.reason().map(String::from))
 }
 
 /// A batch stopped at statement `at` (from 0) with `status` and `why`: an
 /// error, a write whose `require` was not met, or a write the data ceiling
 /// refused. `completed` statements of it stay applied: none of a block.
 /// `at` names the statement, since in a block the count is no longer where
-/// it stopped.
+/// it stopped; `reason`, beside it, what the statement said of its
+/// `require`, which a caller tells refusals apart by where `at` moves with
+/// every statement added in front.
 pub fn render_batch_stop(
-    status: u16,
-    why: &str,
+    (status, why, reason): Stop,
     completed: usize,
     at: usize,
     version: &'static str,
 ) -> Response {
     let mut out = String::from("{\"error\":");
-    json::escape_into(&mut out, why);
-    out.push_str(&format!(",\"completed\":{completed},\"at\":{at}}}"));
+    json::escape_into(&mut out, &why);
+    out.push_str(&format!(",\"completed\":{completed},\"at\":{at}"));
+    reason_into(&mut out, reason.as_deref());
+    out.push('}');
     Response::json(status, out).versioned(version)
+}
+
+/// `,"reason":"..."` where a `require`'s `else` gave one: the statement's
+/// own words, which a scoped token is told as any caller is -- it sent
+/// them, and they name nothing of the rows.
+pub fn reason_into(out: &mut String, reason: Option<&str>) {
+    if let Some(r) = reason {
+        out.push_str(",\"reason\":");
+        json::escape_into(out, r);
+    }
 }
 
 /// The JSON form of a raw query response: the shape follows the statement.

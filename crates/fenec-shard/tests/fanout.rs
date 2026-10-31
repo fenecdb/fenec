@@ -460,6 +460,20 @@ fn a_tenant_that_fails_is_named_and_partial_answers_the_others() {
     let (status, a) = c.fan(q, None);
     assert_eq!(status, 200, "{a}");
     assert!(a.contains(r#""answered":3,"failed":[]"#), "{a}");
+
+    // A tenant's `require` that says why: each failed tenant names the
+    // reason its 412 carried, beside its words.
+    let guarded = r#"{"query":"get users where email = \"a1\" limit 1 require 1 else 'no a1 here'","partial":true}"#;
+    let (status, a) = c.fan(guarded, None);
+    assert_eq!(status, 200, "{a}");
+    assert!(rows(&a).contains(r#""email":"a1""#), "{a}");
+    for t in ["beta", "gamma"] {
+        let named = format!(r#""tenant":"{t}","node":"#);
+        let at = a.find(&named).unwrap_or_else(|| panic!("{t}: {a}"));
+        let entry = &a[at..at + a[at..].find('}').unwrap() + 1];
+        assert!(entry.contains(r#""status":412"#), "{entry}");
+        assert!(entry.ends_with(r#","reason":"no a1 here"}"#), "{entry}");
+    }
 }
 
 /// Tenants are the boundary, and only the router's token crosses it: a

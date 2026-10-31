@@ -102,7 +102,12 @@ class Refusal {
   /// null for any other refusal: room is made by deleting, and the writes
   /// behind it went on.
   final String? quota;
-  const Refusal(this.status, this.message, this.query, [this.quota]);
+
+  /// What the write's `require n else '<reason>'` said, where one refused
+  /// it (a 412): the app says "the seat was taken" rather than "refused".
+  /// Null where the statement gave none.
+  final String? reason;
+  const Refusal(this.status, this.message, this.query, [this.quota, this.reason]);
 }
 
 const _kPoll = 0, _kResponse = 1, _kOpened = 2, _kBytes = 3, _kClosed = 4, _kTimer = 5, _kSignal = 6;
@@ -246,8 +251,8 @@ class Replica {
           _db.lives.touch();
         case 'refused':
           if (!_refusals.isClosed) {
-            _refusals
-                .add(Refusal(a['status'] as int, a['message'] as String, a['query'] as String, a['quota'] as String?));
+            _refusals.add(Refusal(a['status'] as int, a['message'] as String, a['query'] as String,
+                a['quota'] as String?, a['reason'] as String?));
           }
         case 'status':
           await _reload();

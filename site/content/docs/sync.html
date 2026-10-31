@@ -221,7 +221,7 @@ once, whatever the network did meanwhile.</p>
 <tr><td>nothing (the network failed), <code>408</code>, <code>429</code>, <code>5xx</code></td><td>kept and sent again under its key, after 250 ms doubling to 15 s -- or after the <code>Retry-After</code> the server names, where that is longer: a tenant's quota, a tenant being moved or failed over</td></tr>
 <tr><td><code>401</code></td><td>kept; nothing is sent until a new token (<code>tokenProvider</code>, <code>setToken</code>)</td></tr>
 <tr><td><code>507</code> naming a tenant's quota of <code>bytes</code> or <code>rows</code></td><td>refused: put back, its promise rejects, <code>onRefused</code> is told with <code>e.quota</code>, and the writes behind it go on</td></tr>
-<tr><td>any other <code>4xx</code></td><td>refused: put back, its promise rejects, <code>onRefused</code> is told</td></tr>
+<tr><td>any other <code>4xx</code></td><td>refused: put back, its promise rejects, <code>onRefused</code> is told -- with <code>e.reason</code> where it is a <code>412</code> and the write's <code>require</code> said why</td></tr>
 </tbody>
 </table>
 </div>
@@ -233,10 +233,20 @@ const db = await sync({
   shapes: [{ collection: 'tasks', key: 'key' }],
   persist: 'tasks',                                // writes survive a reload
   tokenProvider: () => auth.refresh(),             // asked on a 401
-  onRefused: (e) => toast(e.quota ? 'This workspace is full' : `${e.status}: ${e.message}`),
+  onRefused: (e) => toast(e.quota ? 'This workspace is full' : e.reason ?? `${e.status}: ${e.message}`),
 });
 await db.pushed();                                 // every write answered
 </pre>
+
+<p><b>A <code>require</code>'s reason.</b> A write given
+<code>{ require: 1, reason: 'the task was taken' }</code> sends its <code>else
+'…'</code> in the statement, and the server's 412 is a refusal like any other
+4xx: put back, the promise rejected, <code>onRefused</code> told, with an error
+whose <code>reason</code> is that text (undefined where the write gave none).
+A write the replica finds unmet itself, a <code>delete</code> of a row it
+does not hold under <code>require: 1</code>, is refused there with the same
+<code>reason</code>, and nothing is sent (<a href="fenecql-writing.html#require-reason">A
+reason for the refusal</a>).</p>
 
 <details class="deep"><summary>Offline, reload, backoff, quota and failover</summary>
 <p><b>Once, by the key.</b> A write whose answer was lost -- the request

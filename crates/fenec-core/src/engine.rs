@@ -202,7 +202,7 @@ const FIELD_TTL: u8 = 4;
 fn required(
     verb: &str,
     collection: &str,
-    require: Option<u64>,
+    require: &Option<Require>,
     out: Result<Response>,
 ) -> Result<Response> {
     let n = match (require, &out) {
@@ -211,10 +211,7 @@ fn required(
         _ => return out,
     };
     match require {
-        Some(want) if n as u64 != want => Err(Error::Unmet(format!(
-            "`{verb} {collection}` wrote {n} {}, and requires {want}",
-            if n == 1 { "row" } else { "rows" }
-        ))),
+        Some(r) if n as u64 != r.n => Err(unmet(r, verb, collection, "wrote", n)),
         _ => out,
     }
 }
@@ -223,17 +220,42 @@ fn required(
 /// a block -- a `/batch` -- under its write lock, so what it saw is what
 /// the writes around it see, and refused, the block is put back.
 fn read_required(sel: &Select, rows: ResultSet) -> Result<Response> {
-    match sel.require {
-        Some(want) if rows.rows.len() as u64 != want => {
-            let n = rows.rows.len();
-            Err(Error::Unmet(format!(
-                "`get {}` answered {n} {}, and requires {want}",
-                sel.collection,
-                if n == 1 { "row" } else { "rows" }
-            )))
-        }
+    match &sel.require {
+        Some(r) if rows.rows.len() as u64 != r.n => Err(unmet(
+            r,
+            "get",
+            &sel.collection,
+            "answered",
+            rows.rows.len(),
+        )),
         _ => Ok(Response::Rows(rows)),
     }
+}
+
+/// The refusal of a count `r` did not meet, `n`: what the statement did,
+/// led by the reason its `else` gave where it gave one -- "insufficient
+/// funds (`set accounts` wrote 0 rows, and requires 1)" -- which the error
+/// reads back ([`Error::reason`]). One `format!` for a write's and a
+/// `get`'s, and the reason pushed rather than formatted: each `format!` is
+/// code of the browser module's own, and one with the reason's three
+/// arguments more was 0.1 KB more than the pushes.
+#[inline(never)]
+fn unmet(r: &Require, verb: &str, collection: &str, did: &str, n: usize) -> Error {
+    let rows = if n == 1 { "row" } else { "rows" };
+    let count = format!(
+        "`{verb} {collection}` {did} {n} {rows}, and requires {}",
+        r.n
+    );
+    let reason = &*r.reason;
+    if reason.is_empty() {
+        return Error::Unmet(count);
+    }
+    let mut m = String::with_capacity(reason.len() + count.len() + 3);
+    m.push_str(reason);
+    m.push_str(" (");
+    m.push_str(&count);
+    m.push(')');
+    Error::Unmet(m)
 }
 
 /// The expiry a [`FIELD_TTL`] change leaves its field with.
@@ -6477,7 +6499,7 @@ impl Database {
             } => required(
                 if *insert { "insert" } else { "put" },
                 collection,
-                *require,
+                require,
                 self.put(
                     collection,
                     docs,
@@ -6500,7 +6522,7 @@ impl Database {
             } => required(
                 "set",
                 collection,
-                *require,
+                require,
                 self.update(collection, set, filter, pick.as_deref(), params),
             ),
             Statement::Delete {
@@ -6511,7 +6533,7 @@ impl Database {
             } => required(
                 "del",
                 collection,
-                *require,
+                require,
                 self.delete(collection, filter, pick.as_deref(), params),
             ),
             Statement::ListCollections => Ok(Response::Schemas(
@@ -6577,13 +6599,13 @@ impl Database {
                 collection,
                 set: set.clone(),
                 filter,
-                require: *require,
+                require: require.clone(),
                 pick: pick.clone(),
             },
             Statement::Delete { require, pick, .. } => Statement::Delete {
                 collection,
                 filter,
-                require: *require,
+                require: require.clone(),
                 pick: pick.clone(),
             },
             _ => unreachable!("only a set or a del has a filter to answer"),

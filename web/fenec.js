@@ -254,6 +254,8 @@ export class Fenec {
       // A text of several says which statement stopped it, from 0, as a
       // `/batch` does.
       if (typeof res.at === 'number') e.at = res.at;
+      // What a `require n else '<reason>'` said, as a server's 412 says it.
+      if (typeof res.reason === 'string') e.reason = res.reason;
       // Refused for collation data the module has not been handed: which,
       // and how many statements before this one ran (`query` runs it again
       // only when none did).
@@ -1461,12 +1463,14 @@ function said(body) {
   } catch {
     /* not JSON: nothing said */
   }
-  const { quota, retry_after: s, retry_after_ms: ms } = b ?? {};
+  const { quota, retry_after: s, retry_after_ms: ms, reason } = b ?? {};
   // The wait itself where the server says it, whole seconds otherwise.
   const wait = typeof ms === 'number' && ms > 0 ? ms : typeof s === 'number' && s > 0 ? s * 1000 : 0;
   return {
     quota: typeof quota === 'string' && quota ? quota : null,
     retryMs: Math.min(Math.floor(wait), RETRY_AFTER_MAX_MS),
+    // What a `require n else '<reason>'` the server found unmet said.
+    reason: typeof reason === 'string' && reason ? reason : null,
   };
 }
 
@@ -1846,8 +1850,9 @@ export class FenecSync {
         }
         return doc;
       });
-      // `require` goes to the server with the write, and is held here too.
-      const required = { require: opts?.require };
+      // `require` goes to the server with the write, and is held here too,
+      // its reason with it.
+      const required = { require: opts?.require, reason: opts?.reason };
       const line = base.toInsert(docs, required);
       const named = docs.filter((d) => d.id != null).map((d) => d.id);
       if (!key && named.length < docs.length) {
@@ -1907,7 +1912,7 @@ export class FenecSync {
   #applyUpsert(c, base, key, [docs, patch], opts) {
     const list = Array.isArray(docs) ? docs : [docs];
     if (list.length === 0) return null;
-    const required = { require: opts?.require };
+    const required = { require: opts?.require, reason: opts?.reason };
     const line = base.toUpsert(list, patch, required);
     if (!list.every((d) => d.id != null || (key && d[key] != null))) {
       if (key) throw new FenecError(UPSERT_KEY);
@@ -2220,7 +2225,7 @@ export class FenecSync {
         this.#kick();
       });
     } else {
-      this.#refused(op, status, why(status, body), s.quota);
+      this.#refused(op, status, why(status, body), s.quota, s.reason);
     }
     this.#kick();
   }
@@ -2258,9 +2263,10 @@ export class FenecSync {
   /**
    * The server refused `op`: what it did is put back, the last statement's
    * first, and the app told -- with the tenant's quota where one refused
-   * it, so a page says "storage full" rather than "refused".
+   * it, so a page says "storage full" rather than "refused", and the reason
+   * a `require n else '<reason>'` gave, so it says "no seats left".
    */
-  #refused(op, status, message, quota = null) {
+  #refused(op, status, message, quota = null, reason = null) {
     const at = this.#queue.indexOf(op);
     if (at < 0) return;
     this.#queue.splice(at, 1);
@@ -2270,8 +2276,8 @@ export class FenecSync {
     this.#deleteLocal('_sync_temps', gone);
     this.#temps = this.#temps.filter((t) => t.op !== op.n);
     this.#setFault(message, status, false, quota);
-    this.#settled(op, { t: 'ans', key: op.key, status, message, quota });
-    const e = Object.assign(new FenecError(message), { status, query: op.label }, quota && { quota });
+    this.#settled(op, { t: 'ans', key: op.key, status, message, quota, reason });
+    const e = Object.assign(new FenecError(message), { status, query: op.label }, quota && { quota }, reason && { reason });
     if (!op.foreign) this.#onRefused?.(e);
     if (op.done) op.done.reject(e);
   }
@@ -2691,7 +2697,7 @@ export class FenecSync {
       const op = this.#queue.find((o) => o.key === msg.key);
       if (!op) return;
       if (msg.status < 300) this.#landed(op, msg.seq);
-      else this.#refused(op, msg.status, msg.message, msg.quota);
+      else this.#refused(op, msg.status, msg.message, msg.quota, msg.reason);
       return;
     }
     const s = this.#shapes.get(msg.c);

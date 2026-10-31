@@ -143,6 +143,41 @@ class FenecTest {
         db.close()
     }
 
+    /** A require that says why: the exception's `reason` is the statement's own words, the library's and a server's alike. */
+    @Test
+    fun anUnmetRequireSaysItsReason() = runBlocking {
+        val db = Fenec.memory()
+        db.execute("create collection accounts (name text, balance int)")
+        db.execute("put accounts {id: 1, name: \"a\", balance: 5}")
+        val accounts = db.from("accounts")
+        val funds = assertFailsWith<FenecException> {
+            accounts.where("name", "a").where("balance", ">=", 9)
+                .update(mapOf("balance" to Computed.inc(-9)), require = 1, reason = "insufficient funds")
+        }
+        assertEquals(FenecException.Code.UNMET, funds.code, funds.message)
+        assertEquals("insufficient funds", funds.reason)
+        val read = assertFailsWith<FenecException> {
+            accounts.where("id", 2).limit(1).require(1, reason = "it's not there").rows()
+        }
+        assertEquals(FenecException.Code.UNMET, read.code, read.message)
+        assertEquals("it's not there", read.reason)
+        val none = assertFailsWith<FenecException> { accounts.where("id", 2).delete(require = 1) }
+        assertEquals(FenecException.Code.UNMET, none.code, none.message)
+        assertEquals(null, none.reason)
+        db.close()
+        val remote = FenecRemote.refused(
+            412,
+            Json.parse("""{"error":"no such account (`set accounts` wrote 0 rows, and requires 1)","reason":"no such account"}""") as Row,
+            null,
+        )
+        assertEquals(FenecException.Code.UNMET, remote.code)
+        assertEquals("no such account", remote.reason)
+        val batch = FenecRemote.refused(412, Json.parse("""{"error":"unmet: x","completed":0,"at":1,"reason":"x"}""") as Row, null)
+        assertEquals(1, batch.at)
+        assertEquals("x", batch.reason)
+        assertEquals(null, FenecRemote.refused(412, Json.parse("""{"error":"unmet"}""") as Row, null).reason)
+    }
+
     @Test
     fun aFileIsThereAgainAndOpenOnce() = runBlocking {
         val path = scratch()

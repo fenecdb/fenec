@@ -122,7 +122,7 @@ import Testing
             return try q.order(a[0].string!, a.count > 1 ? a[1].string! : "asc", collate: opt(a, 2, "collate")?.string)
         case ("limit", _): return try q.limit(a[0].int!)
         case ("offset", _): return try q.offset(a[0].int!)
-        case ("require", _): return try q.require(a[0].int!)
+        case ("require", _): return try q.require(a[0].int!, reason: opt(a, 1, "reason")?.string)
         case ("lookup", _):
             // A name, or a list of them: a key over several fields too.
             let names = { (v: Value?) in v.map { $0.string.map { [$0] } ?? $0.array!.map { $0.string! } } }
@@ -161,6 +161,7 @@ import Testing
                 let all = { (at: Int) in opt(a, at, "all")?.bool ?? false }
                 let absent = { opt(a, 1, "ifAbsent")?.bool ?? false }
                 let require = { (at: Int) in opt(a, at, "require")?.int }
+                let reason = { (at: Int) in opt(a, at, "reason")?.string }
                 // JavaScript's `returning: true` is every field, `["*"]` here.
                 let returning = { (at: Int) -> [String]? in
                     guard let r = opt(a, at, "returning") else { return nil }
@@ -170,37 +171,41 @@ import Testing
                 var made: (text: String, params: [Value])?
                 switch op {
                 case "toFenecQL": made = try q.toFenecQL()
-                case "toInsert": made = try q.toInsert(docs(), ifAbsent: absent(), require: require(1), returning: returning(1))
-                case "toUpdate": made = try q.toUpdate(docs(), all: all(1), require: require(1), returning: returning(1))
-                case "toUpsert": made = try q.toUpsert(docs(), value(a[1]), require: require(2), returning: returning(2))
-                case "toDelete": made = try q.toDelete(all: all(0), require: require(0), returning: returning(0))
+                case "toInsert":
+                    made = try q.toInsert(docs(), ifAbsent: absent(), require: require(1), reason: reason(1), returning: returning(1))
+                case "toUpdate":
+                    made = try q.toUpdate(docs(), all: all(1), require: require(1), reason: reason(1), returning: returning(1))
+                case "toUpsert":
+                    made = try q.toUpsert(docs(), value(a[1]), require: require(2), reason: reason(2), returning: returning(2))
+                case "toDelete": made = try q.toDelete(all: all(0), require: require(0), reason: reason(0), returning: returning(0))
                 case "rows": _ = try await q.rows()
                 case "first": _ = try await q.first()
                 case "count": _ = try await q.count()
                 case "explain": _ = try await q.explain()
                 case "insert":
                     if let r = returning(1) {
-                        _ = try await q.insertReturning(docs(), returning: r, ifAbsent: absent(), require: require(1))
+                        _ = try await q.insertReturning(
+                            docs(), returning: r, ifAbsent: absent(), require: require(1), reason: reason(1))
                     } else {
-                        _ = try await q.insert(docs(), ifAbsent: absent(), require: require(1))
+                        _ = try await q.insert(docs(), ifAbsent: absent(), require: require(1), reason: reason(1))
                     }
                 case "update":
                     if let r = returning(1) {
-                        _ = try await q.updateReturning(docs(), returning: r, all: all(1), require: require(1))
+                        _ = try await q.updateReturning(docs(), returning: r, all: all(1), require: require(1), reason: reason(1))
                     } else {
-                        _ = try await q.update(docs(), all: all(1), require: require(1))
+                        _ = try await q.update(docs(), all: all(1), require: require(1), reason: reason(1))
                     }
                 case "upsert":
                     if let r = returning(2) {
-                        _ = try await q.upsertReturning(docs(), value(a[1]), returning: r, require: require(2))
+                        _ = try await q.upsertReturning(docs(), value(a[1]), returning: r, require: require(2), reason: reason(2))
                     } else {
-                        _ = try await q.upsert(docs(), value(a[1]), require: require(2))
+                        _ = try await q.upsert(docs(), value(a[1]), require: require(2), reason: reason(2))
                     }
                 case "delete":
                     if let r = returning(0) {
-                        _ = try await q.deleteReturning(returning: r, all: all(0), require: require(0))
+                        _ = try await q.deleteReturning(returning: r, all: all(0), require: require(0), reason: reason(0))
                     } else {
-                        _ = try await q.delete(all: all(0), require: require(0))
+                        _ = try await q.delete(all: all(0), require: require(0), reason: reason(0))
                     }
                 default:
                     q = try step(q, op, a)

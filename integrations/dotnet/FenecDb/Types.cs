@@ -157,6 +157,12 @@ public class FenecException : Exception
     /// the put whose id was taken. <c>null</c> for anything but a batch's stop.</summary>
     public int? At { get; }
 
+    /// <summary>What a <c>require n else '&lt;reason&gt;'</c> that refused said (the builder's <c>reason</c>): the
+    /// statement's own words, by which a caller tells "insufficient funds" from "no such account" -- where
+    /// <see cref="At"/> moves with every statement added in front of it. <c>null</c> where the statement gave
+    /// none.</summary>
+    public string? Reason { get; }
+
     /// <summary>The tenant's quota that refused the request: <c>bytes</c> and <c>rows</c> answer 507, and room
     /// is made by deleting; <c>streams</c>, <c>held</c>, <c>requests</c>, <c>writes</c> and <c>write_bytes</c>
     /// answer 429 with <see cref="RetryAfter"/>. <c>null</c> for any other refusal.</summary>
@@ -167,9 +173,10 @@ public class FenecException : Exception
     public TimeSpan? RetryAfter { get; }
 
     /// <summary>A refusal with its status, message and, for a batch, how many statements were applied and
-    /// which one stopped it; for a tenant's quota, which quota and how long to wait.</summary>
+    /// which one stopped it; for a tenant's quota, which quota and how long to wait; for a require that said
+    /// why, its reason.</summary>
     public FenecException(int status, string message, int completed = 0, int? at = null,
-        string? quota = null, TimeSpan? retryAfter = null) : base(message)
+        string? quota = null, TimeSpan? retryAfter = null, string? reason = null) : base(message)
     {
         Status = status;
         Code = CodeOf(status);
@@ -177,6 +184,7 @@ public class FenecException : Exception
         At = at;
         Quota = quota;
         RetryAfter = retryAfter;
+        Reason = reason;
     }
 
     /// <summary>A write whose outcome is unknown: <c>outcome_unknown</c>, and where it left the database.</summary>
@@ -229,7 +237,10 @@ public class FenecException : Exception
                     r.TryGetProperty("completed", out var c) ? c.GetInt32() : 0,
                     r.TryGetProperty("at", out var at) ? at.GetInt32() : null,
                     r.TryGetProperty("quota", out var q) ? q.GetString() : null,
-                    wait);
+                    wait,
+                    // What a require n else '<reason>' that refused said, a batch's stop's beside its at.
+                    r.TryGetProperty("reason", out var why) && why.ValueKind == JsonValueKind.String
+                        ? why.GetString() : null);
             }
         }
         catch (JsonException) { }

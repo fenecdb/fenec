@@ -166,8 +166,11 @@ as text. Names are checked against FenecQL's rule for one.</p>
 result with <code>isError</code>: an argument it does not take, a vector of
 the wrong length, a statement the token's rules refuse, an answer past a
 bound — each saying what to change, and with the status <code>/query</code>
-would have answered it with. A call that is not one — an unknown tool, a
-malformed message — is a JSON-RPC error.</p>
+would have answered it with. A <code>write</code> whose <code>require N else
+'…'</code> refused it carries that <code>reason</code> beside its words, as
+the 412 does (<a href="/docs/fenecql-writing#require-reason">A reason for the
+refusal</a>). A call that is not one — an unknown tool, a malformed message —
+is a JSON-RPC error.</p>
 
 <h2 id="limits">Bounds</h2>
 

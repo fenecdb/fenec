@@ -89,6 +89,31 @@ def test_a_write_whose_outcome_is_unknown_says_so():
     assert (e.value.outcome, e.value.seq) == (None, None)
 
 
+def test_a_require_that_refused_says_its_reason():
+    """A `require n else '<reason>'` that refused, as the client raises it:
+    the statement's own words beside the message, and a batch's stop's
+    beside its `at`; None where the statement gave none."""
+    import fenecdb
+
+    with pytest.raises(FenecError) as e:
+        fenecdb._answer(
+            412,
+            b'{"error":"no such account (`set accounts` wrote 0 rows, and requires 1)",'
+            b'"reason":"no such account"}',
+        )
+    assert (e.value.status, e.value.reason, e.value.at) == (412, "no such account", None)
+    with pytest.raises(FenecError) as e:
+        fenecdb._answer(
+            412,
+            b'{"error":"unmet: no account to credit (`set accounts` wrote 0 rows, and requires 1)",'
+            b'"completed":0,"at":1,"reason":"no account to credit"}',
+        )
+    assert (e.value.at, e.value.completed, e.value.reason) == (1, 0, "no account to credit")
+    with pytest.raises(FenecError) as e:
+        fenecdb._answer(412, b'{"error":"`set accounts` wrote 0 rows, and requires 1"}')
+    assert e.value.reason is None
+
+
 def test_a_write_that_does_not_write_its_count_is_refused_and_put_back(client):
     name = fresh("require")
     client.query(f"create collection {name} (name text, balance int)")
@@ -108,6 +133,31 @@ def test_a_write_that_does_not_write_its_count_is_refused_and_put_back(client):
         assert e.value.status == 412
         # The second statement stopped it, and nothing of the batch stayed.
         assert (e.value.at, e.value.completed) == (1, 0)
+        assert e.value.reason is None
+        assert client.query(f"get {name} select balance") == [{"balance": 5}]
+        # A reason tells which guard refused, wherever it stands in the batch.
+        debit = (
+            accounts.where("name", "a")
+            .where("balance", ">=", 50)
+            .to_update({"balance": 0}, require=1, reason="insufficient funds")
+        )
+        credit = accounts.where("name", "nobody").to_update(
+            {"balance": 50}, require=1, reason="no account to credit"
+        )
+        with pytest.raises(FenecError) as e:
+            client.batch([debit, credit])
+        assert (e.value.status, e.value.at, e.value.reason) == (412, 0, "insufficient funds")
+        with pytest.raises(FenecError) as e:
+            client.batch([credit])
+        assert (e.value.at, e.value.reason) == (0, "no account to credit")
+        # Written into the text, its quote and backslash come back as given.
+        with pytest.raises(FenecError) as e:
+            accounts.where("name", "nobody").delete(require=1, reason="it's a \\ b")
+        assert e.value.reason == "it's a \\ b"
+        # A read's guard says its reason too.
+        with pytest.raises(FenecError) as e:
+            accounts.where("name", "nobody").require(1, reason="no such account").rows()
+        assert (e.value.status, e.value.reason) == (412, "no such account")
         assert client.query(f"get {name} select balance") == [{"balance": 5}]
     finally:
         client.query(f"drop collection if exists {name}")

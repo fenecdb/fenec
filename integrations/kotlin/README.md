@@ -63,8 +63,9 @@ The same `Fenec`: reads and live queries are the file's, a write to a
 shape's collection shows at once and is sent -- queued in the file while
 the server cannot be reached, under an idempotency key so it lands once --
 and one the server refuses is put back and comes on `replica.refusals`, a
-tenant's quota of bytes or rows among them (its `quota` named), the writes
-behind it going on; a quota's 429 is waited out for the seconds it names.
+tenant's quota of bytes or rows among them (its `quota` named) and a
+`require` not met (its `reason` named), the writes behind it going on; a
+quota's 429 is waited out for the seconds it names.
 `replica.status` is a `StateFlow`: `ONLINE`, `OFFLINE` or `CATCHING_UP`,
 the writes not yet answered and the last error, whose `quota` tells a
 stream the quota of streams refused from the network gone; call `replica.resume()` in
@@ -75,7 +76,12 @@ file: every query a request, the same builder. Its `batch(listOf(...),
 idempotencyKey = id)` runs the builder's `toInsert`/`toUpdate`/`toDelete` as
 one block, all or none, answering `results`, `seq` and `replayed`; a
 `FenecException` that stops it carries `status` (412 and `UNMET` for a
-`require` not met) and `at`, the statement from 0. On a tenant node a
+`require` not met) and `at`, the statement from 0. A `require` says why
+with `reason` -- `update(patch, require = 1, reason = "insufficient
+funds")`, a read's `require(1, reason = "no such account")` -- written into
+the statement as `require 1 else '...'`, and the exception's `reason`, the
+library's and a server's alike, tells one refusal from another where `at`
+moves with every statement put in front. On a tenant node a
 quota names itself (`QUOTA`, and `quota`): `"bytes"` and `"rows"` answer
 507, and room is made by deleting; `"streams"`, `"requests"`, `"writes"`
 and `"write_bytes"` answer 429 with `retryAfter`, the seconds to wait, as a

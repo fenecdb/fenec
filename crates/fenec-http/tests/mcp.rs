@@ -1199,6 +1199,16 @@ fn the_write_tool_is_off_until_asked_for_and_then_writes_rows_alone() {
         r#"{"statement":"del docs where id = 999 require 1"}"#,
     );
     assert!(err && int(at(&s, &["status"])) == 412, "{s:?}");
+    assert_eq!(at(&s, &["reason"]), &Value::Null, "{s:?}");
+    // A `require` that says why: the reason beside the words, as /query's
+    // 412 gives it, for the model to tell one refusal from another by.
+    let (err, s) = n.call(
+        Some(ROOT),
+        "write",
+        r#"{"statement":"del docs where id = 999 require 1 else 'no such doc'"}"#,
+    );
+    assert!(err && int(at(&s, &["status"])) == 412, "{s:?}");
+    assert_eq!(at(&s, &["reason"]), &Value::Text("no such doc".into()));
     for (stmt, has) in [
         ("get docs", "a read goes through query"),
         ("create collection x (a int)", "not made over MCP"),

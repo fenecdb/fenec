@@ -86,13 +86,16 @@ impl Tool {
 /// goes out as the text a model reads as well, the two the same as the
 /// revision asks -- or why it refused, with the HTTP status `/query`
 /// would have answered and, for a refusal to come back from, in how many
-/// seconds: `retry_after`, as every 429 and 503 of the server says it.
+/// seconds: `retry_after`, as every 429 and 503 of the server says it; and
+/// the `reason` a statement's `require <n> else '<reason>'` gave, as its
+/// 412 says it, for a model to tell one refusal from another by.
 pub(super) enum Outcome {
     Done(String),
     Refused {
         status: u16,
         why: String,
         retry_after: Option<u64>,
+        reason: Option<String>,
     },
 }
 
@@ -102,6 +105,7 @@ impl Outcome {
             status,
             why: why.into(),
             retry_after: None,
+            reason: None,
         }
     }
 
@@ -111,6 +115,7 @@ impl Outcome {
             status,
             why: why.into(),
             retry_after: Some(secs),
+            reason: None,
         }
     }
 
@@ -132,6 +137,7 @@ impl Outcome {
                 status,
                 why,
                 retry_after,
+                reason,
             } => {
                 out.push_str("\"content\":[{\"type\":\"text\",\"text\":");
                 json::escape_into(out, why);
@@ -142,6 +148,10 @@ impl Outcome {
                 if let Some(secs) = retry_after {
                     out.push_str(",\"retry_after\":");
                     json::int_into(out, *secs as i64);
+                }
+                if let Some(r) = reason {
+                    out.push_str(",\"reason\":");
+                    json::escape_into(out, r);
                 }
                 out.push_str("},\"isError\":true");
             }
@@ -357,7 +367,12 @@ fn refusal(e: &Error) -> Outcome {
         | Error::Unmet(m)
         | Error::Quota(m) => m.clone(),
     };
-    Outcome::refused(api::status_of(e), why)
+    Outcome::Refused {
+        status: api::status_of(e),
+        why,
+        retry_after: None,
+        reason: e.reason().map(String::from),
+    }
 }
 
 /// `limit`, between 1 and the bound of rows.
@@ -558,7 +573,7 @@ fn answered(resp: crate::http::Response) -> Checked<String> {
     if resp.status >= 300 {
         // A tenant's quota (429) and a tenant being moved (503) say when
         // to come back, in the body as in `Retry-After`: kept for the model.
-        let (why, retry_after) = match json::parse_json(&body) {
+        let (why, retry_after, reason) = match json::parse_json(&body) {
             Ok(Value::Object(m)) => (
                 match member(&m, "error") {
                     Some(Value::Text(t)) => t.clone(),
@@ -568,13 +583,18 @@ fn answered(resp: crate::http::Response) -> Checked<String> {
                     Some(Value::Int(n)) if *n >= 0 => Some(*n as u64),
                     _ => None,
                 },
+                match member(&m, "reason") {
+                    Some(Value::Text(r)) => Some(r.clone()),
+                    _ => None,
+                },
             ),
-            _ => (body.clone(), None),
+            _ => (body.clone(), None, None),
         };
         return Err(Outcome::Refused {
             status: resp.status,
             why,
             retry_after,
+            reason,
         });
     }
     Ok(match body.trim_start().starts_with('[') {
@@ -1261,6 +1281,7 @@ fn remember(ctx: &Ctx, args: Args) -> Checked<String> {
                     status,
                     why,
                     retry_after,
+                    reason,
                 } => Outcome::Refused {
                     status,
                     why: format!(
@@ -1268,6 +1289,7 @@ fn remember(ctx: &Ctx, args: Args) -> Checked<String> {
                      server's operator makes it once with `{sql}`"
                     ),
                     retry_after,
+                    reason,
                 },
                 done => done,
             })

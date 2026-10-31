@@ -756,6 +756,39 @@ import Testing
         try await db.sends("get articles select title, year where year >= $1 and tags has $2 and not (title ~ $3) near embed $4 ef 128 limit $5", "[2024, \"rust\", \"draft\", [0.9, 0.1, 0], 10]")
     }
 
+    @Test("docs: a debit that must find the money, or says why") func aDebitThatMustFindTheMoneyOrSaysWhy() async throws {
+        let db = Recording()
+        _ = try await db.from("accounts")
+            .where("name", "ada")
+            .where("balance", ">=", 30)
+            .update(
+                ["balance": .expr("balance - ?", 30)] as Value,
+                require: 1,
+                reason: "insufficient funds"
+            )
+        try await db.sends("set accounts {balance: balance - $1} where name = $2 and balance >= $3 require 1 else 'insufficient funds'", "[30, \"ada\", 30]")
+    }
+
+    @Test("docs: a hold deleted that must be there, or says why") func aHoldDeletedThatMustBeThereOrSaysWhy() async throws {
+        let db = Recording()
+        _ = try await db.from("holds")
+            .where("order_ref", "o-17")
+            .where("state", "held")
+            .delete(require: 1, reason: "it's not held")
+        try await db.sends("del holds where order_ref = $1 and state = $2 require 1 else 'it''s not held'", "[\"o-17\", \"held\"]")
+    }
+
+    @Test("docs: a coupon that must still be usable, or says why") func aCouponThatMustStillBeUsableOrSaysWhy() async throws {
+        let db = Recording()
+        _ = try await db.from("coupons")
+            .where("code", "X1")
+            .where(.raw("uses < max_uses"))
+            .limit(1)
+            .require(1, reason: "coupon used up")
+            .rows()
+        try await db.sends("get coupons where code = $1 and uses < max_uses limit $2 require 1 else 'coupon used up'", "[\"X1\", 1]")
+    }
+
     @Test("docs: a product that must be there at its price") func aProductThatMustBeThereAtItsPrice() async throws {
         let db = Recording()
         _ = try await db.from("products")

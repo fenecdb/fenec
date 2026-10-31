@@ -150,8 +150,10 @@ public final class FenecRemote: @unchecked Sendable {
     /// `POST /batch`: the statements in order under one write lock, as one
     /// block -- their writes all land, or at the first error none of them
     /// do, a `FenecError` whose `at` is the statement that stopped it
-    /// (`unmet` for a write's `require` not met). A statement is what the
-    /// builder's `toInsert`, `toUpdate`, `toDelete` and `toFenecQL` make.
+    /// (`unmet` for a write's `require` not met, its `reason` the one the
+    /// statement gave, which stays put as statements go in front of it
+    /// where `at` moves). A statement is what the builder's `toInsert`,
+    /// `toUpdate`, `toDelete` and `toFenecQL` make.
     /// With `idempotencyKey` a retry after a timeout is answered as the
     /// first try was and writes nothing twice; a batch of reads alone takes
     /// no key.
@@ -292,7 +294,8 @@ public final class FenecRemote: @unchecked Sendable {
     }
 
     /// A refusal as the error it is: its status and message, where a batch
-    /// stopped, and where a tenant's quota refused it the quota and how
+    /// stopped, what a `require n else '<reason>'` that refused it said,
+    /// and where a tenant's quota refused it the quota and how
     /// many seconds to wait -- to the millisecond where the body says it
     /// (`retry_after_ms`), else `Retry-After`, or the same in the body.
     static func refused(_ status: Int, _ v: Value?, retryAfter: String?) -> FenecError {
@@ -303,7 +306,7 @@ public final class FenecRemote: @unchecked Sendable {
             code: quota == nil ? FenecRemote.code(status) : .quota,
             message: v?["error"]?.string ?? "HTTP \(status)",
             status: status, at: v?["at"]?.int, completed: v?["completed"]?.int,
-            quota: quota, retryAfter: wait)
+            quota: quota, retryAfter: wait, reason: v?["reason"]?.string)
     }
 
     /// An HTTP status as the error kind the engine would have said; the

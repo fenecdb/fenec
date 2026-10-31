@@ -1,8 +1,8 @@
 {
   "about": [
     "One script for both of a replica's syncs: the browser's FenecSync (web/fenec.js, run by web/fenec.sync.scenarios.test.js) and the native core every binding drives (crates/fenec-abi/src/sync, run by crates/fenec-abi/tests/scenarios.rs).",
-    "A scenario starts with no replica and plays its steps in order. `do` says what happens: start, restart (the app opened again over the replica it kept), seed / change (a stream event of the shape at index `shape`, 0 by default), error (the stream's error event, its `error` and `status`), drop (every stream ends), fire (every timer asked for runs out), answer (the oldest write request not yet answered gets `status`, `seq` as Fenec-Seq and `body`; status 0 is no answer at all), write (an app's write: insert / update / delete / upsert / batch, a value {\"$inc\": n} as inc(n) and {\"$expr\": text} as expr(text), and get, a read with its require, in a batch), net (whether the server is reached: a stream or GET /collections made while it is not fails at once), stream_status (the next stream opened is answered with its `status` and `body`, {\"error\":\"refused\"} unless given), online (the platform's network signal), token (a new token handed over), schema (what GET /collections answers from now on).",
-    "After each step the runner checks `expect`: requests (the GETs and POSTs made during the step: method, path, auth, key = the Idempotency-Key, body = the lines sent, lines = how many), streams (each stream opened: its path and query, auth), rows (the replica's rows of a collection by id, each row's named fields), pending (writes not yet answered), refused (each write refused, as it was told: a status alone is one told with no quota, {status, quota} one a tenant's quota refused), quota (the tenant's quota the status's last error names, null for none), token_asked, waits (each timer asked for, [min, max] ms), ready (every shape seeded), error (a start or a write refused before anything is sent).",
+    "A scenario starts with no replica and plays its steps in order. `do` says what happens: start, restart (the app opened again over the replica it kept), seed / change (a stream event of the shape at index `shape`, 0 by default), error (the stream's error event, its `error` and `status`), drop (every stream ends), fire (every timer asked for runs out), answer (the oldest write request not yet answered gets `status`, `seq` as Fenec-Seq and `body`; status 0 is no answer at all), write (an app's write: insert / update / delete / upsert / batch, a value {\"$inc\": n} as inc(n) and {\"$expr\": text} as expr(text), and get, a read with its require, in a batch; `require` and `reason` as the builders' { require: n, reason }), net (whether the server is reached: a stream or GET /collections made while it is not fails at once), stream_status (the next stream opened is answered with its `status` and `body`, {\"error\":\"refused\"} unless given), online (the platform's network signal), token (a new token handed over), schema (what GET /collections answers from now on).",
+    "After each step the runner checks `expect`: requests (the GETs and POSTs made during the step: method, path, auth, key = the Idempotency-Key, body = the lines sent, lines = how many), streams (each stream opened: its path and query, auth), rows (the replica's rows of a collection by id, each row's named fields), pending (writes not yet answered), refused (each write refused, as it was told: a status alone is one told with no quota, {status, quota} one a tenant's quota refused, {status, reason} one a require's reason refused), quota (the tenant's quota the status's last error names, null for none), token_asked, waits (each timer asked for, [min, max] ms), ready (every shape seeded), error (a start or a write refused before anything is sent), reason (the reason that error gave, a require's).",
     "An object expected is a subset of the one that came; a list is whole. A string `<name>` is any value, the same wherever the name comes again and another than every other name's: a key made for an insert, an Idempotency-Key. In a step's data a bound `<name>` stands for its value, so the server's copy of a row carries the key the app made. `@name` in rows or puts is a fixture.",
     "Writes are written with their fields in alphabetical order, as the builders render them in the order given: JavaScript keeps an object's order and the native runner's JSON sorts it. A temporary id is 2^52 = 4503599627370496 and up.",
     "Where the platforms differ on purpose a scenario says why in `differs`, and a step's expect_js / expect_native hold each side's own. Both runners write the names that passed to target/sync-scenarios/, and integrations/sync-scenarios-check.mjs fails unless both ran every one."
@@ -451,6 +451,35 @@
         {"do": "write", "write": {"delete": "tasks", "where": {"key": "zzz"}, "require": 1}, "expect": {
           "error": "`del tasks` wrote 0 rows, and requires 1", "requests": [], "pending": 0,
           "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2, "title": "two"}]}}}
+      ]
+    },
+    {
+      "name": "a require's reason goes with its write, and comes back with the refusal that puts it back",
+      "covers": "fenecql-writing.html#require: `else '<reason>'` is written into the text, a quote doubled; the 412's reason reaches the app with the write put back, and one the replica finds unmet says its reason there, nothing sent",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "X"}, "where": {"key": "a"}, "require": 1, "reason": "the task was taken"}, "expect": {
+          "requests": [{"method": "POST", "path": "/query", "key": "<w1>", "body": [
+            {"query": "set tasks {title: $1} where key = $2 require 1 else 'the task was taken'", "params": ["X", "a"]}]}],
+          "rows": {"tasks": [{"id": 1, "title": "X"}, {"id": 2, "title": "two"}]}, "pending": 1}},
+        {"do": "answer", "status": 412, "body": {"error": "the task was taken (`set tasks` wrote 0 rows, and requires 1)", "reason": "the task was taken"}, "expect": {
+          "refused": [{"status": 412, "quota": null, "reason": "the task was taken"}], "pending": 0, "waits": [], "requests": [],
+          "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2, "title": "two"}]}}},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"status": "open", "title": "new"}], "require": 1, "reason": "it's a copy"}, "expect": {
+          "requests": [{"path": "/query", "key": "<w2>", "body": [
+            {"query": "put tasks {status: $1, title: $2, key: $3} require 1 else 'it''s a copy'", "params": ["open", "new", "<k1>"]}]}],
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 4503599627370496, "key": "<k1>", "title": "new"}]}, "pending": 1}},
+        {"do": "answer", "status": 412, "body": {"error": "it's a copy (`insert tasks` wrote 0 rows, and requires 1)", "reason": "it's a copy"}, "expect": {
+          "refused": [{"status": 412, "reason": "it's a copy"}], "pending": 0,
+          "rows": {"tasks": [{"id": 1}, {"id": 2}]}}},
+        {"do": "write", "write": {"delete": "tasks", "where": {"key": "zzz"}, "require": 1, "reason": "no such task"}, "expect": {
+          "error": "no such task (`del tasks` wrote 0 rows, and requires 1)", "reason": "no such task", "requests": [], "pending": 0,
+          "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2, "title": "two"}]}}},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "Y"}, "where": {"key": "a"}, "require": 1}, "expect": {
+          "requests": [{"body": [{"query": "set tasks {title: $1} where key = $2 require 1"}]}], "pending": 1}},
+        {"do": "answer", "status": 412, "body": {"error": "`set tasks` wrote 0 rows, and requires 1"}, "expect": {
+          "refused": [{"status": 412, "reason": null}], "pending": 0}}
       ]
     },
     {

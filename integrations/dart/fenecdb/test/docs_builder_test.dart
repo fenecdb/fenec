@@ -655,6 +655,39 @@ void main() {
         '[2024, "rust", "draft", [0.9, 0.1, 0], 10]');
   });
 
+  test('docs: a debit that must find the money, or says why', () async {
+    final db = _Recording();
+    await db.from('accounts').where('name', 'ada').where('balance', '>=', 30).update({
+      'balance': Computed.expr('balance - ?', [30])
+    }, require: 1, reason: 'insufficient funds');
+    db.sends(
+        'set accounts {balance: balance - \$1} where name = \$2 and balance >= \$3 require 1 else \'insufficient funds\'',
+        '[30, "ada", 30]');
+  });
+
+  test('docs: a hold deleted that must be there, or says why', () async {
+    final db = _Recording();
+    await db
+        .from('holds')
+        .where('order_ref', 'o-17')
+        .where('state', 'held')
+        .delete(require: 1, reason: 'it\'s not held');
+    db.sends('del holds where order_ref = \$1 and state = \$2 require 1 else \'it\'\'s not held\'', '["o-17", "held"]');
+  });
+
+  test('docs: a coupon that must still be usable, or says why', () async {
+    final db = _Recording();
+    await db
+        .from('coupons')
+        .where('code', 'X1')
+        .where(Cond.raw('uses < max_uses'))
+        .limit(1)
+        .require(1, reason: 'coupon used up')
+        .rows();
+    db.sends(
+        'get coupons where code = \$1 and uses < max_uses limit \$2 require 1 else \'coupon used up\'', '["X1", 1]');
+  });
+
   test('docs: a product that must be there at its price', () async {
     final db = _Recording();
     await db.from('products').where('sku', 'tee').where('price', 1200).where('stock', '>', 0).require(1).rows();

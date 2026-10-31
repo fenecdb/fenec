@@ -102,6 +102,10 @@ public struct Refusal: Sendable, Equatable {
     /// nil for any other refusal: room is made by deleting, and the writes
     /// behind it went on.
     public let quota: String?
+    /// What the write's `require n else '<reason>'` said, where one refused
+    /// it (a 412): the app says "the seat was taken" rather than
+    /// "refused". nil where the statement gave none.
+    public let reason: String?
 }
 
 extension Fenec {
@@ -377,7 +381,7 @@ public final class Replica: NSObject, URLSessionDataDelegate, @unchecked Sendabl
             case "refused":
                 let r = Refusal(
                     status: a["status"]?.int ?? 0, message: a["message"]?.string ?? "", query: a["query"]?.string ?? "",
-                    quota: a["quota"]?.string)
+                    quota: a["quota"]?.string, reason: a["reason"]?.string)
                 lock.lock()
                 let ws = Array(refusalWatchers.values)
                 lock.unlock()
