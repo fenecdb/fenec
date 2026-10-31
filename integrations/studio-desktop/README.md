@@ -198,7 +198,7 @@ thing in the list below that has to be looked at with a real certificate.
 
 | | |
 |---|---|
-| `src/bun/server.ts`, `process.ts` | **the one place a server is started**: `fenec-server --file F --http H:P --sync S [...] --exit-on-stdin-close` (`serving.ts` writes the arguments) with a random 32-byte token in `FENEC_HTTP_TOKEN` (a served database's: the Keychain's) and another in `FENEC_REPLICATION_TOKEN` for backups, and **a pipe on its stdin that the app holds for the server's life**, found by the `fenec-http <version> listening on: http://<host>:<port>` line on stderr (the whole line, anchored, on the host and port that were asked for: a line that merely contains the words, or another address, is refused and the server stopped; `listening.ts`), which is read, with stdout, for as long as it runs into a ring of its last 1 000 lines; SIGTERM to stop it (sync and checkpoint on the way down), SIGKILL after 30 s; given a few variables (`env.ts`: `HOME`, `PATH`, `TMPDIR`, `LANG`, `LC_*`, `USER`, `LOGNAME`, `TZ`) and nothing else of the app's environment. `process.ts` takes the spawn it is handed, so `node --test` drives the real binary through it |
+| `src/bun/server.ts`, `process.ts` | **the one place a server is started**: `fenec-server --file F --http H:P --sync S [...] --exit-on-stdin-close` (`serving.ts` writes the arguments) with a random 32-byte token in `FENEC_HTTP_TOKEN` (a served database's: the Keychain's) and, for a file whose backups are set up or a server started to take one, another in `FENEC_REPLICATION_TOKEN`, and **a pipe on its stdin that the app holds for the server's life**, found by the `fenec-http <version> listening on: http://<host>:<port>` line on stderr (the whole line, anchored, on the host and port that were asked for: a line that merely contains the words, or another address, is refused and the server stopped; `listening.ts`), which is read, with stdout, for as long as it runs into a ring of its last 1 000 lines; SIGTERM to stop it (sync and checkpoint on the way down), SIGKILL after 30 s; given a few variables (`env.ts`: `HOME`, `PATH`, `TMPDIR`, `LANG`, `LC_*`, `USER`, `LOGNAME`, `TZ`) and nothing else of the app's environment. `process.ts` takes the spawn it is handed, so `node --test` drives the real binary through it |
 | `src/bun/session.ts` | **the one place a token reaches a page**: the preload that defines `window.fenecHost` (below) |
 | `src/bun/windows.ts` | what a studio window is held to; the notice window; `holdTo`, which holds every window of the app to its address |
 | `src/bun/app.ts` | open a file or a saved server, make a new database, serve, stop and restart a database, take and restore backups, keep the lists; **one server a file**, whatever starts or stops one going through the file's lane one after another; one window per `file:<real path>` or `remote:<id>`; one open of a thing at a time; what a quit waits for |
@@ -206,7 +206,21 @@ thing in the list below that has to be looked at with a real certificate.
 | `src/bun/pages.ts` | the main window (`launcher` in the code, as it began) and the new-database window and what they may ask (`src/shared/rpc.ts`) |
 | `src/bun/messages.ts`, `remote.ts`, `names.ts`, `dbfile.ts`, `env.ts`, `token.ts`, `listening.ts` | every failure in words, the probe of a saved server, the check of a new name and of a first collection, what a file is, the environment of what the app starts, a token and the address (or the file) it is for, the lines of a server's stderr the app acts on: pure, unit-tested |
 | `src/bun/secrets.ts`, `store.ts` | Keychain (`Bun.secrets`) and `state.json` |
+| `src/bun/instance.ts`, `clipboard.ts` | one instance of the app at a time; a token copied to the clipboard cleared a minute later: pure but for a socket and a clipboard handed in, unit-tested |
 | `src/launcher`, `src/newdb`, `src/notice`, `src/ui` | the app's own pages |
+
+**One app at a time.** Two instances would each keep `state.json` and the
+Keychain items as if alone: one's **Remove** would delete the token under a
+server the other runs, and each would write the other's lists over. macOS opens
+the running app rather than a second from Finder, the Dock and `open`, but not
+from `open -n` or the binary run by hand, and Electrobun 2.0.4 has no
+single-instance switch; so the first instance listens on a socket of its own in
+the user's temporary folder (`$TMPDIR/<identifier>.instance`, a folder only the
+user can reach), and a later one binds there first: refused, it asks the
+instance there to show its main window and quits before it reads a list or the
+Keychain. A socket an instance that ended left answers nothing and is taken
+over (`instance.ts`, `test/instance.test.ts`). The test variant's identifier is
+its own, so a check never meets an installed app.
 
 **Open…** takes `.fenec` files (the panel is limited to them) and, whatever
 is picked, looks at the file before a server is started on it
@@ -256,7 +270,9 @@ file with `open(..., "wx")`, which fails if the name exists (so no file is ever
 made over), and starts a server on it for a moment, which takes an empty file
 as a new database and, if one is asked for, runs its first collection's
 `create collection` through `/query` with that server's token. A name is
-checked as a file name (no `/`, `\`, `:`, no leading dot, 255 bytes), `.fenec`
+checked as a file name (no `/`, `\`, `:`, no control character, no leading
+dot, 255 bytes, and none of the controls that change the direction of text,
+which would show `invoice<U+202E>slx.fenec` as `invoicenef.xls`), `.fenec`
 is added once, and a server that then fails to start does not leave the empty
 file behind. A first collection is held to a narrow grammar (`names.ts`: a
 name, then fields of a known type and an optional index), so nothing typed can
@@ -291,7 +307,9 @@ file for the apps on this Mac or the network:
   environment, never in argv, a URL, `state.json` or a log. **Show** asks the
   main process for it (the main window is the app's own page, held to
   `views://launcher/`); **Copy** puts it on the clipboard from the main
-  process; **New token** keeps a new one, taken at the next start.
+  process and takes it off a minute later, if the clipboard still holds it
+  (something copied since is left alone; a quit takes it off at once,
+  `clipboard.ts`); **New token** keeps a new one, taken at the next start.
 * **Beside the data**: `--studio`, `--auto-compact off` when compaction is
   unticked (on by default, 0.5, the server's own), `--mcp`, `--metrics
   127.0.0.1:0` (on this Mac whoever reaches the data), and **when a write is
@@ -304,7 +322,7 @@ file for the apps on this Mac or the network:
 **How long a served server runs, decided:** until it is stopped or the app
 quits. A quit stops every one, the one shutdown (SIGTERM, then the server's
 sync and checkpoint), and its stdin's end stops it if the app is killed, so
-**nothing outlives the app**. After a relaunch the Servers list shows each
+**no server outlives the app** (a run of the shell is another matter: below). After a relaunch the Servers list shows each
 served database **stopped**, with the settings and the port it ran with and
 why it stopped (stopped, the app quit, exited), and **Start** starts it again
 with them; nothing starts by itself. A server that started at launch would
@@ -334,27 +352,56 @@ sealed with a key file or not, and are taken by the bundled shell:
 * **Back up now**: `fenec backup http://127.0.0.1:<port> <folder>` adds an image
   of the database, taken while it runs, to the folder (`fenec archive`'s layout,
   so the shell's `verify`, `restore` and `prune` read it). It speaks the
-  replication stream, so every server the app starts has a replication token in
-  its environment (random, for that start, never stored) and
-  `--replication-buffer 1` (1 MiB: an image needs none of the writes a replica
-  that falls behind is sent, and the default is 64); the shell is given the
-  token in its environment as well. It is taken from the server serving the
-  file, the one behind its window, or one started for the backup alone and
-  stopped after (exit 0), whose `<file>.lock` refuses a file another program
-  has. A server under `--sync off` serves no stream (it refuses a replication
-  token): its backup is refused with the reason.
+  replication stream, so a server the app starts on a file **whose backups are
+  set up** has a replication token in its environment (random, for that start,
+  never stored) and `--replication-buffer 1` (1 MiB: an image needs none of the
+  writes a replica that falls behind is sent, and the default is 64); the shell
+  is given the token in its environment as well. **Only those:** a replication
+  token also turns the server's change feed on, and `/_changes` answers every
+  write to the data token, from the network for a database served there, which
+  a file with no backups has no reason to offer. It is taken from the server
+  serving the file, the one behind its window, or one started for the backup
+  alone and stopped after (exit 0), whose `<file>.lock` refuses a file another
+  program has; a server started before the backups were set up has no stream,
+  and the backup says to restart it (Set up says so too). A server under
+  `--sync off` serves no stream (it refuses a replication token): its backup is
+  refused with the reason.
 * **Sealed**: `--key-file` names a key **Make a new key…** writes with `fenec
-  key` (0600, never over a file); a key in the backups' own folder is refused.
+  key` (0600, never over a file). A key **anywhere under the folder that was
+  picked** is refused (the backups' folder, or the one above it when that is
+  named after the database, as Choose… names it: the folder a user copies or
+  syncs whole), compared as real paths, through links; so is one **on the disk
+  the backups go to, when that is not the database's** (whoever takes the
+  drive has both). A key others on the Mac may read is said, not refused, with
+  its mode: one copied in may have lost `fenec key`'s 0600 (`keyPlacement`).
   Only the key's path is in `state.json`.
 * **Verify**: `fenec verify`, what the folder can restore.
 * **Restore…**: `fenec restore <folder> <new file> [--to-change n]`, from the
   newest image or any listed. **`fenec restore` writes over whatever is at the
   name it is given, a file a server is serving included** (tried: it did, exit
-  0), so it is given a name of the app's own beside the new file
-  (`.<name>.restoring-<uuid>`), and the result is put in place with `link`,
-  which fails if the name is taken (a copy with `COPYFILE_EXCL` on a disk
-  without hard links): never over a file. The new file opens in a window. New
-  database's **A backup** is the same restore.
+  0), so it writes into a folder of its own made for that restore beside the
+  new file (`mkdtemp`, `.<name>.restoring-XXXXXX/db.fenec`), and the result is
+  put in place with `link`, which fails if the name is taken (on a disk without
+  hard links, exFAT or FAT32, a copy with `COPYFILE_EXCL`, fsynced before it is
+  said to be done): never over a file. **A folder, not a name:** the shell
+  writes beside its output too (`<out>.restoring`, `<out>.compacting`, its
+  lock), with the extension cut, so two restores to one name, each given a
+  name of its own, shared those and broke each other; the folder goes whole
+  once the restore ends, however it ends. Two restores to one name also wait
+  for each other in the app, so the second finds the first's file and is
+  refused, and the Restore button is off while one runs
+  (`test/backups.test.ts` runs three at once). The new file opens in a window.
+  New database's **A backup** is the same restore.
+* **The shell's runs end with the app's quit, not its death.** `fenec backup`,
+  `verify`, `restore` and `key` do not read their stdin, so a pipe the app held
+  would not stop one, and macOS has no parent-death signal. A quit stops every
+  run (SIGTERM, which a one-shot command takes as its end) and waits for its
+  caller to see it end, before the servers stop: a backup stopped so leaves no
+  image (an image is written as `.tmp` and renamed once whole), a restore
+  nothing at the new name, its folder removed; no run starts after (`stopCli`).
+  An app **killed** (not quit) leaves a run under way to finish on its own: a
+  backup adds its image, and a restore's file stays in its hidden folder,
+  `.<name>.restoring-XXXXXX`, beside where it was going.
 * Not built, each for a reason: a **continuous archive** (`fenec archive`, the
   design's "written as the server writes") runs until interrupted and has no
   `--exit-on-stdin-close`, so killing the app would leave it running; and
@@ -430,6 +477,19 @@ it. So a window that shows one gets:
   page, which is the studio) until the window closes; it is in no storage.
 * A saved server on plain `http://` to another machine sends its token
   unencrypted: the launcher warns where the address is typed.
+* **A chosen port is looked at, not held, until the server binds it.** The app
+  refuses a port something answers on at 127.0.0.1 (Serving, above), then
+  starts the server, which binds it a moment later: a program that binds
+  127.0.0.1 on that port in between gets the app's and its windows'
+  connections, the token with them; so does one that binds it by name at any
+  time beside a server on 0.0.0.0, since a bind by name takes loopback from a
+  wildcard one. It takes a program already running on this Mac, and one
+  running as you can read the token anyway (above). A window's server, on
+  127.0.0.1 and a port the system picks, has no such moment.
+* **A token copied to the clipboard** is there for a minute, as anything
+  copied is: for every program of yours to read, and for Universal Clipboard to
+  carry to your other devices where it is on. It is taken off then if the
+  clipboard still holds it, and at a quit.
 * **A server's page can start a download into `~/Downloads` without a prompt**
   (a `Content-Disposition: attachment`, a link with `download`): Electrobun 2.0.4
   lets any download through whatever the navigation rules say, and gives the app
@@ -461,6 +521,9 @@ that inherited it would keep the server's stdin open after the app was gone
 tables with lsof to see that each server's stdin is written to by the app alone,
 kills the app, and needs both to end and both files to be free). A quit waits for every server, one
 being started and one whose window closed a moment ago included.
+
+A run of the `fenec` shell is not a server, and is not held so: a quit stops
+it, and a killed app leaves it to finish alone (Backups, above).
 
 ## What a failure looks like
 

@@ -189,6 +189,12 @@ async function run(c: any) {
 		case "backup": report("backup-result", { ...(await backupNow(c.path)), path: c.path }); break;
 		case "verify": report("verify-result", { ...(await verifyBackups(c.path)), path: c.path }); break;
 		case "restore": report("restore-result", { ...(await restoreBackup(c.path, c.change ?? null, c.folder, c.name)), from: c.path }); break;
+		// Two restores into one name at once, as Restore in the main window and New database's "A backup" at the same moment.
+		case "restore-twice": {
+			const both = await Promise.all([restoreBackup(c.path, null, c.folder, c.name), restoreBackup(c.path, null, c.folder, c.name)]);
+			report("restore-twice-result", { from: c.path, results: both });
+			break;
+		}
 		case "check-conn": report("check-conn-result", { ...(await checkConnection(c.id)), id: c.id }); break;
 		case "remove-served": await removeServed(c.path); report("served-removed", { path: c.path }); break;
 		case "make-key": report("make-key-result", { ...(await makeKey(c.folder, c.name)) }); break;

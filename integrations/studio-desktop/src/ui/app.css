@@ -42,6 +42,9 @@
 * { box-sizing: border-box; }
 /* A rule's `display: flex` would show what the page hid. */
 [hidden] { display: none !important; }
+/* No rubber band past the page's ends: Electrobun's preload adds this as a
+   style element, which the pages' CSP refuses, so it is said here. */
+html, body { overscroll-behavior: none; }
 body { margin: 0; background: var(--bg); color: var(--fg); }
 main { max-width: 680px; margin: 0 auto; padding: 28px 24px 24px; }
 h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }

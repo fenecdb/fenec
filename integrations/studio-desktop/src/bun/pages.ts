@@ -35,10 +35,12 @@ import {
 	serverLog,
 	serveTokenOf,
 	setArchive,
+	sheetPlan,
 	stopServed,
 	verifyBackups,
 } from "./app.ts";
-import { commandShown, factsOf, servePlan, SYNC_NOTES } from "./serving.ts";
+import { copySecret, SECRET_ON_CLIPBOARD_MS, type Clipboard } from "./clipboard.ts";
+import { DEFAULT_SYNC, isSync, settingsFrom, SYNC_NOTES, type Sync } from "./serving.ts";
 import { holdTo, pageFrame } from "./windows.ts";
 
 /** The dialogs. A test variant answers from the checks (testhooks.ts) instead of opening one. */
@@ -64,11 +66,20 @@ export async function chooseFile() {
 	return path ? openFile(path) : { ok: true };
 }
 
-/** Text to the clipboard, from the main process: a page's `navigator.clipboard` needs a secure context views:// is not. */
+/** The clipboard, from the main process: a page's `navigator.clipboard` needs a secure context views:// is not. */
+const clipboard: Clipboard = {
+	write: (text) => Utils.clipboardWriteText(text),
+	read: () => Utils.clipboardReadText(),
+	clear: () => Utils.clipboardClear(),
+};
+
+/** Text that is no secret (a snippet) to the clipboard. */
 function copy(text: string) {
-	Utils.clipboardWriteText(text);
+	clipboard.write(text);
 	if (__TESTABLE__) void import("./testhooks.ts").then((h) => h.report("copied", { length: text.length }));
 }
+
+const syncFrom = (v: unknown): Sync => (isSync(v) ? v : DEFAULT_SYNC);
 
 // ------------------------------------------------------------------ the main window
 
@@ -115,20 +126,22 @@ const launcherRPC = BrowserView.defineRPC<LauncherRPC>({
 			figures: ({ path }) => figuresOf(path),
 			compact: ({ path }) => compactNow(path),
 
-			serve: ({ path, settings, sync }) => serveFile(path, settings, sync),
+			// What a page sends is held to what a setting is (serving.ts), whatever the page is.
+			serve: ({ path, settings, sync }) => serveFile(path, settingsFrom(settings), syncFrom(sync)),
 			stopServer: ({ path }) => stopServed(path),
-			restartServer: ({ path, settings, sync }) => restartServed(path, settings, sync),
+			restartServer: ({ path, settings, sync }) => restartServed(path, settings === undefined ? undefined : settingsFrom(settings), sync === undefined ? undefined : syncFrom(sync)),
 			removeServer: async ({ path }) => {
 				await removeServed(path);
 				return overview();
 			},
-			plan: async ({ path, settings, sync }) => ({ command: commandShown(servePlan(path, sync, settings), Utils.paths.home), facts: factsOf(settings, sync) }),
+			plan: async ({ path, settings, sync }) => sheetPlan(path, settingsFrom(settings), syncFrom(sync)),
 			portFree: ({ port, reach, path }) => portFree(port, reach, path),
 			serveToken: async ({ path }) => ({ token: await serveTokenOf(path) }),
 			copyToken: ({ path }) =>
 				attempt(async () => {
-					copy(await serveTokenOf(path));
-					return { ok: true, message: "The token is on the clipboard." };
+					copySecret(await serveTokenOf(path), clipboard, SECRET_ON_CLIPBOARD_MS);
+					if (__TESTABLE__) void import("./testhooks.ts").then((h) => h.report("copied", { secret: true }));
+					return { ok: true, message: "The token is on the clipboard for a minute: it is cleared then if it is still there." };
 				}),
 			newToken: ({ path }) => attempt(() => newServeToken(path)),
 			serverLog: async ({ path }) => ({ lines: serverLog(path) }),
@@ -232,7 +245,8 @@ const newDbRPC = BrowserView.defineRPC<NewDbRPC>({
 			chooseFolder: async ({ from }) => ({ folder: await pick("folder", from || Utils.paths.documents) }),
 			chooseKey: async ({ from }) => ({ path: await pick("key", from || homedir()) }),
 			create: async (form) => {
-				const made = await createDatabase(form);
+				// The page's `sync` held to what one is, as the main window's are.
+				const made = await createDatabase({ ...form, sync: syncFrom(form.sync) });
 				// After the answer is on its way: the window is the one asking.
 				if (made.ok) setTimeout(() => newdb?.close(), 0);
 				return made;

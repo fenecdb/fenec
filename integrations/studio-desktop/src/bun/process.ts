@@ -166,6 +166,7 @@ export async function startServer(
 	const tail: string[] = [];
 	const listeners = new Set<(line: string) => void>();
 	let metrics: string | null = null;
+	let announced = false;
 
 	let announce!: (where: { origin: string; port: number } | { refused: string }) => void;
 	const listening = new Promise<{ origin: string; port: number } | { refused: string }>((resolve) => (announce = resolve));
@@ -173,10 +174,17 @@ export async function startServer(
 		const line = raw.length > LINE_CHARS ? `${raw.slice(0, LINE_CHARS)}…` : raw;
 		tail.push(line);
 		if (tail.length > LOG_LINES) tail.shift();
-		metrics ??= parseMetrics(line);
-		// Only the server's own line, only on the address that was asked for (listening.ts).
-		const where = parseListening(line, plan.host, plan.port);
-		if (where) announce(where);
+		// The server says both before it answers anything: what a line says once it
+		// does is the data's (a statement logged, a collection named), never where it listens.
+		if (!announced) {
+			metrics ??= plan.metrics ? parseMetrics(line) : null;
+			// Only the server's own line, only on the address that was asked for (listening.ts).
+			const where = parseListening(line, plan.host, plan.port);
+			if (where) {
+				announced = true;
+				announce(where);
+			}
+		}
 		listeners.forEach((f) => f(line));
 	};
 	// Drain both for the life of the process: a pipe nobody reads fills up

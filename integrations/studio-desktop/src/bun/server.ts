@@ -59,11 +59,25 @@ const CLI_OUTPUT = 64 * 1024;
 /** A backup of a large database takes a while; one that takes this long is stopped. */
 const CLI_TIMEOUT_MS = 30 * 60_000;
 
+/** The runs of `fenec` under way: a quit stops them (`stopCli`). */
+const runs = new Map<{ kill(signal?: NodeJS.Signals): void }, Promise<unknown>>();
+let stopping = false;
+
+/** Is a backup, verify, restore or key under way? A quit waits for it to be stopped. */
+export const cliBusy = () => runs.size > 0;
+
 /**
  * The bundled `fenec` with `args`, in `env` (backups.ts builds it: the
- * allowlist and the secrets). It ends by itself; its stdin is nothing.
+ * allowlist and the secrets). It ends by itself, or at a quit (`stopCli`).
+ *
+ * Its stdin is nothing: unlike the server, the shell's `backup`, `verify`,
+ * `restore` and `key` do not read theirs, so a pipe the app held would not
+ * stop one, and macOS has no parent-death signal. A run under way when the
+ * app is killed (not quit) runs on to its end, alone; a quit stops it.
  */
-export const runCli: Run = async (args, env) => {
+export const runCli: Run = (args, env) => {
+	// Once a quit has stopped the runs, none starts: a backup a lane let through after would hold the quit up.
+	if (stopping) return Promise.resolve({ code: null, out: "", err: "The app is quitting." });
 	const p = Bun.spawn([cliBinary(), ...args], { env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
 	const read = async (s: ReadableStream<Uint8Array>) => {
 		const decoder = new TextDecoder();
@@ -73,7 +87,26 @@ export const runCli: Run = async (args, env) => {
 		return text.slice(0, CLI_OUTPUT);
 	};
 	const timer = setTimeout(() => p.kill("SIGTERM"), CLI_TIMEOUT_MS);
-	const [out, err, code] = await Promise.all([read(p.stdout), read(p.stderr), p.exited]);
-	clearTimeout(timer);
-	return { code: code as number | null, out, err };
+	const done = Promise.all([read(p.stdout), read(p.stderr), p.exited]).then(([out, err, code]) => {
+		clearTimeout(timer);
+		return { code: code as number | null, out, err };
+	});
+	runs.set(p, done);
+	// Registered before the caller's await, which then runs before `stopCli`'s: a
+	// restore has removed its scratch folder by the time a quit goes on.
+	void done.finally(() => runs.delete(p)).catch(() => {});
+	return done;
 };
+
+/**
+ * What a quit does first: every run of `fenec` is stopped (SIGTERM, which
+ * the one-shot commands take as an end) and its caller has seen it end. A
+ * backup stopped so leaves no image (an image is written as `.tmp` and
+ * renamed once whole, and `.tmp` is no image to the shell); a restore, nothing
+ * at the new name, its folder removed by its caller (backups.ts).
+ */
+export async function stopCli(): Promise<void> {
+	stopping = true;
+	for (const p of runs.keys()) p.kill("SIGTERM");
+	await Promise.allSettled(runs.values());
+}

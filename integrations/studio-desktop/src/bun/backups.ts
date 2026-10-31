@@ -14,13 +14,17 @@
 //
 // **A restore never writes over a file.** `fenec restore` writes its output
 // whether or not a file is there -- a database another program serves
-// included -- so it is given a name of the app's own that nothing has, beside
-// the new file, and the result is put in place with `link`, which fails if the
-// name is taken: no check-then-write window. Pure but for the file system and
+// included -- so it writes into a folder of the app's own, made for that one
+// restore beside the new file (`mkdtemp`), and the result is put in place with
+// `link`, which fails if the name is taken: no check-then-write window. A
+// folder and not a name of its own: the shell writes beside its output too
+// (`<out>.restoring`, `<out>.compacting`, the lock), and a unique name it
+// replaced the end of was shared by two restores to one name, which broke each
+// other. Removing the folder takes all of it. Pure but for the file system and
 // the runner it is handed (Bun's in the app, Node's in test/backups.test.ts,
 // which drives the real binaries).
 
-import { copyFileSync, constants, existsSync, linkSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { closeSync, constants, copyFileSync, existsSync, fsyncSync, linkSync, mkdirSync, mkdtempSync, openSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { childEnvironment } from "./env.ts";
 import { kindOfFile } from "./dbfile.ts";
@@ -94,30 +98,108 @@ export type Restored = { ok: true; path: string; change: number } | { ok: false;
  */
 export async function restoreArchive(run: Run, archive: Archive, change: number | null, dest: string, env: Record<string, string | undefined> = process.env): Promise<Restored> {
 	const name = basename(dest);
-	if (existsSync(dest)) return { ok: false, message: `${name} exists in that folder already. Choose another name: a restore never writes over a file.` };
-	// A name nothing has, beside the new file: `fenec restore` writes over whatever is at the name it is given.
-	const scratch = join(dirname(dest), `.${name}.restoring-${crypto.randomUUID()}`);
+	const taken = (meanwhile: boolean): Restored => ({
+		ok: false,
+		message: `${name} ${meanwhile ? "appeared in that folder meanwhile" : "exists in that folder already"}. Choose another name: a restore never writes over a file.`,
+	});
+	if (existsSync(dest)) return taken(false);
+	// A folder of this restore's own, beside the new file (so a link reaches it):
+	// whatever the shell writes, at its output and beside it, is in there.
+	let scratch: string;
+	try {
+		scratch = mkdtempSync(join(dirname(dest), `.${name}.restoring-`));
+	} catch (e) {
+		return { ok: false, message: (e as Error).message };
+	}
+	const out = join(scratch, "db.fenec");
 	try {
 		const to = change === null ? [] : ["--to-change", String(change)];
-		const r = await run(["restore", archive.dir, scratch, ...to, ...keyArgs(archive)], childEnvironment(env, {}));
+		const r = await run(["restore", archive.dir, out, ...to, ...keyArgs(archive)], childEnvironment(env, {}));
 		const m = /change (\d+)/.exec(r.out);
 		if (r.code !== 0 || !m) return { ok: false, message: said(r) || `fenec restore ended with ${r.code}` };
-		if (kindOfFile(scratch) !== "database") return { ok: false, message: "The restore did not make a database file." };
+		if (kindOfFile(out) !== "database") return { ok: false, message: "The restore did not make a database file." };
 		try {
 			// Fails with EEXIST if the name was taken meanwhile: never over a file.
-			linkSync(scratch, dest);
+			linkSync(out, dest);
 		} catch (e) {
-			const code = (e as NodeJS.ErrnoException).code;
-			if (code === "EEXIST") return { ok: false, message: `${name} appeared in that folder meanwhile. Choose another name: a restore never writes over a file.` };
-			// A disk without hard links (exFAT): a copy that fails as well if the name is taken.
-			copyFileSync(scratch, dest, constants.COPYFILE_EXCL);
+			if ((e as NodeJS.ErrnoException).code === "EEXIST") return taken(true);
+			// A disk without hard links (exFAT, FAT32): a copy, which fails as well
+			// if the name is taken, and is on the disk before it is said to be done.
+			try {
+				copyFileSync(out, dest, constants.COPYFILE_EXCL);
+			} catch (c) {
+				if ((c as NodeJS.ErrnoException).code === "EEXIST") return taken(true);
+				throw c;
+			}
+			const fd = openSync(dest, "r");
+			try {
+				fsyncSync(fd);
+			} finally {
+				closeSync(fd);
+			}
 		}
 		return { ok: true, path: dest, change: Number(m[1]) };
 	} catch (e) {
 		return { ok: false, message: (e as Error).message };
 	} finally {
-		rmSync(scratch, { force: true });
+		rmSync(scratch, { recursive: true, force: true });
 	}
+}
+
+/** `path` resolved through the links of its longest part that exists: a folder not made yet is where it will be. */
+function resolved(path: string): string {
+	const rest: string[] = [];
+	let at = path;
+	for (;;) {
+		try {
+			return join(realpathSync(at), ...rest);
+		} catch {
+			const up = dirname(at);
+			if (up === at) return path;
+			rest.unshift(basename(at));
+			at = up;
+		}
+	}
+}
+
+/** The device of `path`, or of the longest part of it that exists. */
+function deviceOf(path: string): number {
+	for (let at = path; ; at = dirname(at)) {
+		const s = statSync(at, { throwIfNoEntry: false });
+		if (s) return s.dev;
+		if (dirname(at) === at) return -1;
+	}
+}
+
+const within = (path: string, folder: string) => path === folder || path.startsWith(folder.endsWith("/") ? folder : `${folder}/`);
+
+/**
+ * Whether `keyFile` is kept apart from the backups in `dir` of the database at
+ * `database`: `refuse` says why it is not, `warn` what to look at.
+ *
+ * Refused **anywhere under the folder that was picked**: the backups' folder,
+ * or, where it is named after the database as the app names it (`<picked>/<stem>`),
+ * the folder above it, which is the one the user chose and may copy or sync
+ * whole. Compared as real paths, through links. Refused as well **on the disk
+ * the backups are on when that is not the database's**: backups on a drive of
+ * their own are there to be carried off, and the key must not go with them;
+ * beside the live database, a key on the same disk shows nothing the database
+ * itself does not. A key others may read is a warning, not a refusal: the
+ * shell's `fenec key` writes 0600, and one copied in may have lost that.
+ */
+export function keyPlacement(dir: string, keyFile: string, database: string, dev: (path: string) => number = deviceOf): { refuse?: string; warn?: string } {
+	const key = resolved(keyFile);
+	const folder = resolved(dir);
+	const stem = basename(database).replace(/\.fenec$/i, "");
+	const picked = basename(folder) === stem ? dirname(folder) : folder;
+	if (within(key, picked)) return { refuse: `The key is inside ${picked}, with the backups: anyone who has that folder could read them. Keep it in another folder.` };
+	const backupsDisk = dev(folder);
+	if (backupsDisk !== dev(database) && dev(key) === backupsDisk) {
+		return { refuse: "The key is on the disk the backups go to, which is not the database's: whoever takes that disk has both. Keep the key on another disk." };
+	}
+	const mode = statSync(key, { throwIfNoEntry: false })?.mode ?? 0;
+	if (mode & 0o077) return { warn: `Others on this Mac may read the key (its permissions are ${(mode & 0o777).toString(8)}): chmod 600 it, as fenec key makes one.` };
+	return {};
 }
 
 /** `fenec key`: a new key at `path`, which must not exist (the shell refuses to write over a key). */

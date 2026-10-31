@@ -70,26 +70,33 @@ export type Plan = {
 	metrics: boolean;
 	/**
 	 * A replication token in its environment, which `fenec backup` asks for its
-	 * image with. Never with `--sync off`, which the server refuses it with: a
-	 * replica, and a backup, are sent only what is on disk.
+	 * image with: only for a file whose backups are set up (`backups`), since the
+	 * token also turns the server's change feed on, `/_changes` answering every
+	 * write with the data token, from the network for a database served there.
+	 * Never with `--sync off`, which the server refuses it with: a replica, and a
+	 * backup, are sent only what is on disk.
 	 */
 	replication: boolean;
 };
 
-/** A window's server: this Mac, any port, the studio, and the file's own `sync`. */
-export function windowPlan(file: string, sync: Sync): Plan {
-	return { file, host: "127.0.0.1", port: 0, sync, studio: true, compact: true, mcp: false, metrics: false, replication: sync !== "off" };
+/** A window's server: this Mac, any port, the studio, and the file's own `sync`; the stream for backups if they are set up. */
+export function windowPlan(file: string, sync: Sync, backups = false): Plan {
+	return { file, host: "127.0.0.1", port: 0, sync, studio: true, compact: true, mcp: false, metrics: false, replication: backups && sync !== "off" };
 }
 
-/** A server started only to take a backup or compact a file that nothing serves: no studio, nothing else. */
-export function taskPlan(file: string): Plan {
+/**
+ * A server started only for a moment on a file nothing serves: to make it a
+ * database, to compact it, or (`backup`) to take its backup. No studio, nothing
+ * else, and the stream only for a backup.
+ */
+export function taskPlan(file: string, backup = false): Plan {
 	// It takes no write of its own, so `--sync off` would gain nothing and lose the backup.
-	return { file, host: "127.0.0.1", port: 0, sync: "250", studio: false, compact: true, mcp: false, metrics: false, replication: true };
+	return { file, host: "127.0.0.1", port: 0, sync: "250", studio: false, compact: true, mcp: false, metrics: false, replication: backup };
 }
 
-/** A served database's server. */
-export function servePlan(file: string, sync: Sync, s: ServeSettings): Plan {
-	return { file, host: hostOf(s.reach), port: s.port ?? 0, sync, studio: s.studio, compact: s.compact, mcp: s.mcp, metrics: s.metrics, replication: sync !== "off" };
+/** A served database's server; the stream for backups if they are set up. */
+export function servePlan(file: string, sync: Sync, s: ServeSettings, backups = false): Plan {
+	return { file, host: hostOf(s.reach), port: s.port ?? 0, sync, studio: s.studio, compact: s.compact, mcp: s.mcp, metrics: s.metrics, replication: backups && sync !== "off" };
 }
 
 /**

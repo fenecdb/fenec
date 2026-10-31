@@ -2,6 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<!-- The app's own page, with the bridge to the main process: its script and
+     style are the bundle's files alone (no inline script, no eval), and it
+     connects only to the bridge's socket on 127.0.0.1 (Electrobun's RPC).
+     Whatever a server or a file name puts in the page is text, and even
+     markup slipped in could neither run nor send anything elsewhere. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' views:; style-src 'self' views:; img-src 'self' views:; connect-src ws://127.0.0.1:*; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>fenec studio</title>
@@ -264,7 +270,7 @@
         </div>
         <span class="hint">Restore makes a new file and opens it; a name that is taken is refused, so no file is ever written over, a served one least of all.</span>
         <p class="err" id="bk-restore-error" role="alert"></p>
-        <div class="buttons"><button type="button" id="bk-restore-cancel">Cancel</button><button type="submit" class="primary">Restore</button></div>
+        <div class="buttons"><button type="button" id="bk-restore-cancel">Cancel</button><button type="submit" class="primary" id="bk-restore-go">Restore</button></div>
       </form>
     </section>
 

@@ -20,9 +20,10 @@ import { hostname, networkInterfaces } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { Session, Utils, type BrowserWindow } from "electrobun/main";
 import type { Check, ConnectionForm, DatabaseRow, Figures, NewDbForm, Notice, Overview, Result, ServedRow } from "../shared/rpc.ts";
-import { listImages, makeKey as makeKeyFile, restoreArchive, takeBackup, verifyArchive, type Archive } from "./backups.ts";
+import { keyPlacement, listImages, makeKey as makeKeyFile, restoreArchive, takeBackup, verifyArchive, type Archive } from "./backups.ts";
 import { kindOfFile } from "./dbfile.ts";
 import {
+	STARTED_BEFORE_BACKUPS,
 	SYNC_OFF_BACKUP,
 	alreadyHereMessage,
 	diedNotice,
@@ -40,10 +41,10 @@ import {
 } from "./messages.ts";
 import { between, readMetrics, type Sample } from "./metrics.ts";
 import { portAnswers } from "./process.ts";
-import { collectionStatement, databaseFileName } from "./names.ts";
+import { collectionStatement, databaseFileName, fileNameRefusal } from "./names.ts";
 import { originOf, probeRemote } from "./remote.ts";
 import { secrets } from "./secrets.ts";
-import { AlreadyOpen, PortTaken, StartFailed, randomToken, runCli, serverBinary, startFileServer, type FileServer } from "./server.ts";
+import { AlreadyOpen, PortTaken, StartFailed, cliBusy, randomToken, runCli, serverBinary, startFileServer, stopCli, type FileServer } from "./server.ts";
 import { commandShown, factsOf, hostOf, servePlan, snippets, taskPlan, windowPlan, type ServeSettings, type Sync } from "./serving.ts";
 import { store, type StoredConnection, type StoredDatabase } from "./store.ts";
 import { keychainName, sealToken, serveItemName, servedToken, tokenFor } from "./token.ts";
@@ -105,10 +106,11 @@ export const anythingOpen = () => windows.size > 0 || starting.size > 0;
 /**
  * Is there a server a quit must wait for: one running (a window's, a served
  * database's, one taking a backup), one being started, or one whose window
- * closed a moment ago and which is still writing its checkpoint?
+ * closed a moment ago and which is still writing its checkpoint? Or a run of
+ * the shell (a backup, a restore), which a quit stops and waits for.
  */
 export const serversBusy = () =>
-	startingFiles().length > 0 || closing.size > 0 || served.size > 0 || tasks.size > 0 || lanes.size > 0 || [...windows.values()].some((w) => w.server);
+	startingFiles().length > 0 || closing.size > 0 || served.size > 0 || tasks.size > 0 || lanes.size > 0 || cliBusy() || [...windows.values()].some((w) => w.server);
 
 /** The opens under way that start a server (a saved server has none to wait for). */
 const startingFiles = () => [...starting].filter(([key]) => key.startsWith("file:")).map(([, run]) => run);
@@ -223,7 +225,7 @@ async function startFile(path: string, key: string): Promise<Result> {
 	let server: FileServer;
 	try {
 		// A token for this start alone, in the server's environment and the window's preload.
-		server = await startFileServer(windowPlan(path, d.sync), randomToken());
+		server = await startFileServer(windowPlan(path, d.sync, Boolean(d.archive)), randomToken());
 	} catch (err) {
 		return startNotice(name, err, () => void openFile(path));
 	}
@@ -330,12 +332,15 @@ function closeWindow(entry: Open): Promise<void> {
 
 /**
  * Stops every server and waits for them: a quit does this before the process
- * goes. What is under way in a lane (a server being started) finishes first,
- * so it is one to stop as well; then the windows', the served ones, those
- * taking a backup, and those that are closing.
+ * goes. The shell's runs are stopped first (server.ts), so a backup in a lane
+ * ends rather than holding the quit up to its end, and a restore has taken its
+ * scratch folder away. What is under way in a lane (a server being started)
+ * finishes then, so it is one to stop as well; then the windows', the served
+ * ones, those taking a backup, and those that are closing.
  */
 export async function stopAll(): Promise<void> {
 	quitting = true;
+	await stopCli();
 	await Promise.allSettled([...startingFiles(), ...lanes.values()]);
 	await Promise.all([
 		...[...windows.values()].map(release),
@@ -353,7 +358,7 @@ function servedRow(d: StoredDatabase): ServedRow | null {
 	const s = served.get(d.path);
 	const settings = s?.settings ?? d.serve;
 	const sync = s?.sync ?? d.sync;
-	const plan = servePlan(d.path, sync, settings);
+	const plan = servePlan(d.path, sync, settings, Boolean(d.archive));
 	const running = s?.state === "running";
 	const url = running ? s.server.local : null;
 	return {
@@ -368,6 +373,12 @@ function servedRow(d: StoredDatabase): ServedRow | null {
 		command: commandShown(plan, Utils.paths.home),
 		snippets: url ? snippets(url, d.seen?.first || "orders") : null,
 	};
+}
+
+/** What the serve sheet shows for settings not started yet: the command the app would run, and its facts. */
+export function sheetPlan(path: string, settings: ServeSettings, sync: Sync): { command: string; facts: string } {
+	const backups = Boolean(store.database(path)?.archive);
+	return { command: commandShown(servePlan(path, sync, settings, backups), Utils.paths.home), facts: factsOf(settings, sync) };
 }
 
 /** Where another machine reaches a server on the network: this Mac's name, and its addresses. */
@@ -418,7 +429,7 @@ export function serveFile(raw: string, settings: ServeSettings, sync: Sync, { re
 		serveStarting.add(path);
 		changed();
 		try {
-			server = await startFileServer(servePlan(path, sync, settings), token);
+			server = await startFileServer(servePlan(path, sync, settings, Boolean(d.archive)), token);
 		} catch (err) {
 			serveStarting.delete(path);
 			store.updateDatabase(path, (x) => (x.lastRan = { at: Date.now(), port: settings.port, why: "could not start" }));
@@ -547,32 +558,35 @@ const askToServe = (path: string) => serveSheet(path);
 
 // ------------------------------------------------------------------ a server for a moment
 
+/** The server running on a file now, served or a window's, if any. */
+function runningServer(path: string): FileServer | undefined {
+	const s = served.get(path);
+	if (s?.state === "running") return s.server;
+	return windows.get(`file:${path}`)?.server;
+}
+
 /**
  * Runs `f` with a server on the file: the one serving it, the one behind its
  * window, or, if nothing runs on it, one started for `f` alone (no studio, this
  * Mac, any port) and stopped once `f` is done. `empty`: the file is one New
- * database has just made, which the server makes a database.
+ * database has just made, which the server makes a database. `backup`: a
+ * server started for it serves the stream a backup reads.
  */
-async function withServer<T extends Result>(raw: string, f: (server: FileServer) => Promise<T>, { empty = false } = {}): Promise<T | Result> {
+async function withServer<T extends Result>(raw: string, f: (server: FileServer) => Promise<T>, { empty = false, backup = false } = {}): Promise<T | Result> {
 	if (quitting) return goingAway();
 	const at = databaseAt(raw, empty);
 	if (!("path" in at)) return at;
 	const { path } = at;
-	const running = () => {
-		const s = served.get(path);
-		if (s?.state === "running") return s.server;
-		return windows.get(`file:${path}`)?.server;
-	};
-	const now = running();
+	const now = runningServer(path);
 	if (now) return f(now);
 	return inLane(path, async () => {
 		// The lane may have waited behind a start: look again.
-		const since = running();
+		const since = runningServer(path);
 		if (since) return f(since);
 		await closing.get(`file:${path}`);
 		let server: FileServer;
 		try {
-			server = await startFileServer(taskPlan(path), randomToken());
+			server = await startFileServer(taskPlan(path, backup), randomToken());
 		} catch (err) {
 			if (err instanceof AlreadyOpen) return { ok: false, message: `${basename(path)} is open in another program: close it there first.` };
 			return { ok: false, message: `A server could not be started on ${basename(path)}: ${(err as Error).message.split("\n").slice(-2).join(" ")}` };
@@ -743,10 +757,20 @@ async function finish(path: string, serve: boolean): Promise<Created> {
 export function setArchive(path: string, dir: string, keyFile: string | null): Result {
 	if (!isAbsolute(dir)) return { ok: false, message: "Choose the folder the backups go to." };
 	if (keyFile !== null && !existsSync(keyFile)) return { ok: false, message: `There is no key file at ${keyFile}.` };
-	if (keyFile !== null && dirname(keyFile) === dir) return { ok: false, message: "Keep the key apart from the backups: anyone with both can read them. Choose a key file in another folder." };
-	store.updateDatabase(path, (d) => (d.archive = { dir, keyFile }));
+	const placed = keyFile === null ? {} : keyPlacement(dir, keyFile, path);
+	if (placed.refuse) return { ok: false, message: placed.refuse };
+	store.updateDatabase(path, (d) => (d.archive = { ...(d.archive?.dir === dir ? d.archive : {}), dir, keyFile }));
 	changed();
-	return { ok: true, message: keyFile ? "Its backups go there, sealed with that key." : "Its backups go there." };
+	// A server running now was started without the stream a backup reads (app.ts, `backupsOn`).
+	const running = runningServer(path);
+	return {
+		ok: true,
+		message: [
+			keyFile ? "Its backups go there, sealed with that key." : "Its backups go there.",
+			...(running && !running.replicationToken ? ["Its server, running now, takes them from its next start: restart it, or close its window."] : []),
+			...(placed.warn ? [placed.warn] : []),
+		].join(" "),
+	};
 }
 
 const archiveOf = (path: string): Archive | null => {
@@ -758,16 +782,23 @@ const archiveOf = (path: string): Archive | null => {
 export async function backupNow(path: string): Promise<Result> {
 	const archive = archiveOf(path);
 	if (!archive) return { ok: false, message: "Choose where its backups go first." };
-	const done = await withServer(path, async (server): Promise<Result> => {
-		if (!server.replicationToken) return { ok: false, message: SYNC_OFF_BACKUP };
-		const r = await takeBackup(runCli, { local: server.local, replicationToken: server.replicationToken }, archive);
-		if (!r.ok) return { ok: false, message: `The backup failed: ${r.message}` };
-		store.updateDatabase(path, (d) => {
-			if (d.archive) Object.assign(d.archive, { lastAt: Date.now(), lastChange: r.change });
-		});
-		fact("backup", { path, change: r.change, dir: archive.dir });
-		return { ok: true, message: `Backed up ${basename(path)} at change ${r.change}, into ${archive.dir}.` };
-	});
+	const done = await withServer(
+		path,
+		async (server): Promise<Result> => {
+			if (!server.replicationToken) {
+				// Under --sync off a server takes no replication token; any other was started before the backups were set up.
+				return { ok: false, message: server.plan.sync === "off" ? SYNC_OFF_BACKUP : STARTED_BEFORE_BACKUPS };
+			}
+			const r = await takeBackup(runCli, { local: server.local, replicationToken: server.replicationToken }, archive);
+			if (!r.ok) return { ok: false, message: `The backup failed: ${r.message}` };
+			store.updateDatabase(path, (d) => {
+				if (d.archive) Object.assign(d.archive, { lastAt: Date.now(), lastChange: r.change });
+			});
+			fact("backup", { path, change: r.change, dir: archive.dir });
+			return { ok: true, message: `Backed up ${basename(path)} at change ${r.change}, into ${archive.dir}.` };
+		},
+		{ backup: true },
+	);
 	changed();
 	return done;
 }
@@ -784,9 +815,31 @@ export const imagesOf = (path: string) => {
 	return archive ? listImages(archive.dir) : [];
 };
 
-/** A backup restored as a new file in `folder`, never over one, and opened. */
+/**
+ * Restores under way, one at a time a name: by the new file's path as APFS and
+ * HFS+ compare names, whose case and Unicode form they ignore.
+ */
+const restoring = new Map<string, Promise<unknown>>();
+
+/**
+ * A backup restored as a new file in `folder`, never over one. Two restores to
+ * one name wait for each other, so the second finds the first's file and is
+ * refused, rather than the two racing (each writes in a folder of its own,
+ * backups.ts, so neither could break the other's file either way).
+ */
 async function restoreInto(archive: Archive, change: number | null, folder: string, fileName: string, sync: Sync): Promise<Created> {
-	const r = await restoreArchive(runCli, archive, change, join(folder, fileName));
+	if (quitting) return goingAway();
+	const dest = join(folder, fileName);
+	const key = dest.normalize("NFC").toLowerCase();
+	const before = restoring.get(key) ?? Promise.resolve();
+	const run = before.then(() => restoreArchive(runCli, archive, change, dest));
+	const tail = run.then(
+		() => {},
+		() => {},
+	);
+	restoring.set(key, tail);
+	void tail.then(() => restoring.get(key) === tail && restoring.delete(key));
+	const r = await run;
 	if (!r.ok) return { ok: false, message: r.message };
 	const path = realpathSync(r.path);
 	store.updateDatabase(path, (d) => (d.sync = sync));
@@ -813,7 +866,8 @@ export async function restoreBackup(path: string, change: number | null, folder:
 export async function makeKey(folder: string, name: string): Promise<Result & { path?: string }> {
 	const dir = writableFolder(folder);
 	if (!dir) return { ok: false, message: "That folder does not exist or cannot be written to. Choose another." };
-	if (!/^[^/\\:\u0000-\u001f.][^/\\:\u0000-\u001f]*$/.test(name.trim())) return { ok: false, message: "Name the key file." };
+	const refused = fileNameRefusal(name.trim());
+	if (refused) return { ok: false, message: refused };
 	const path = join(dir, name.trim());
 	if (existsSync(path)) return { ok: false, message: `${name.trim()} exists already: a key written over is a backup lost.` };
 	const r = await makeKeyFile(runCli, path);

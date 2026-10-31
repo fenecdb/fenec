@@ -52,24 +52,38 @@ on:
     paths:
       - 'integrations/studio-desktop/**'
       - 'studio/**'
-      # The server and the shell the app bundles are built from these, and
-      # the studio's pages are embedded in the server by fenec-http.
+      # The server and the shell the app bundles are built from these (each
+      # crate either binary depends on, and the lock that pins them), and the
+      # studio's pages are embedded in the server by fenec-http.
       - 'crates/fenec-server/**'
       - 'crates/fenec-cli/**'
       - 'crates/fenec-http/**'
       - 'crates/fenec-core/**'
+      - 'crates/fenec-ql/**'
+      - 'crates/fenec-abi/**'
+      - 'crates/fenec-import/**'
+      - 'crates/fenec-wire/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.github/workflows/desktop.yml'
   push:
     branches: [main]
     paths:
       - 'integrations/studio-desktop/**'
       - 'studio/**'
-      # The server and the shell the app bundles are built from these, and
-      # the studio's pages are embedded in the server by fenec-http.
+      # The server and the shell the app bundles are built from these (each
+      # crate either binary depends on, and the lock that pins them), and the
+      # studio's pages are embedded in the server by fenec-http.
       - 'crates/fenec-server/**'
       - 'crates/fenec-cli/**'
       - 'crates/fenec-http/**'
       - 'crates/fenec-core/**'
+      - 'crates/fenec-ql/**'
+      - 'crates/fenec-abi/**'
+      - 'crates/fenec-import/**'
+      - 'crates/fenec-wire/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.github/workflows/desktop.yml'
   workflow_dispatch:
     inputs:

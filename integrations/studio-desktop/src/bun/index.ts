@@ -13,8 +13,23 @@
 
 import Electrobun, { Utils } from "electrobun/main";
 import { anythingOpen, isQuitting, openFile, serversBusy, stopAll } from "./app.ts";
+import { sweepSecrets } from "./clipboard.ts";
+import { claimInstance, instancePath } from "./instance.ts";
 import { startMenu } from "./menu.ts";
 import { closeLauncher, launcherOpen, showLauncher } from "./pages.ts";
+
+// One instance at a time (instance.ts): a second asks the first to show its
+// main window and quits before it opens anything or reads its lists.
+const alone = await claimInstance(instancePath(__KEYCHAIN_SERVICE__), () => {
+	if (__TESTABLE__) void import("./testhooks.ts").then((h) => h.report("instance-asked"));
+	void showLauncher();
+});
+if (!alone) {
+	if (__TESTABLE__) (await import("./testhooks.ts")).report("second-instance");
+	Utils.quit();
+	// Nothing after this runs in a second instance.
+	await new Promise(() => {});
+}
 
 const started = Date.now();
 /** The launcher was shown because nothing else was opening, not because someone asked for it. */
@@ -50,8 +65,10 @@ Electrobun.events.on("reopen", () => {
 });
 
 // Stop every server before the process goes: the quit is held, the servers
-// are asked to checkpoint, then the quit is asked for again.
+// are asked to checkpoint, then the quit is asked for again. A token copied
+// less than a minute ago goes from the clipboard first (clipboard.ts).
 Electrobun.events.on("before-quit", (event: any) => {
+	sweepSecrets();
 	if (isQuitting() || !serversBusy()) return;
 	event.response = { allow: false };
 	void stopAll().finally(() => Utils.quit());
@@ -59,6 +76,7 @@ Electrobun.events.on("before-quit", (event: any) => {
 
 for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
 	process.on(sig, () => {
+		sweepSecrets();
 		void stopAll().finally(() => process.exit(0));
 	});
 }

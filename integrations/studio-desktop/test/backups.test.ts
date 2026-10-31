@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { imagesIn, listImages, makeKey, restoreArchive, takeBackup, verifyArchive } from "../src/bun/backups.ts";
+import { imagesIn, keyPlacement, listImages, makeKey, restoreArchive, takeBackup, verifyArchive } from "../src/bun/backups.ts";
 import { randomToken, startServer, type FileServer } from "../src/bun/process.ts";
 import { taskPlan, windowPlan } from "../src/bun/serving.ts";
 import { missing, nodeRun, nodeSpawn, SERVER } from "./node-spawn.ts";
@@ -24,7 +24,8 @@ after(async () => {
 async function serve(name: string, rows: number): Promise<{ file: string; server: FileServer }> {
 	const file = join(work, `${name}.fenec`);
 	writeFileSync(file, "");
-	const server = await startServer(nodeSpawn, SERVER, windowPlan(file, "250"), randomToken());
+	// Its backups set up: a window's server serves the stream only then.
+	const server = await startServer(nodeSpawn, SERVER, windowPlan(file, "250", true), randomToken());
 	running.push(server);
 	const q = async (query: string) => {
 		const r = await fetch(`${server.local}/query`, { method: "POST", headers: { authorization: `Bearer ${server.token}` }, body: JSON.stringify({ query }) });
@@ -91,6 +92,63 @@ test("a restore never writes over a file: not one that is there, not one a serve
 	assert.equal((await restoreArchive(nodeRun, archive, null, mine)).ok, false);
 	assert.equal(readFileSync(mine, "utf8"), "mine");
 	noScratch(work);
+});
+
+test("two restores to one name at once: one makes the file, the other is refused, and neither breaks it", { skip }, async () => {
+	const { server } = await serve("twice", 5);
+	const archive = { dir: join(work, "backups", "twice"), keyFile: null };
+	assert.ok((await takeBackup(nodeRun, { local: server.local, replicationToken: server.replicationToken! }, archive)).ok);
+	const dest = join(work, "twice-restored.fenec");
+	// The shell writes beside its output (`<out>.restoring`, `<out>.compacting`, its lock): two restores
+	// given one name's scratch broke each other; each now writes in a folder of its own.
+	const both = await Promise.all([restoreArchive(nodeRun, archive, null, dest), restoreArchive(nodeRun, archive, null, dest), restoreArchive(nodeRun, archive, null, dest)]);
+	assert.equal(both.filter((r) => r.ok).length, 1, JSON.stringify(both));
+	for (const r of both.filter((r) => !r.ok)) assert.match(r.ok ? "" : r.message, /appeared in that folder meanwhile|exists in that folder already/);
+	assert.equal(await count(dest), 5, "the one file made is whole");
+	noScratch(work);
+});
+
+test("a key is kept apart from the backups: not under the folder picked, not on the backups' own disk", () => {
+	// Real paths (the temporary folder is under a link on macOS), as the app's are.
+	const at = realpathSync(mkdtempSync(join(work, "keys-")));
+	const picked = join(at, "Backups");
+	const dir = join(picked, "orders");
+	const db = join(at, "data", "orders.fenec");
+	mkdirSync(dir, { recursive: true });
+	mkdirSync(join(at, "data"));
+	mkdirSync(join(at, "elsewhere"));
+	const key = (p: string, mode = 0o600) => {
+		writeFileSync(p, "k");
+		chmodSync(p, mode);
+		return p;
+	};
+	const same = () => 1;
+	// In the backups' folder, or anywhere under the folder that was picked: copied or synced with them.
+	assert.match(keyPlacement(dir, key(join(dir, "in.key")), db, same).refuse ?? "", /inside/);
+	assert.match(keyPlacement(dir, key(join(picked, "beside.key")), db, same).refuse ?? "", /inside/);
+	mkdirSync(join(picked, "keys"));
+	assert.match(keyPlacement(dir, key(join(picked, "keys", "deeper.key")), db, same).refuse ?? "", /inside/);
+	// Through a link, it is where it really is.
+	symlinkSync(picked, join(at, "link-to-backups"));
+	assert.match(keyPlacement(dir, join(at, "link-to-backups", "beside.key"), db, same).refuse ?? "", /inside/);
+	assert.match(keyPlacement(join(at, "link-to-backups", "orders"), join(picked, "beside.key"), db, same).refuse ?? "", /inside/);
+	// A folder not named after the database is the one picked: the folder above it is not refused.
+	assert.deepEqual(keyPlacement(join(picked, "nightly"), key(join(at, "sibling.key")), db, same), {});
+	// A name that only begins like the folder's is not inside it.
+	mkdirSync(join(at, "Backups-keys"));
+	assert.deepEqual(keyPlacement(dir, key(join(at, "Backups-keys", "k.key")), db, same), {});
+	// Elsewhere on this disk: kept.
+	const apart = key(join(at, "elsewhere", "orders.key"));
+	assert.deepEqual(keyPlacement(dir, apart, db, same), {});
+	// Backups on a drive of their own: a key on that drive goes with them; beside the database it does not.
+	const disks = (backups: number, database: number, k: number) => (p: string) => (p === dir ? backups : p === db ? database : p === apart ? k : assert.fail(`asked the disk of ${p}`));
+	assert.match(keyPlacement(dir, apart, db, disks(2, 1, 2)).refuse ?? "", /disk/);
+	assert.deepEqual(keyPlacement(dir, apart, db, disks(2, 1, 1)), {});
+	// Others may read it: said, not refused.
+	const open = key(join(at, "elsewhere", "open.key"), 0o644);
+	const r = keyPlacement(dir, open, db, same);
+	assert.equal(r.refuse, undefined);
+	assert.match(r.warn ?? "", /644/);
 });
 
 test("sealed with a key file: the key is made once, the backup reads only with it", { skip }, async () => {

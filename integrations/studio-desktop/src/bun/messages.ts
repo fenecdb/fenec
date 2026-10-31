@@ -167,6 +167,10 @@ export function servedDiedNotice(name: string, exit: number | null, serverSaid: 
 export const SYNC_OFF_BACKUP =
 	"Its writes are synced when the system decides (When the system writes), and a backup is taken from what is on disk, which such a server does not promise. Choose Every 250 ms or Every write in its server's settings, or stop it: a database nothing serves is backed up by a server started for that alone.";
 
+/** What a backup through a server started before its backups were set up says: it was given no stream (serving.ts). */
+export const STARTED_BEFORE_BACKUPS =
+	"Its server was started before its backups were set up, so it serves no stream to take them from. Restart it, or close its window, and back it up again.";
+
 export function gone(what: string): Notice {
 	return { title: "That is gone", message: `${what} does not exist any more.` };
 }

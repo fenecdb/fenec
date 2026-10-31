@@ -5,11 +5,12 @@ import { commandShown, DEFAULT_SETTINGS, factsOf, parsePort, serverArgs, servePl
 const FILE = "/Users/me/Data/shop.fenec";
 
 test("a window's server: this Mac, any port, the studio, and its stdin watched", () => {
-	assert.deepEqual(serverArgs(windowPlan(FILE, "250")), ["--file", FILE, "--http", "127.0.0.1:0", "--sync", "250", "--studio", "--replication-buffer", "1", "--exit-on-stdin-close"]);
+	assert.deepEqual(serverArgs(windowPlan(FILE, "250")), ["--file", FILE, "--http", "127.0.0.1:0", "--sync", "250", "--studio", "--exit-on-stdin-close"]);
+	assert.deepEqual(serverArgs(windowPlan(FILE, "250", true)), ["--file", FILE, "--http", "127.0.0.1:0", "--sync", "250", "--studio", "--replication-buffer", "1", "--exit-on-stdin-close"]);
 });
 
 test("a served database's arguments are what the sheet chose, and every server watches its stdin last", () => {
-	const lan = serverArgs(servePlan(FILE, "always", { port: 8080, reach: "lan", studio: false, compact: false, mcp: true, metrics: true }));
+	const lan = serverArgs(servePlan(FILE, "always", { port: 8080, reach: "lan", studio: false, compact: false, mcp: true, metrics: true }, true));
 	assert.deepEqual(lan, ["--file", FILE, "--http", "0.0.0.0:8080", "--sync", "always", "--auto-compact", "off", "--mcp", "--metrics", "127.0.0.1:0", "--replication-buffer", "1", "--exit-on-stdin-close"]);
 	const mac = serverArgs(servePlan(FILE, "250", DEFAULT_SETTINGS));
 	assert.deepEqual(mac.slice(0, 7), ["--file", FILE, "--http", "127.0.0.1:0", "--sync", "250", "--studio"]);
@@ -18,19 +19,35 @@ test("a served database's arguments are what the sheet chose, and every server w
 });
 
 test("no secret is ever an argument; under --sync off there is no replication either", () => {
-	for (const plan of [windowPlan(FILE, "250"), servePlan(FILE, "always", DEFAULT_SETTINGS), taskPlan(FILE), windowPlan(FILE, "off")]) {
+	for (const plan of [windowPlan(FILE, "250", true), servePlan(FILE, "always", DEFAULT_SETTINGS, true), taskPlan(FILE, true), windowPlan(FILE, "off", true)]) {
 		const args = serverArgs(plan).join(" ");
 		assert.ok(!/token|secret|key/i.test(args), args);
 	}
-	assert.equal(windowPlan(FILE, "off").replication, false);
-	assert.ok(!serverArgs(servePlan(FILE, "off", DEFAULT_SETTINGS)).includes("--replication-buffer"));
+	assert.equal(windowPlan(FILE, "off", true).replication, false);
+	assert.ok(!serverArgs(servePlan(FILE, "off", DEFAULT_SETTINGS, true)).includes("--replication-buffer"));
 	// A server for a backup alone syncs: it takes no write of its own, and a backup needs one that serves the stream.
-	assert.equal(taskPlan(FILE).replication, true);
-	assert.ok(!serverArgs(taskPlan(FILE)).includes("--studio"));
+	assert.equal(taskPlan(FILE, true).replication, true);
+	assert.ok(!serverArgs(taskPlan(FILE, true)).includes("--studio"));
+});
+
+test("the stream, and the change feed it turns on, only where a backup reads it", () => {
+	// A replication token also answers /_changes to the data token: a database served
+	// to the network whose backups are not set up has no reason to answer it.
+	for (const sync of ["always", "250"] as const) {
+		assert.equal(windowPlan(FILE, sync).replication, false);
+		assert.equal(servePlan(FILE, sync, { ...DEFAULT_SETTINGS, reach: "lan" }).replication, false);
+		assert.equal(windowPlan(FILE, sync, true).replication, true);
+		assert.equal(servePlan(FILE, sync, { ...DEFAULT_SETTINGS, reach: "lan" }, true).replication, true);
+	}
+	// A server started for a moment: to compact, or make, a file, none; to back it up, the stream.
+	assert.equal(taskPlan(FILE).replication, false);
+	assert.ok(!serverArgs(taskPlan(FILE)).includes("--replication-buffer"));
+	assert.equal(taskPlan(FILE, true).replication, true);
+	assert.doesNotMatch(commandShown(servePlan(FILE, "250", DEFAULT_SETTINGS), "/Users/me"), /REPLICATION/);
 });
 
 test("the command the sheet shows has its secrets as dots and the home folder as ~", () => {
-	const shown = commandShown(servePlan(FILE, "250", { ...DEFAULT_SETTINGS, port: 8080 }), "/Users/me");
+	const shown = commandShown(servePlan(FILE, "250", { ...DEFAULT_SETTINGS, port: 8080 }, true), "/Users/me");
 	assert.match(shown, /^FENEC_HTTP_TOKEN=•••• FENEC_REPLICATION_TOKEN=•••• fenec-server --file ~\/Data\/shop\.fenec \\\n {2}--http 127\.0\.0\.1:8080 \\\n {2}--sync 250/);
 	assert.ok(shown.endsWith("--exit-on-stdin-close"));
 	assert.match(commandShown(servePlan("/Users/me/My Data/it's.fenec", "off", DEFAULT_SETTINGS), "/Users/me"), /^FENEC_HTTP_TOKEN=•••• fenec-server --file '~\/My Data\/it'\\''s\.fenec'/);

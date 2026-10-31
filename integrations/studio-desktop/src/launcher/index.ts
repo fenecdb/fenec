@@ -728,10 +728,18 @@ $("bk-to-choose").addEventListener("click", async () => {
 });
 $<HTMLFormElement>("bk-restore").addEventListener("submit", async (e) => {
 	e.preventDefault();
-	if (!backupFor) return;
+	const go = $<HTMLButtonElement>("bk-restore-go");
+	// One restore at a time from here: a second click would start a second into the same name.
+	if (!backupFor || go.disabled) return;
 	const v = $<HTMLSelectElement>("bk-image").value;
 	say("Restoring…");
-	const r = await ask.restore({ path: backupFor, change: v === "" ? null : Number(v), folder: $<HTMLInputElement>("bk-to-folder").value, name: $<HTMLInputElement>("bk-to-name").value });
+	go.disabled = true;
+	let r: Awaited<ReturnType<typeof ask.restore>>;
+	try {
+		r = await ask.restore({ path: backupFor, change: v === "" ? null : Number(v), folder: $<HTMLInputElement>("bk-to-folder").value, name: $<HTMLInputElement>("bk-to-name").value });
+	} finally {
+		go.disabled = false;
+	}
 	if (!r.ok) {
 		say("");
 		if (!r.shown) $("bk-restore-error").textContent = r.message ?? "";

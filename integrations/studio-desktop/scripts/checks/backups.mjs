@@ -5,7 +5,7 @@
 // sealed with a key file the app makes with `fenec key`; a new database
 // started from a backup; and the refusal for a server that syncs nothing.
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { assertClean, cmd, data, forgetServeItems, lines, procs, quit, R, startApp, step, waitFor, waitStudio, log } from './lib.mjs';
 
 assertClean('before');
@@ -65,6 +65,14 @@ assert.equal(restored.path, `${OUT}/bk-copy.fenec`);
 const copy = await waitStudio(`file:${OUT}/bk-copy.fenec`, n);
 assert.match(copy.detail.side, /orders 30/, 'what the database held');
 
+step('two restores into one name at once: one file, made whole; the other refused');
+n = lines().length;
+const twice = await ask({ cmd: 'restore-twice', path: FILE, folder: OUT, name: 'bk-twice' }, 'restore-twice-result', 120000);
+assert.equal(twice.results.filter((r) => r.ok).length, 1, JSON.stringify(twice.results));
+assert.match(twice.results.find((r) => !r.ok).message, /exists in that folder already/, 'the second waited for the first, and found its file');
+await waitStudio(`file:${OUT}/bk-twice.fenec`, n);
+noScratch(OUT);
+
 step('never over a file: the same name again, and the open database\'s own name');
 const before = readFileSync(`${OUT}/bk-copy.fenec`);
 const again = await ask({ cmd: 'restore', path: FILE, folder: OUT, name: 'bk-copy' }, 'restore-result');
@@ -85,6 +93,11 @@ assert.equal(statSync(`${KEYS}/bk.key`).mode & 0o777, 0o600);
 assert.equal((await ask({ cmd: 'make-key', folder: KEYS, name: 'bk.key' }, 'make-key-result')).ok, false, 'a key is never written over');
 const SEALED = `${R}/bk-backups/bk-sealed`;
 assert.equal((await ask({ cmd: 'set-archive', path: FILE, dir: SEALED, keyFile: `${SEALED}/k.key` }, 'set-archive-result')).ok, false, 'a key file that is not there');
+// A key anywhere under the folder that was picked goes wherever the backups are copied: refused.
+copyFileSync(`${KEYS}/bk.key`, `${R}/bk-backups/near.key`);
+const near = await ask({ cmd: 'set-archive', path: FILE, dir: `${R}/bk-backups/bk`, keyFile: `${R}/bk-backups/near.key` }, 'set-archive-result');
+assert.equal(near.ok, false, 'a key beside the backups\' folder, in the folder that was picked');
+assert.match(near.message, /inside/);
 assert.equal((await ask({ cmd: 'set-archive', path: FILE, dir: SEALED, keyFile: `${KEYS}/bk.key` }, 'set-archive-result')).ok, true);
 assert.equal((await ask({ cmd: 'backup', path: FILE }, 'backup-result')).ok, true);
 const image = readdirSync(SEALED).find((f) => f.startsWith('image-'));

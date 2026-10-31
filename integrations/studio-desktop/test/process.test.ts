@@ -5,7 +5,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { AlreadyOpen, PortTaken, randomToken, startServer, type FileServer } from "../src/bun/process.ts";
+import { AlreadyOpen, PortTaken, randomToken, startServer, type Child, type FileServer, type Spawn } from "../src/bun/process.ts";
 import { DEFAULT_SETTINGS, servePlan, taskPlan, windowPlan, type Plan } from "../src/bun/serving.ts";
 import { missing, nodeSpawn, SERVER } from "./node-spawn.ts";
 
@@ -42,10 +42,12 @@ const status = async (url: string, token?: string) => (await fetch(url, { header
 test("a window's server: loopback, any port, the token in its environment and in no argument, and a stop that is its shutdown", { skip }, async () => {
 	const file = await database("window");
 	const token = randomToken();
-	const s = await start(windowPlan(file, "250"), token);
+	const s = await start(windowPlan(file, "250", true), token);
 	assert.match(s.origin, /^http:\/\/127\.0\.0\.1:\d+$/);
 	assert.equal(s.local, s.origin);
-	assert.ok(s.replicationToken, "a replication token for backups");
+	assert.ok(s.replicationToken, "a replication token for backups, which are set up");
+	// Which turns the change feed on, to the data token: why only a file with backups gets one.
+	assert.equal(await status(`${s.local}/_changes`, token), 200);
 	const argv = argvOf(s.pid);
 	assert.ok(argv.includes("--exit-on-stdin-close") && argv.includes("--studio"), argv);
 	assert.ok(!argv.includes(token) && !argv.includes(s.replicationToken!), "no token on the command line");
@@ -56,12 +58,15 @@ test("a window's server: loopback, any port, the token in its environment and in
 	assert.equal(await s.stop(), 0, "SIGTERM: the server's own shutdown, exit 0");
 	// The lock went with it: another server takes the file at once.
 	const again = await start(windowPlan(file, "250"), randomToken());
+	assert.equal(again.replicationToken, null, "no backups set up: no stream, and no /_changes");
+	// "this server keeps no change feed".
+	assert.equal(await status(`${again.local}/_changes`, again.token), 409);
 	assert.equal(await again.stop(), 0);
 });
 
 test("under --sync off a server is given no replication token, which it would refuse", { skip }, async () => {
 	const file = await database("off");
-	const s = await start(windowPlan(file, "off"), randomToken());
+	const s = await start(windowPlan(file, "off", true), randomToken());
 	assert.equal(s.replicationToken, null);
 	assert.ok(argvOf(s.pid).includes("--sync off"));
 	await s.stop();
@@ -117,4 +122,49 @@ test("what it writes is kept in a bounded ring, a line an entry, and told to who
 	await s.stop();
 	stop();
 	assert.ok(seen.length > 0 || s.lines().length > 0);
+});
+
+/** A stand-in server that writes `lines` on stderr and runs until it is stopped. */
+const writes =
+	(lines: string[]): Spawn =>
+	(): Child => {
+		let code: number | null = null;
+		let end!: (c: number | null) => void;
+		const exited = new Promise<number | null>((r) => (end = r));
+		const stderr = (async function* () {
+			for (const l of lines) yield new TextEncoder().encode(`${l}\n`);
+			await exited;
+		})();
+		const stdout = (async function* () {
+			await exited;
+		})();
+		return {
+			pid: 0,
+			stdin: null,
+			stdout,
+			stderr,
+			exited,
+			get exitCode() {
+				return code;
+			},
+			kill: () => end((code = 0)),
+		};
+	};
+
+test("where it listens and its metrics are read before it answers anything: a line after is the data's", async () => {
+	const plan = { ...servePlan("/nowhere.fenec", "250", { ...DEFAULT_SETTINGS, metrics: true }), port: 0 };
+	// A statement logged after the start can hold a newline and so a line of its own.
+	const later = ["metrics on: http://127.0.0.1:6666/_metrics  [token]", "fenec-http 0.0.0 listening on: http://127.0.0.1:7777  [x]"];
+	const s = await startServer(writes(["fenec-http 0.0.0 listening on: http://127.0.0.1:5555  [token required]", ...later]), "fenec-server", plan, randomToken());
+	assert.equal(s.port, 5555);
+	assert.equal(s.metrics, null, "none was said before it listened, and none is taken after");
+	await s.stop();
+	const t = await startServer(writes(["metrics on: http://127.0.0.1:9101/_metrics  [token]", "fenec-http 0.0.0 listening on: http://127.0.0.1:5556  [x]", ...later]), "fenec-server", plan, randomToken());
+	assert.equal(t.metrics, "http://127.0.0.1:9101");
+	assert.equal(t.port, 5556);
+	await t.stop();
+	// Not asked for, not read: a metrics line from a server started without them is nobody's.
+	const u = await startServer(writes(["metrics on: http://127.0.0.1:9102/_metrics  [token]", "fenec-http 0.0.0 listening on: http://127.0.0.1:5557  [x]"]), "fenec-server", { ...plan, metrics: false }, randomToken());
+	assert.equal(u.metrics, null);
+	await u.stop();
 });
