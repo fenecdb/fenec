@@ -104,6 +104,12 @@ routes.</p>
     <p>Start a server and send it FenecQL from curl or any language's standard library: raw statements, batches and writes that are safe to retry. The <a href="http-reference.html">reference</a> has every route, status and stream, and <a href="http-access.html">security and scoped access</a> the tokens and policies.</p></li>
   <li><a href="sync.html">Sync</a>
     <p>A local replica that reads without the network and writes optimistically.</p></li>
+  <li><a href="auth.html">Auth with your identity provider</a>
+    <p>Tokens from Clerk, Auth0, Supabase Auth, Cognito, Firebase or Cloudflare Access held to a policy down to the rows and fields: what the server checks and what it does not, the keys kept fresh, the issuer and audience that hold a token to your application, claims by name in a rule, and a run.</p></li>
+  <li><a href="files.html">Files with S3 and R2</a>
+    <p>The bytes in an object store, the facts in a collection, presigned links made only after the rules say yes, and the object deleted with its row.</p></li>
+  <li><a href="functions.html">Functions and webhooks</a>
+    <p>Reacting to a write: a Worker as an endpoint, a job queue, a consumer of the change stream that calls a webhook, and when each fits.</p></li>
   <li><a href="redis.html">Instead of Redis</a>
     <p>Counters, rate limits, locks, sessions, leaderboards and more, each a recipe a test runs.</p></li>
   <li><a href="integrations.html">Integrations</a>

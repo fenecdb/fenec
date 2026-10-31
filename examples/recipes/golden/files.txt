@@ -1,0 +1,59 @@
+fenec-server and the bucket recipes are up
+
+-- alice adds a file
+POST /files             201 {"id":1,"url":"<store>/recipes/pending/1?…"}
+the row the server holds: [{"id":1,"owner":"alice","name":"hello.txt","type":"text/plain","size":17,"state":"pending"}]
+
+-- she sends the bytes to the bucket herself, with the URL
+PUT <presigned>         200
+GET /files/1 before done 409 {"error":"not uploaded yet"}
+POST /files/1/done    200 {"id":1,"state":"ready"}
+POST /files/1/done again 200 {"id":1,"state":"ready"}
+the upload copied to files/1, pending/1 gone
+
+-- she downloads it; bob is told there is no such file
+GET /files/1 (alice)   200 {"url":"<store>/recipes/files/1?…","name":"hello.txt","size":17}
+GET <presigned>         200 "hello from alice\n"
+GET /files/1 (bob)     404 {"error":"no such file"}
+DELETE /files/1 (bob)  404 {"error":"no such file"}
+GET /files (bob)        200 []
+alice's total, for a quota   200 [{"sum(size)":17}]
+
+-- a name that is not ASCII, and what a download is saved as
+Content-Disposition: attachment; filename="r_sum_ _final_.pdf"; filename*=UTF-8''r%C3%A9sum%C3%A9%20%22final%22.pdf
+Content-Type: application/pdf
+
+-- a token of the provider that says it is the backend
+provider token, sub files-backend: read files    200 []
+provider token, sub files-backend: mark ready    200 {"affected":0}
+
+-- what the rules and the bucket refuse
+POST /files, 20 MiB     403 {"error":"not allowed"}
+alice's own token, state ready  403 {"error":"the document is outside what this token may write to `files`"}
+PUT 20 bytes to a URL signed for 5   403 SignatureDoesNotMatch
+POST /files/3/done            409 {"error":"the bytes are not in the bucket yet"}
+POST /files/3/done, 20 bytes there   422 {"error":"the object is 20 bytes, not the 5 announced"}
+HEAD pending/3: gone with its row
+blobs: row 3 deleted, so its objects too
+
+-- alice deletes the file: the objects go with the row
+DELETE /files/1 (alice) 204
+HEAD files/1: gone
+blobs: row 1 deleted, so its objects too
+
+-- an upload URL that outlives its row
+DELETE /files/4 (alice) before the upload
+blobs: row 4 deleted, so its objects too
+PUT <presigned>, after the delete   200
+HEAD pending/4: there, with no row
+reconcile deleted pending/4
+
+-- a pending upload nobody finished is swept
+del files where state = "pending" and created < now() - 3600000: {"affected":1}
+blobs: row 5 deleted, so its objects too
+
+-- the follower is stopped, a file is deleted, and the stream moves past what the server keeps
+files/6 is still in the bucket, its row deleted
+files/6: gone
+blobs: behind what the server keeps; reconciling, then on from N
+blobs: reconciled, 1 deleted: files/6

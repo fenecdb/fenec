@@ -1,0 +1,29 @@
+# Rules that name a claim's value. What pins a token to the application the
+# database is for is not here: fenec-server is started with the provider's
+# issuer and audience (--jwt-issuer, --jwt-audience, --jwt-client), and
+# refuses a token made for another application, on every route, before a rule
+# is read (docs/http-access, "Whom a token is for"). A rule names what only a claim
+# can say: a list a token holds, a flag a provider sets, a role under a name
+# of its own.
+#
+# A database has one provider, and so one of the sections below; they are
+# together here to be tried against a server for each.
+
+# ---- Auth0 (--jwt-issuer, --jwt-audience of the API)
+# `permissions` is a list claim: RBAC's "Add Permissions in the Access Token".
+notes         read                        where 'read:notes' in $jwt.permissions
+# A custom claim of an access token is a URL, and a name that is not a word
+# goes in double quotes.
+notes         read,write                  where owner = $jwt.sub and $jwt."https://example.test/role" = 'member'
+# Staff are rows. The inner get reads the token's own row of `staff` alone.
+staff         read                        where user = $jwt.sub
+notes         read                        where $jwt.sub in (get staff select user)
+
+# ---- Amazon Cognito (--jwt-issuer, --jwt-client; --jwt-role-claim cognito:groups)
+# With the flag, a rule's `for` reads the groups the token lists.
+notes         read                                                       for editors
+
+# ---- Supabase Auth (--jwt-issuer, --jwt-audience authenticated)
+# An anonymous sign-in has role `authenticated` and is a user too; a rule that
+# means a person says so.
+notes         read,write                  where owner = $jwt.sub and $jwt.is_anonymous = false

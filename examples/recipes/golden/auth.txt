@@ -1,0 +1,100 @@
+== 1. HS256: a secret, and --mint-token
+alice writes a note                        {"affected":1} [200]
+alice writes a note as bob                 {"error":"the document is outside what this token may write to `notes`"} [403]
+bob writes a note                          {"affected":1} [200]
+alice reads notes                          [{"owner":"alice","title":"buy oat milk"}] [200]
+bob reads notes                            [{"owner":"bob","title":"call the dentist"}] [200]
+the admin reads notes                      [{"owner":"alice","title":"buy oat milk"},{"owner":"bob","title":"call the dentist"}] [200]
+the admin deletes a note                   {"affected":0} [200]
+everyone reads profiles                    [{"id":1,"owner":null,"name":"Alice","email":null,"phone":null},{"id":2,"owner":"bob","name":"Bob","email":"bob@example.test","phone":"222"}] [200]
+bob renames alice                          {"affected":0} [200]
+bob changes his email                      {"error":"this token may not change `email` in `profiles`"} [403]
+bob changes his phone                      {"affected":1} [200]
+alice adds an audit line                   {"affected":1} [200]
+alice deletes it                           {"error":"`audit` is append-only: a scoped token inserts into it, and neither updates nor deletes its rows"} [403]
+a token that has lapsed                    {"error":"the token has expired"} [401]
+no token                                   {"error":"invalid or missing token"} [401]
+-- /_whoami for alice
+{"node":"single","tenant":null,"read_only":false,"kind":"scoped","sub":"alice","roles":[],"tenants":null,"unbound":false,"append_only":["audit"],"rules":[{"collection":"notes","grants":["read","insert","update","delete"],"fields":null,"read_fields":null,"rows":"owner = $jwt.sub"},{"collection":"profiles","grants":["read"],"fields":null,"read_fields":["name"],"rows":null},{"collection":"profiles","grants":["read","update"],"fields":["name","phone"],"read_fields":null,"rows":"owner = $jwt.sub"},{"collection":"audit","grants":["read","insert"],"fields":null,"read_fields":null,"rows":"actor = $jwt.sub"}]}
+
+== 2. RS256: the keys of a JWKS file, as an identity provider publishes them
+clerk: sub user_2xYzAbc                    [{"owner":"user_2xYzAbc","title":"clerk note"}] [200]
+auth0: sub auth0|0123456789                [{"owner":"auth0|0123456789","title":"auth0 note"}] [200]
+supabase: sub 7c9e6679-7425-40de-944b-e07fc1f90ae7 [{"owner":"7c9e6679-7425-40de-944b-e07fc1f90ae7","title":"supabase note"}] [200]
+cognito: sub a1b2c3d4-5678-90ab-cdef-111111111111 [{"owner":"a1b2c3d4-5678-90ab-cdef-111111111111","title":"cognito note"}] [200]
+access: sub 3d9a0f0e-5c1b-4a3e-8f61-2b7d9c4e1a55 [{"owner":"3d9a0f0e-5c1b-4a3e-8f61-2b7d9c4e1a55","title":"access note"}] [200]
+-- the provider rotates: a new key signs, and the server's file has not heard
+a token of the new key                     {"error":"no key has the token's kid"} [401]
+-- the refresh job fetches the provider's file; no restart
+the same token                             [{"title":"clerk note"}] [200]
+-- a key of your own service goes into the file beside the provider's
+["idp-1","idp-2","svc-1"]
+the server's view of the service's token   {"kind":"scoped","sub":"files-backend"}
+-- a key whose kid is the provider's, and a file of own keys with none in it, are refused
+refresh-jwks: a kid is in both <provider>/.well-known/jwks.json and dup.json; jwks.json left as it was
+refresh-jwks: none.json holds no key; jwks.json left as it was
+-- the job asks for a page that is not there one night
+curl: (22) The requested URL returned error: 404
+(the job failed, rc 22)
+the same token                             [{"title":"clerk note"}] [200]
+-- and a file that is no JWKS, written over the keys by hand
+the same token                             [{"title":"clerk note"}] [200]
+jwks.json: a JWKS file is {"keys": [...]}; the keys read before stay
+-- a provider that signs with EC keys (Supabase's ES256): its P-256 key comes with the next fetch
+an ES256 token                             [{"title":"clerk note"}] [200]
+an ES384 token                             {"error":"only HS256, RS256 and ES256 tokens are accepted"} [401]
+
+== 3. a token made for another application, and rules that name a claim's value
+-- the flags of each provider: the keys sign other applications' tokens too (policy.txt)
+auth0, a token for the API                 [{"title":"ada note"}] [200]
+auth0, an ID token (aud is the client)     {"error":"the token names no audience (aud) this server takes"} [401]
+auth0, a token for another API             {"error":"the token names no audience (aud) this server takes"} [401]
+auth0, another tenant                      {"error":"the token names no issuer (iss) this server takes"} [401]
+clerk, this origin                         [{"title":"ada note"}] [200]
+clerk, another origin                      {"error":"the token names no client (azp, or client_id) this server takes"} [401]
+clerk, a request with no origin            {"error":"the token names no client (azp, or client_id) this server takes"} [401]
+access, this application                   [{"title":"ada note"}] [200]
+access, another application of the team    {"error":"the token names no audience (aud) this server takes"} [401]
+firebase, this project                     [{"title":"ada note"}] [200]
+firebase, another project                  {"error":"the token names no issuer (iss) this server takes"} [401]
+cognito, an access token of this client    [{"title":"ada note"}] [200]
+cognito, an ID token                       {"error":"the token names no client (azp, or client_id) this server takes"} [401]
+cognito, another app client                {"error":"the token names no client (azp, or client_id) this server takes"} [401]
+supabase, this project                     [{"title":"ada note"}] [200]
+supabase, another project                  {"error":"the token names no issuer (iss) this server takes"} [401]
+supabase, an anonymous sign-in             [{"title":"ada note"}] [200]
+-- your own service's token, beside the provider's: its issuer is one the server takes, and it names an audience
+the service's token, no aud                {"error":"the token names no audience (aud) this server takes"}
+the service's token, aud the API's         {"kind":"scoped","sub":"files-backend"}
+-- rules that name a claim's value (policy-claims.txt); the flags above are what pin the application
+auth0, holding read:notes                  [{"title":"ada note"},{"title":"bob note"}] [200]
+auth0, a member, no permission             [{"title":"ada note"}] [200]
+auth0, another role claim                  [] [200]
+dana, in staff                             [{"title":"ada note"},{"title":"bob note"}] [200]
+cognito, in the group editors              [{"title":"ada note"},{"title":"bob note"}] [200]
+cognito, in no group                       [] [200]
+supabase, a person                         [{"title":"ada note"}] [200]
+supabase, an anonymous sign-in             [] [200]
+
+== 4. a JWKS file with no key this server can use is refused at the start
+ec.json: no HS256, RS256 or ES256 key in the JWKS file
+
+== 5. turning a person away before their token expires
+bob reads                                  [{"title":"bob note"}] [200]
+bob reads, banned, the same token          [] [200]
+bob writes, banned                         {"error":"the document is outside what this token may write to `notes`"} [403]
+alice reads                                [{"title":"alice note"}] [200]
+
+== 6. a tenant node: the tenant claim
+-- the claim `tenant`, which Clerk's session token carries once customized
+alice, token for acme, asks acme               [{"title":"acme note"}] [200]
+alice, token for acme, asks globex             {"error":"this token is for another tenant"} [403]
+a token naming no tenant, asks acme            {"error":"this token names no tenant, and this node serves tenants"} [403]
+-- --jwt-tenant-claim org_id, which Auth0 puts in a token for an organization
+alice, token for org_acme, asks org_acme       [{"title":"org_acme note"}] [200]
+alice, token for org_acme, asks org_globex     {"error":"this token is for another tenant"} [403]
+a token naming no tenant, asks org_acme        {"error":"this token names no tenant, and this node serves tenants"} [403]
+
+== 7. a legacy HS256 secret, as an oct key of the file
+{"keys":[{"kty":"oct","kid":"legacy","alg":"HS256","k":"..."}]}
+a token signed with the secret             [{"owner":"alice","title":"alice note"}] [200]

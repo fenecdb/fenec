@@ -1,0 +1,791 @@
+<!--
+title: Auth with your identity provider — fenecdb
+description: Clerk, Auth0, Supabase Auth, Amazon Cognito, Firebase or Cloudflare Access sign the users in; fenec-server checks their tokens against the provider's keys and holds each to a policy down to the rows and fields. What it checks and what it does not, the keys kept fresh, the flags that hold a token to your application, claims by name in a rule, and a run.
+-->
+
+<h1>Auth with your identity provider</h1>
+<p class="kicker">Sign-in stays with a provider you already use. fenec-server
+checks the token it hands out, and a policy file decides, row by row and
+field by field, what that person may read and write.</p>
+
+<p>A backend platform bundles three things: sign-in, rules about who may touch
+which rows, and a database. fenecdb is the last two. The provider (Clerk,
+Auth0, Supabase Auth, Amazon Cognito, Firebase, Cloudflare Access) signs a user
+in and issues a JSON Web Token. The app, or the browser, sends it to
+fenec-server as <code>Authorization: Bearer</code>. The server checks the
+signature against the provider's public keys, takes only the tokens made for
+your application (the issuer and audience it is given), and holds every
+statement the token sends to
+<a href="/docs/http-access#scoped-access">the policy</a>.</p>
+
+<div class="note trap">
+  <p><b>Tell the server the issuer and the audience.</b> A provider's keys sign
+  far more than tokens for your database, and a server told neither takes every
+  token they sign, from every other application the provider hosts.
+  <a href="#checks">What the server checks, and what it does not</a> says what
+  it takes of a token; <a href="#application">Holding a token to your
+  application</a> gives each provider's flags, and
+  <a href="#rows">Rules that name a claim's value</a> the rest. Each is run
+  below, on a stand-in provider that signs tokens of the shapes the providers'
+  documentation describes.</p>
+</div>
+
+<h2 id="try">Try it with nothing to sign up for</h2>
+
+<p>Make a secret, start a server that takes tokens signed with it, and mint
+some. <code>--mint-token</code> prints a token for the claims it is given,
+signed with the secret (or the first <code>oct</code> key of a keys file)
+and good for an hour unless the claims say otherwise.</p>
+
+<pre data-lang="bash">head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' &gt; jwt.secret
+
+fenec-server --file app.fenec --http 127.0.0.1:8080 --http-token "$ROOT" \
+    --jwt-secret-file jwt.secret --policy policy.txt
+
+fenec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice"}'
+fenec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"carol","role":"admin"}'
+</pre>
+
+<p>The policy is one line a rule. It holds per-user rows, an admin role,
+fields that only their owner reads, and an audit trail nobody edits:</p>
+
+<pre data-lang="text" data-label="policy.txt"># collection  access                      rows                           role
+
+# Per-user rows: a person reads and writes their own notes.
+notes         read,write                  where owner = $jwt.sub
+
+# An admin also reads every note, and changes none. `role` is a claim of the
+# token (a text, or a list holding the role).
+notes         read                                                       for admin
+
+# Field read rules: every profile's name is public, the rest is its owner's.
+profiles      read(name)
+profiles      read,update(name, phone)    where owner = $jwt.sub
+
+# An audit trail a person adds lines about themselves to, and nobody edits.
+audit         read,insert                 where actor = $jwt.sub
+audit         read                                                       for admin
+audit         append-only</pre>
+
+<p>What the server answered alice, bob, an admin and a token that has lapsed,
+statement by statement. <code>sh examples/recipes/auth.sh</code> runs it from
+a clone, with a <code>fenec-server</code> built by <code>cargo build -p
+fenec-server</code> (or any binary, as <code>FENEC_SERVER=</code>), and it
+needs Node, curl and jq; it also creates the collections of
+<code>schema.fenecql</code>. The scripts are in
+<a href="https://github.com/fenecdb/fenecdb/tree/main/examples/recipes">examples/recipes</a>,
+and <code>make recipes-test</code> holds this page's outputs to what they print:</p>
+
+<pre data-lang="text">alice writes a note                        {"affected":1} [200]
+alice writes a note as bob                 {"error":"the document is outside what this token may write to `notes`"} [403]
+bob writes a note                          {"affected":1} [200]
+alice reads notes                          [{"owner":"alice","title":"buy oat milk"}] [200]
+bob reads notes                            [{"owner":"bob","title":"call the dentist"}] [200]
+the admin reads notes                      [{"owner":"alice","title":"buy oat milk"},{"owner":"bob","title":"call the dentist"}] [200]
+the admin deletes a note                   {"affected":0} [200]
+everyone reads profiles                    [{"id":1,"owner":null,"name":"Alice","email":null,"phone":null},{"id":2,"owner":"bob","name":"Bob","email":"bob@example.test","phone":"222"}] [200]
+bob renames alice                          {"affected":0} [200]
+bob changes his email                      {"error":"this token may not change `email` in `profiles`"} [403]
+bob changes his phone                      {"affected":1} [200]
+alice adds an audit line                   {"affected":1} [200]
+alice deletes it                           {"error":"`audit` is append-only: a scoped token inserts into it, and neither updates nor deletes its rows"} [403]
+a token that has lapsed                    {"error":"the token has expired"} [401]
+no token                                   {"error":"invalid or missing token"} [401]</pre>
+
+<ul>
+  <li><b>Rows.</b> Alice's <code>put</code> that leaves out <code>owner</code>
+    gets her <code>sub</code> in it; one naming bob is refused (403), as is
+    any row that stops matching the filter after the write.</li>
+  <li><b>An admin who only reads.</b> Carol reads every note. Her
+    <code>del</code> writes <code>{"affected":0}</code>, not an error: the
+    rows she may delete are none, because <code>for admin</code> grants
+    <code>read</code> alone.</li>
+  <li><b>Fields.</b> <code>profiles read(name)</code> shows every row's
+    <code>name</code> and <code>id</code>; the rest of a row is
+    <code>null</code> unless it is the reader's own. Bob changes his phone
+    and is refused his email, which <code>update(name, phone)</code> does not
+    list.</li>
+  <li><b>An audit trail.</b> Alice adds a line about herself and cannot take
+    it back, by any route, whatever her rules say.</li>
+  <li><b>Tokens that do not pass.</b> A lapsed one and none at all are 401,
+    and the body of the first says it has expired.</li>
+</ul>
+
+<p><code>GET /_whoami</code> shows what the server took a token for, rules and
+all:</p>
+
+<pre data-lang="text">-- /_whoami for alice
+{"node":"single","tenant":null,"read_only":false,"kind":"scoped","sub":"alice","roles":[],"tenants":null,"unbound":false,"append_only":["audit"],"rules":[{"collection":"notes","grants":["read","insert","update","delete"],"fields":null,"read_fields":null,"rows":"owner = $jwt.sub"},{"collection":"profiles","grants":["read"],"fields":null,"read_fields":["name"],"rows":null},{"collection":"profiles","grants":["read","update"],"fields":["name","phone"],"read_fields":null,"rows":"owner = $jwt.sub"},{"collection":"audit","grants":["read","insert"],"fields":null,"read_fields":null,"rows":"actor = $jwt.sub"}]}</pre>
+
+<h2 id="checks">What the server checks, and what it does not</h2>
+
+<p>This is the one place that says what the server takes of a token and what
+it leaves to you. The issuer, the audience and the client are checked when the
+server is given them with a flag; given none, it takes every token its keys
+sign.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th>What the server does</th></tr></thead>
+<tbody>
+<tr><td><b>Checked</b></td><td>The signature: RS256 against an <code>RSA</code> key of at least 2048 bits, ES256 against an <code>EC</code> key on P-256, HS256 against an <code>oct</code> key of at least 32 bytes. A key is used for its own algorithm alone, so a provider's public RSA key is never taken as an HMAC secret.</td></tr>
+<tr><td></td><td><code>kid</code>: a token that names one is checked against that key and no other. One that names none is tried against every key of its algorithm.</td></tr>
+<tr><td></td><td><code>exp</code>, which a token must have (401 otherwise; <code>--jwt-require-exp off</code> takes tokens without); <code>--jwt-max-age &lt;s&gt;</code> also refuses an <code>exp</code> further ahead than that. <code>nbf</code> too.</td></tr>
+<tr><td><b>Checked when told</b></td><td><code>iss</code> against <code>--jwt-issuer</code>, <code>aud</code> against <code>--jwt-audience</code>, and <code>azp</code> (or, where a token has none, <code>client_id</code>) against <code>--jwt-client</code>. Each flag is repeatable, any one of its values is taken, and each is asked of every token on every route, before a rule is read. A token refused is 401 naming the check, never the value it holds (<a href="#application">Holding a token to your application</a>). Given none of them the server takes any token its keys sign, which is right only where the keys are yours alone, and with <code>--jwt-keys</code> it says so on stderr as it starts.</td></tr>
+<tr><td><b>Not checked</b></td><td><code>token_use</code>: not read. Cognito's ID tokens and access tokens are told apart by the flags that name the client and the audience (<a href="#cognito">below</a>), or by a rule: <code>$jwt.token_use = 'access'</code>.</td></tr>
+<tr><td></td><td>Revocation. A token is good until its <code>exp</code> (<a href="#expiry">Expiry</a>).</td></tr>
+<tr><td><b>Not supported</b></td><td>A keys URL. <code>--jwt-keys</code> takes a path, read again when the file changes (<a href="#keys">Keys</a>).</td></tr>
+<tr><td></td><td>EdDSA, PS256, ES384, ES512, RS384 and RS512. Such a token is 401, <code>only HS256, RS256 and ES256 tokens are accepted</code>. Keys of any other kind in a JWKS (<code>OKP</code>, an <code>EC</code> key on P-384 or P-521) are skipped, and a file with no <code>RSA</code>, P-256 <code>EC</code> or <code>oct</code> key is refused at the start.</td></tr>
+<tr><td></td><td>A claim by a path. <code>$jwt.&lt;name&gt;</code> is a claim at the top of the token, and a name of more than letters, digits and <code>_</code> goes in double quotes: <code>$jwt."cognito:groups"</code>. <code>$jwt.app_metadata.role</code> stops the server at startup, and so does <code>lower($jwt.email)</code>: a claim is read as the token holds it.</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The server reads the token from <code>Authorization: Bearer</code> and from
+no other header. A rule's <code>for &lt;role&gt;</code> reads the claim
+<code>role</code>, a text or a list holding the role, or the claim
+<code>--jwt-role-claim &lt;name&gt;</code> names.</p>
+
+<details class="deep"><summary>How a checked token is kept, and what a missing claim does</summary>
+<p>A rule whose filter names a claim the token lacks does not apply, so a
+missing claim narrows what a token may do, never widens it. A claim held as
+<code>null</code>, as <code>""</code>, as an object, or as a list where the rule
+reads one value is a missing one: <code>"sub": null</code> is no subject, and
+<code>owner = $jwt.sub</code> does not become <code>owner = null</code>. A claim
+a rule compares by order admits only values of its own kind. A token that has
+been checked is kept by its text, up to 4 096 of them, and the kept ones are
+dropped whenever the keys change; <code>exp</code> and <code>nbf</code> are
+asked again on every request. A claim holding a list of more than 1 000
+values is refused (401). The whole story of rules and claims is in
+<a href="/docs/http-access">HTTP security and scoped access</a>.</p>
+</details>
+
+<h2 id="keys">Keys: the provider's JWKS, in a file kept fresh</h2>
+
+<p>Every provider publishes its public keys as a JWKS, a JSON document
+<code>{"keys": [...]}</code>. fenec-server reads one from a file. A job that
+fetches it every few minutes is the other half.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Provider</th><th>Keys</th><th>Signs with</th></tr></thead>
+<tbody>
+<tr><td><a href="https://clerk.com/docs/guides/sessions/manual-jwt-verification">Clerk</a></td><td><code>https://&lt;Frontend API URL&gt;/.well-known/jwks.json</code></td><td>RS256</td></tr>
+<tr><td><a href="https://auth0.com/docs/secure/tokens/json-web-tokens/json-web-key-sets">Auth0</a></td><td><code>https://&lt;your domain&gt;/.well-known/jwks.json</code></td><td>RS256 or HS256 per application; a JWKS publishes the RS256 keys</td></tr>
+<tr><td><a href="https://supabase.com/docs/guides/auth/signing-keys">Supabase Auth</a></td><td><code>https://&lt;project&gt;.supabase.co/auth/v1/.well-known/jwks.json</code></td><td>ES256, RS256 or HS256 per signing key. An EC key on P-256 (ES256) and an RSA 2048 one are both taken; the legacy HS256 secret is not in the JWKS (<a href="#legacy">below</a>)</td></tr>
+<tr><td><a href="https://docs.aws.amazon.com/cognito/latest/developerguide/amazon-cognito-user-pools-using-tokens-verifying-a-jwt.html">Amazon Cognito</a></td><td><code>https://cognito-idp.&lt;region&gt;.amazonaws.com/&lt;userPoolId&gt;/.well-known/jwks.json</code></td><td>RS256, one key pair for access tokens and another for ID tokens, both in the JWKS</td></tr>
+<tr><td><a href="https://firebase.google.com/docs/auth/admin/verify-id-tokens">Firebase</a></td><td><code>https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com</code> (a JWKS of the same keys, by <code>kid</code>, as the X.509 form the page names)</td><td>RS256</td></tr>
+<tr><td><a href="https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/">Cloudflare Access</a></td><td><code>https://&lt;team&gt;.cloudflareaccess.com/cdn-cgi/access/certs</code></td><td>RS256</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>How often a key changes, as each one's documentation says:</p>
+
+<ul>
+  <li><b>Auth0:</b> one key signs at a time, and the endpoint may hold several
+    during a rotation.</li>
+  <li><b>Supabase:</b> a standby key is rotated in and the old one revoked
+    once its tokens have expired. The edge caches the JWKS 10 minutes, and the
+    docs say to wait at least 20 minutes after creating a standby key or
+    revoking one.</li>
+  <li><b>Cognito:</b> keys "might rotate"; cache by <code>kid</code> and
+    refresh.</li>
+  <li><b>Firebase:</b> the answer's <code>Cache-Control: max-age</code> says
+    when to fetch again (the docs say to use it; it was about seven hours
+    when this was written).</li>
+  <li><b>Cloudflare Access:</b> every 6 weeks, and the previous key stays valid
+    for 7 days.</li>
+  <li><b>Clerk:</b> not said on the pages read.</li>
+</ul>
+
+<p>The job below fetches the file beside the one in use and renames it over.
+The server looks at the file at most once a second and reads it again when
+its modification time has changed, so the rename is the rotation: no
+restart, and no half-written file to read. A fetch that fails, or that
+returns a page with no RSA or P-256 key, leaves the file that works where it is. It
+takes <code>https</code> only, follows no redirect to anything else and takes
+no more than a megabyte (the stand-in provider below is plain
+<code>http</code> on localhost, which is what <code>JWKS_PROTO='=http'</code>
+is for).</p>
+
+<pre data-lang="bash" data-label="refresh-jwks.sh">#!/bin/sh
+# Keep the JWKS file fenec-server reads (--jwt-keys) as fresh as the provider's.
+# fenec-server fetches no URL: it reads this file, and again whenever its
+# modification time changes (at most once a second). Run this from cron or a
+# systemd timer every few minutes.
+#
+#   refresh-jwks.sh https://acme.us.auth0.com/.well-known/jwks.json /etc/fenec/jwks.json [own-keys.json]
+#
+# The new file is written beside the old one and renamed over it, so the server
+# never reads half of one, and only a file holding a key the server verifies
+# with (an RSA one, or an EC one on P-256) replaces the one in use: an error
+# page, an empty body or a provider that went EdDSA-only leaves the keys that
+# work where they are, and the job fails for whoever watches it.
+#
+# A third argument is a JWKS of keys of your own -- the public halves of the
+# keys your backend or Worker signs its short service tokens with -- which go
+# into the file beside the provider's. Without it the file would hold only the
+# provider's keys, and a service could not call the server.
+#
+# Only https, and no more than 1 MiB: a URL that redirects to http, or one that
+# answers with a body of any size, is not a keys file. JWKS_PROTO='=http' lifts
+# the first, for the stand-in provider of idp.mjs on localhost.
+set -eu
+url=$1
+file=$2
+own=${3:-}
+tmp=$(mktemp "$file.XXXXXX")
+trap 'rm -f "$tmp" "$tmp.merged"' EXIT
+curl -fsS --proto "${JWKS_PROTO:-=https}" --proto-redir "${JWKS_PROTO:-=https}" --max-redirs 3 \
+    --max-filesize 1048576 --max-time 10 "$url" -o "$tmp"
+jq -e '[.keys[]? | select(.kty == "RSA" or (.kty == "EC" and .crv == "P-256"))] | length &gt; 0' "$tmp" &gt;/dev/null ||
+    { echo "refresh-jwks: $url holds no RSA or P-256 key; $file left as it was" &gt;&amp;2; exit 1; }
+if [ -n "$own" ]; then
+    # A file of your own keys with none in it is a mistake that would drop them
+    # from the server's file, and a kid on both sides is one key claiming
+    # another's name: a token that names it is checked against both.
+    jq -e '(.keys | type == "array") and (.keys | length &gt; 0)' "$own" &gt;/dev/null ||
+        { echo "refresh-jwks: $own holds no key; $file left as it was" &gt;&amp;2; exit 1; }
+    jq -s -e '([.[0].keys[].kid, .[1].keys[].kid] | map(select(. != null))) as $k | ($k | length) == ($k | unique | length)' \
+        "$tmp" "$own" &gt;/dev/null ||
+        { echo "refresh-jwks: a kid is in both $url and $own; $file left as it was" &gt;&amp;2; exit 1; }
+    jq -s '{keys: (.[0].keys + .[1].keys)}' "$tmp" "$own" &gt;"$tmp.merged"
+    mv "$tmp.merged" "$tmp"
+fi
+chmod 644 "$tmp"
+mv "$tmp" "$file"
+trap - EXIT</pre>
+
+<pre data-lang="bash"># crontab: every five minutes, well inside what any of them asks
+*/5 * * * *  /usr/local/bin/refresh-jwks.sh https://acme.us.auth0.com/.well-known/jwks.json /etc/fenec/jwks.json /etc/fenec/service-jwks.json
+
+fenec-server --file app.fenec --http 0.0.0.0:8080 --http-token "$ROOT" \
+    --jwt-keys /etc/fenec/jwks.json --policy policy.txt \
+    --jwt-issuer https://acme.us.auth0.com/ --jwt-issuer urn:fenec:services \
+    --jwt-audience https://api.example.test
+</pre>
+
+<p>The two issuers are the provider's and your services' (<a href="#services">below</a>);
+the audience is the API's. <a href="#application">Holding a token to your
+application</a> has the flags of each provider.</p>
+
+<p>A rotation as the server sees it, with the stand-in provider serving its
+JWKS over HTTP and a <code>kid</code> of <code>idp-2</code> signing after
+the rotation:</p>
+
+<pre data-lang="text">-- the provider rotates: a new key signs, and the server's file has not heard
+a token of the new key                     {"error":"no key has the token's kid"} [401]
+-- the refresh job fetches the provider's file; no restart
+the same token                             [{"title":"clerk note"}] [200]
+-- a key of your own service goes into the file beside the provider's
+["idp-1","idp-2","svc-1"]
+the server's view of the service's token   {"kind":"scoped","sub":"files-backend"}
+-- a key whose kid is the provider's, and a file of own keys with none in it, are refused
+refresh-jwks: a kid is in both &lt;provider&gt;/.well-known/jwks.json and dup.json; jwks.json left as it was
+refresh-jwks: none.json holds no key; jwks.json left as it was
+-- the job asks for a page that is not there one night
+curl: (22) The requested URL returned error: 404
+(the job failed, rc 22)
+the same token                             [{"title":"clerk note"}] [200]
+-- and a file that is no JWKS, written over the keys by hand
+the same token                             [{"title":"clerk note"}] [200]
+jwks.json: a JWKS file is {"keys": [...]}; the keys read before stay
+-- a provider that signs with EC keys (Supabase's ES256): its P-256 key comes with the next fetch
+an ES256 token                             [{"title":"clerk note"}] [200]
+an ES384 token                             {"error":"only HS256, RS256 and ES256 tokens are accepted"} [401]</pre>
+
+<ul>
+  <li><b>Behind a rotation</b> a token is 401 with <code>no key has the
+    token's kid</code> until the next fetch. Cloudflare's overlap of seven
+    days, Supabase's twenty minutes and Firebase's hours are all longer than a
+    five-minute job.</li>
+  <li><b>A fetch that fails</b> (the 404 above, a provider that is down)
+    makes the job exit non-zero and touches nothing; the keys read last stay
+    in use.</li>
+  <li><b>A file that no longer reads</b> (written over by hand above) is
+    logged, <code>the keys read before stay</code>, and the server goes on
+    with the keys it has. A file with no usable key (here a single P-384 key,
+    for ES384) is refused at the start:
+    <code>ec.json: no HS256, RS256 or ES256 key in the JWKS file</code>.</li>
+  <li><b>ES256 is taken, ES384 is not.</b> A key on P-256 in the file verifies
+    ES256 tokens, which is what Supabase's EC signing keys sign, and the
+    refresh job takes a file holding one. A token signed with ES384, or any
+    other algorithm than the three, is 401 whatever the file holds.</li>
+  <li><b>Real files load.</b> The JWKS Google publishes for Firebase (four RS256
+    keys) and the one of Auth0's public samples tenant (two) were fetched when this was
+    written and the server started on each. The other providers' endpoints were not
+    tried, for want of a project of one's own.</li>
+  <li><b>A token already checked</b> is dropped from the server's memory
+    when the keys change, so a key taken out takes its tokens with it.</li>
+  <li><b>Cloudflare Access</b> answers with <code>keys</code> and, beside
+    them, <code>public_cert</code> and <code>public_certs</code> in PEM. A
+    file of that shape loads (tried here with a stand-in, not with
+    Cloudflare's endpoint), and the job's filter looks at <code>keys</code>
+    alone.</li>
+</ul>
+
+<h3 id="services">Tokens your own services call with</h3>
+
+<p>A backend or a Worker that calls fenec-server needs a token too, and the
+provider has none for it. <code>--mint-token</code> cannot make one: it signs
+with the first <code>oct</code> key of the file, and a file of a provider's RSA
+keys has none (an RSA key's private half is its owner's). A token minted by
+hand and kept would also be refused by <code>--jwt-max-age</code>, and by the
+default of <code>--jwt-require-exp</code> if it never expires. So the service
+has a key pair of its own. The public half is a JWK in a file of its own,
+which the refresh job's third argument puts into the keys file beside the
+provider's, and the private half is the service's secret, which signs a token
+of five minutes whenever one is wanted. The provider's JWKS never holds it,
+and a token naming its <code>kid</code> is checked against that key alone.</p>
+
+<pre data-lang="bash">openssl genrsa -out svc-1.pem 2048
+node idp.mjs jwk svc-1.pem svc-1 &gt; service-jwks.json     # the public half as a JWKS, kid svc-1
+
+refresh-jwks.sh https://acme.us.auth0.com/.well-known/jwks.json /etc/fenec/jwks.json /etc/fenec/service-jwks.json
+
+# a Worker's secret is the same key as base64 of the PKCS#8 DER, on one line
+openssl pkcs8 -topk8 -nocrypt -in svc-1.pem -outform DER | base64 | tr -d '\n'
+</pre>
+
+<p>The refresh job above ran it with a key made as shown, and the server took the
+service's token. The job refuses a <code>kid</code> that is on both sides and an
+own-keys file with no key in it, which would leave the server without the service's
+key at the next fetch:</p>
+
+<pre data-lang="text">-- a key of your own service goes into the file beside the provider's
+["idp-1","idp-2","svc-1"]
+the server's view of the service's token   {"kind":"scoped","sub":"files-backend"}
+-- a key whose kid is the provider's, and a file of own keys with none in it, are refused</pre>
+
+<ul>
+  <li><b>A service is an <code>iss</code> and a <code>sub</code>, never a
+    <code>role</code>.</b> A rule that means a service says
+    <code>$jwt.sub = 'files-backend' and $jwt.iss = 'urn:fenec:services'</code>
+    (<a href="/docs/files">Files</a> and <a href="/docs/functions">Functions</a>
+    use it). A <code>sub</code> alone is not enough: a provider assigns one, but
+    a provider's token can say <code>files-backend</code> too (a Firebase
+    project's owner picks the uid of a custom token), and a rule that asked for
+    the <code>sub</code> only would take it for the service. No provider's token
+    carries the issuer of your services. A <code>role</code> claim in the
+    provider's namespace would be one the provider's settings, or a user's own
+    attributes, might fill.</li>
+  <li><b>The server binds no key to an identity.</b> Whoever holds a signing key
+    the file holds, <code>svc-1</code> or the provider's own, can sign any
+    <code>sub</code>, <code>iss</code> or <code>role</code> a rule of the policy
+    asks for: a Worker that leaked its key leaked every identity the policy has a
+    rule for, not only its own. So the key is the secret: a Worker secret
+    (<code>wrangler secret put</code>) or a file only its service reads, never in
+    a repository or a <code>.dev.vars</code> that is committed; one key for each
+    service, so that one can be dropped without the others. <code>--jwt-issuer</code>
+    is the server's list of issuers, not a key's: it does not tie
+    <code>svc-1</code> to <code>urn:fenec:services</code>, and a key of the
+    provider's could sign that issuer too. Binding a key to an issuer, so that a
+    key signs only for its own, is a known gap and future work.</li>
+  <li><b>Rotating it:</b> add <code>svc-2</code> to <code>service-jwks.json</code>
+    (the job puts both in the file), deploy the service with the new key and its
+    <code>kid</code>, and once the tokens it signed with <code>svc-1</code> have
+    lapsed (five minutes) take <code>svc-1</code> out of the file.</li>
+  <li><b>One form of the key to a service.</b> The backend reads a PEM from a path
+    (<code>SERVICE_KEY_FILE</code>), a Worker the PKCS#8 DER as base64
+    (<code>SERVICE_KEY</code>); the names differ so that the one is not given the
+    other's form.</li>
+</ul>
+
+<p>A server given <code>--jwt-issuer</code> and <code>--jwt-audience</code>
+(<a href="#application">below</a>) takes the service's token only if both list it:
+the issuer of your services goes beside the provider's, and the token names an
+audience the server takes. The lists admit the provider's tokens and the
+service's alike, so the rule that means a service still asks for
+<code>$jwt.iss = 'urn:fenec:services'</code>.
+<code>serviceTokens({ pem, sub, aud })</code> in <code>service-token.mjs</code> signs
+the audience in:</p>
+
+<pre data-lang="text">-- your own service's token, beside the provider's: its issuer is one the server takes, and it names an audience
+the service's token, no aud                {"error":"the token names no audience (aud) this server takes"}
+the service's token, aud the API's         {"kind":"scoped","sub":"files-backend"}</pre>
+
+<h3 id="legacy">A legacy HS256 secret</h3>
+
+<p>Supabase's JWKS does not hold its legacy shared secret, and its documentation
+recommends against verifying with it. If a project still signs with it, the
+secret goes into the keys file as an <code>oct</code> key, <code>k</code> the
+base64url of the bytes the provider signs with (which bytes those are is for you
+to check with a token and <code>/_whoami</code>). The same file then lets
+<code>--mint-token</code> make test tokens. A project's <code>anon</code> and
+<code>service_role</code> keys are JWTs of that project too: check what signs yours,
+and write no rule for those roles, since it would be a rule for whoever holds the
+key.</p>
+
+<pre data-lang="text">{"keys":[{"kty":"oct","kid":"legacy","alg":"HS256","k":"..."}]}
+a token signed with the secret             [{"owner":"alice","title":"alice note"}] [200]</pre>
+
+<h2 id="claims">What each provider's token carries</h2>
+
+<p>The claim shapes below are taken from each provider's documentation and
+carried by the stand-in (<code>examples/recipes/idp.mjs</code>). For each: who
+the user is, where a role or a tenant can come from, and what a policy reaches
+only by a quoted name or not at all (<a href="#checks">the table above</a> says
+why).</p>
+
+<div class="note trap">
+  <p><b>Never take a role from an attribute the user can write.</b> Supabase's
+  <code>user_metadata</code> is "can be updated by the authenticated user"
+  and "not a good place to store authorization data"
+  (<a href="https://supabase.com/docs/guides/database/postgres/row-level-security">its
+  row level security guide</a>); Clerk's <code>unsafe_metadata</code> is the one
+  kind that can be set from the frontend
+  (<a href="https://clerk.com/docs/guides/users/extending">user metadata</a>); a
+  Cognito attribute an app client may write is the user's to change, which
+  AWS says to take out of <code>WriteAttributes</code> of every app client before
+  deciding by it
+  (<a href="https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-settings-attributes.html">attribute
+  permissions</a>). A claim a policy trusts comes from something only your
+  server or the provider's admin writes.</p>
+</div>
+
+<h3 id="clerk">Clerk</h3>
+<ul>
+  <li><b><code>sub</code></b> is the user id, <code>user_…</code>
+    (<a href="https://clerk.com/docs/guides/sessions/session-tokens">session token</a>).</li>
+  <li><b>A role, a tenant:</b> add <code>role</code> and <code>tenant</code> as claims
+    of the <a href="https://clerk.com/docs/guides/sessions/customize-session-tokens">session
+    token</a> (Dashboard, Sessions, Customize session token; shortcodes such as
+    <code>{{user.public_metadata.role}}</code>, which only the backend sets). Up to 1.2 KB
+    of custom claims fit the cookie.</li>
+  <li><b><code>azp</code></b> is the origin the session was started on, left out
+    where the request carried no <code>Origin</code>; Clerk's documentation asks a
+    verifier to check it, which <code>--jwt-client</code> does, once for each origin
+    the app is served from. A token without it is refused.</li>
+  <li><b>Out of reach:</b> the active organization's role is <code>o.rol</code>, nested.
+    A <a href="https://clerk.com/docs/guides/sessions/jwt-templates">JWT template</a> lives
+    60 seconds unless set otherwise.</li>
+</ul>
+
+<h3 id="auth0">Auth0</h3>
+<ul>
+  <li><b><code>sub</code></b> is the connection's name, a bar and the id:
+    <code>auth0|…</code>, <code>facebook|…</code>
+    (<a href="https://auth0.com/docs/manage-users/user-accounts/identify-users">docs</a>).</li>
+  <li><b>A role, a tenant:</b> an access token for an API carries RBAC
+    <code>permissions</code> as a list, when the API has "Add Permissions in the
+    Access Token" turned on
+    (<a href="https://auth0.com/docs/get-started/apis/enable-role-based-access-control-for-apis">docs</a>),
+    which a rule tests: <code>'read:notes' in $jwt.permissions</code>. A login to an
+    Organization carries <code>org_id</code>
+    (<a href="https://auth0.com/docs/manage-users/organizations/using-tokens">docs</a>):
+    <code>--jwt-tenant-claim org_id</code>.</li>
+  <li><b><code>aud</code></b> of an access token names the API. One tenant's keys sign every
+    API's and every application's tokens, and the ID tokens too, whose <code>aud</code> is
+    the application's client id: <code>--jwt-audience</code> is the API's identifier,
+    <code>--jwt-issuer</code> the tenant's with its closing <code>/</code>.</li>
+  <li><b>A namespaced claim:</b> custom claims in an access token for an API must be
+    namespaced URLs (<a href="https://auth0.com/docs/secure/tokens/json-web-tokens/create-custom-claims">docs</a>):
+    such a token "cannot have private, non-namespaced custom claims". A rule names one in
+    double quotes, <code>$jwt."https://example.com/role"</code>, and
+    <code>--jwt-role-claim https://example.com/role</code> makes it the role of
+    <code>for</code>.</li>
+</ul>
+
+<h3 id="supabase">Supabase Auth</h3>
+<ul>
+  <li><b><code>sub</code></b> is the user's id
+    (<a href="https://supabase.com/docs/guides/auth/jwt-fields">claims</a>).</li>
+  <li><b>A role:</b> <code>role</code> is <code>authenticated</code> for every signed-in
+    user (<code>anon</code> and <code>service_role</code> are the others), so <code>for
+    authenticated</code> admits every signed-in user and cannot single out an admin. An
+    <a href="https://supabase.com/docs/guides/auth/auth-anonymous">anonymous sign-in</a>
+    has <code>role: authenticated</code> too, and <code>is_anonymous: true</code>:
+    a rule that means a person says <code>$jwt.is_anonymous = false</code>.</li>
+  <li><b>Out of reach:</b> <code>app_metadata</code> and <code>user_metadata</code> are
+    objects, so a role kept there has no name (and the second is the user's to write).
+    Keep admins as rows (<a href="#rows">below</a>).</li>
+</ul>
+
+<h3 id="cognito">Amazon Cognito</h3>
+<ul>
+  <li><b><code>sub</code></b> is the user's id. An access token has <code>client_id</code>
+    and <code>token_use: access</code>, and no <code>aud</code>; an ID token has <code>aud</code>
+    and <code>token_use: id</code>
+    (<a href="https://docs.aws.amazon.com/cognito/latest/developerguide/amazon-cognito-user-pools-using-tokens-verifying-a-jwt.html">docs</a>).
+    The pool's keys sign both. <code>--jwt-client</code> with the app client's id
+    takes the access tokens and refuses the ID tokens, which name the client in
+    <code>aud</code> alone; <code>--jwt-audience</code> with the same id takes the
+    ID tokens.</li>
+  <li><b>A role, a tenant:</b> add a plain claim (<code>role</code>, <code>tenant</code>) with a
+    <a href="https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-lambda-pre-token-generation.html">pre
+    token generation trigger</a>: version 1 for the ID token, 2 or 3 for access tokens, which
+    needs the Essentials or Plus plan. The trigger may add any claim not in the pool's token
+    schema.</li>
+  <li><b>Groups and attributes:</b> <code>cognito:groups</code> is a list.
+    <code>--jwt-role-claim cognito:groups</code> makes it the role of <code>for
+    editors</code>, and <code>'editors' in $jwt."cognito:groups"</code> tests it in a
+    filter. A custom attribute is a claim named <code>custom:&lt;name&gt;</code>, and
+    its name goes in double quotes too.</li>
+</ul>
+
+<h3 id="firebase">Firebase</h3>
+<ul>
+  <li><b><code>sub</code></b> is the user's <code>uid</code>; <code>aud</code> is the
+    Firebase project's id and <code>iss</code> is
+    <code>https://securetoken.google.com/&lt;project&gt;</code>
+    (<a href="https://firebase.google.com/docs/auth/admin/verify-id-tokens">docs</a>).</li>
+  <li><b>Google signs every project's tokens with the same keys</b>, so a token for any
+    Firebase project verifies unless the server is given both
+    <code>--jwt-issuer https://securetoken.google.com/&lt;project&gt;</code> and
+    <code>--jwt-audience &lt;project&gt;</code>.</li>
+  <li><b>A role:</b> a custom claim, set "only from a privileged server environment by the
+    Firebase Admin SDK", so not the user's to write
+    (<a href="https://firebase.google.com/docs/auth/admin/custom-claims">docs</a>).</li>
+</ul>
+
+<h3 id="access">Cloudflare Access</h3>
+<ul>
+  <li><b><code>sub</code></b> is the user's id, unique to an email address per account;
+    <code>email</code> is a claim too
+    (<a href="https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/application-token/">docs</a>).</li>
+  <li><b>A role:</b> none of its own. Rows (<a href="#rows">below</a>), or the email.</li>
+  <li><b>Out of reach:</b> the token reaches the origin in <code>Cf-Access-Jwt-Assertion</code>,
+    and fenec-server reads <code>Authorization: Bearer</code> alone: a Worker or proxy in front
+    moves it. <code>aud</code> is a list holding the application's tag, and a team's
+    applications are signed with the same keys: <code>--jwt-audience</code> is the
+    tag.</li>
+</ul>
+
+<p>The user's <code>sub</code> is what <code>owner = $jwt.sub</code> compares
+with, so a row's owner holds it exactly as the provider writes it. The same
+stand-in alice is five different people to five providers; a note written for
+each one's <code>sub</code> and read back with that one's token:</p>
+
+<pre data-lang="text">clerk: sub user_2xYzAbc                    [{"owner":"user_2xYzAbc","title":"clerk note"}] [200]
+auth0: sub auth0|0123456789                [{"owner":"auth0|0123456789","title":"auth0 note"}] [200]
+supabase: sub 7c9e6679-7425-40de-944b-e07fc1f90ae7 [{"owner":"7c9e6679-7425-40de-944b-e07fc1f90ae7","title":"supabase note"}] [200]
+cognito: sub a1b2c3d4-5678-90ab-cdef-111111111111 [{"owner":"a1b2c3d4-5678-90ab-cdef-111111111111","title":"cognito note"}] [200]
+access: sub 3d9a0f0e-5c1b-4a3e-8f61-2b7d9c4e1a55 [{"owner":"3d9a0f0e-5c1b-4a3e-8f61-2b7d9c4e1a55","title":"access note"}] [200]</pre>
+
+<p>When the claims a provider offers do not fit, there is a last way round
+that needs nothing from it: the app verifies the provider's token with the
+provider's own SDK and signs one of its own, short, with the
+<code>role</code> and <code>tenant</code> the policy reads
+(<a href="https://github.com/fenecdb/fenecdb/tree/main/examples/saas">examples/saas</a>
+does that, with RS256 and its own keys file).</p>
+
+<h2 id="application">Holding a token to your application</h2>
+
+<p>A provider's keys sign every token it issues, for every application it signs
+users in to: an Auth0 tenant's, a Cognito user pool's, a Cloudflare Access
+team's, and every Firebase project's with one set of keys. A good signature says
+who issued a token, not that it was issued for this database. Give the server
+the issuer and the audience (or the client), and it takes only the tokens made
+for it, on every route and before a rule is read, so no rule can forget the
+check:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Provider</th><th>Flags</th><th>What they refuse</th></tr></thead>
+<tbody>
+<tr><td>Auth0</td><td><code>--jwt-issuer https://&lt;tenant&gt;.us.auth0.com/ --jwt-audience &lt;the API's identifier&gt;</code></td><td>Another API's token, and an ID token, whose <code>aud</code> is a client id.</td></tr>
+<tr><td>Clerk</td><td><code>--jwt-issuer &lt;Frontend API URL&gt; --jwt-client &lt;each origin the app is served from&gt;</code></td><td>A session started on another origin, and one with no <code>azp</code>.</td></tr>
+<tr><td>Cloudflare Access</td><td><code>--jwt-issuer https://&lt;team&gt;.cloudflareaccess.com --jwt-audience &lt;the application's AUD tag&gt;</code></td><td>The team's other applications.</td></tr>
+<tr><td>Firebase</td><td><code>--jwt-issuer https://securetoken.google.com/&lt;project id&gt; --jwt-audience &lt;project id&gt;</code></td><td>Every other project, which Google's keys sign for as well.</td></tr>
+<tr><td>Cognito</td><td><code>--jwt-issuer https://cognito-idp.&lt;region&gt;.amazonaws.com/&lt;pool id&gt; --jwt-client &lt;app client id&gt;</code></td><td>Another app client's tokens and the ID tokens (<code>--jwt-audience</code> takes those instead).</td></tr>
+<tr><td>Supabase Auth</td><td><code>--jwt-issuer https://&lt;project ref&gt;.supabase.co/auth/v1 --jwt-audience authenticated</code></td><td>Another project: <code>aud</code> is the same for all, the issuer tells them apart.</td></tr>
+</tbody>
+</table>
+</div>
+
+<p><a href="/docs/http-access#whom-a-token-is-for">Whom a token is for</a> has the
+same table with each provider's source, and the issuers whose callers choose their
+own <code>aud</code> (Google's identity tokens, GitHub Actions' tokens), where the
+flags are not enough. Here is each provider's server given its flags, with a token
+made for it and one made for another application the same keys sign for, against
+<code>policy.txt</code>:</p>
+
+<pre data-lang="text">-- the flags of each provider: the keys sign other applications' tokens too (policy.txt)
+auth0, a token for the API                 [{"title":"ada note"}] [200]
+auth0, an ID token (aud is the client)     {"error":"the token names no audience (aud) this server takes"} [401]
+auth0, a token for another API             {"error":"the token names no audience (aud) this server takes"} [401]
+auth0, another tenant                      {"error":"the token names no issuer (iss) this server takes"} [401]
+clerk, this origin                         [{"title":"ada note"}] [200]
+clerk, another origin                      {"error":"the token names no client (azp, or client_id) this server takes"} [401]
+clerk, a request with no origin            {"error":"the token names no client (azp, or client_id) this server takes"} [401]
+access, this application                   [{"title":"ada note"}] [200]
+access, another application of the team    {"error":"the token names no audience (aud) this server takes"} [401]
+firebase, this project                     [{"title":"ada note"}] [200]
+firebase, another project                  {"error":"the token names no issuer (iss) this server takes"} [401]
+cognito, an access token of this client    [{"title":"ada note"}] [200]
+cognito, an ID token                       {"error":"the token names no client (azp, or client_id) this server takes"} [401]
+cognito, another app client                {"error":"the token names no client (azp, or client_id) this server takes"} [401]
+supabase, this project                     [{"title":"ada note"}] [200]
+supabase, another project                  {"error":"the token names no issuer (iss) this server takes"} [401]
+supabase, an anonymous sign-in             [{"title":"ada note"}] [200]</pre>
+
+<ul>
+  <li><b>Told by name.</b> A refused token is 401 and the body names the check
+    (<code>the token names no audience (aud) this server takes</code>), never the
+    value the token holds. The audit log's <code>refused</code> line says the same in its
+    <code>reason</code>.</li>
+  <li><b>The lists are not pairs.</b> Each flag is repeatable and any one of its
+    values is taken, so two issuers and two audiences take either issuer with either
+    audience. A database has one provider; where it must serve two, the rules pin
+    the pair (<code>$jwt.iss = '…' and 'api-a' in $jwt.aud</code>).</li>
+  <li><b>What the flags do not say.</b> They say the token was made for this
+    application, not which person it is for or what that person is. An anonymous
+    sign-in of Supabase's passes above, with <code>is_anonymous</code> true, and a
+    rule that means a person says so (<a href="#rows">below</a>). A provider that
+    names its client otherwise, such as Okta's <code>cid</code>, is pinned in the rule:
+    <code>where owner = $jwt.sub and $jwt.cid = "0oa1example"</code>.</li>
+  <li><b>Your own service's tokens</b> have an issuer of their own, and an audience
+    when the server is given one (<a href="#services">above</a>).</li>
+</ul>
+
+<h2 id="rows">Rules that name a claim's value</h2>
+
+<p>A rule is a filter over a row, and a filter may hold a claim on its own
+side of a comparison. That reads what <code>for &lt;role&gt;</code> cannot, and
+it fails closed: a token without the claim does not meet the rule. With the
+flags above holding the token to the application, the rules name what only a
+claim can say: a list it holds, a flag the provider sets, a role under a name of
+its own. The server is given the provider's flags in each run.</p>
+
+<pre data-lang="text" data-label="policy-claims.txt"># Rules that name a claim's value. What pins a token to the application the
+# database is for is not here: fenec-server is started with the provider's
+# issuer and audience (--jwt-issuer, --jwt-audience, --jwt-client), and
+# refuses a token made for another application, on every route, before a rule
+# is read (docs/http-access, "Whom a token is for"). A rule names what only a claim
+# can say: a list a token holds, a flag a provider sets, a role under a name
+# of its own.
+#
+# A database has one provider, and so one of the sections below; they are
+# together here to be tried against a server for each.
+
+# ---- Auth0 (--jwt-issuer, --jwt-audience of the API)
+# `permissions` is a list claim: RBAC's "Add Permissions in the Access Token".
+notes         read                        where 'read:notes' in $jwt.permissions
+# A custom claim of an access token is a URL, and a name that is not a word
+# goes in double quotes.
+notes         read,write                  where owner = $jwt.sub and $jwt."https://example.test/role" = 'member'
+# Staff are rows. The inner get reads the token's own row of `staff` alone.
+staff         read                        where user = $jwt.sub
+notes         read                        where $jwt.sub in (get staff select user)
+
+# ---- Amazon Cognito (--jwt-issuer, --jwt-client; --jwt-role-claim cognito:groups)
+# With the flag, a rule's `for` reads the groups the token lists.
+notes         read                                                       for editors
+
+# ---- Supabase Auth (--jwt-issuer, --jwt-audience authenticated)
+# An anonymous sign-in has role `authenticated` and is a user too; a rule that
+# means a person says so.
+notes         read,write                  where owner = $jwt.sub and $jwt.is_anonymous = false</pre>
+
+<pre data-lang="text">-- rules that name a claim's value (policy-claims.txt); the flags above are what pin the application
+auth0, holding read:notes                  [{"title":"ada note"},{"title":"bob note"}] [200]
+auth0, a member, no permission             [{"title":"ada note"}] [200]
+auth0, another role claim                  [] [200]
+dana, in staff                             [{"title":"ada note"},{"title":"bob note"}] [200]
+cognito, in the group editors              [{"title":"ada note"},{"title":"bob note"}] [200]
+cognito, in no group                       [] [200]
+supabase, a person                         [{"title":"ada note"}] [200]
+supabase, an anonymous sign-in             [] [200]</pre>
+
+<ul>
+  <li><b>The rules that mean a service are pinned on the issuer of your
+    services</b> (<code>files-policy.txt</code>, <code>functions-policy.txt</code>),
+    since a provider's token can carry any <code>sub</code>, and the issuers the
+    server is given include the services': see
+    <a href="#services">Tokens your own services call with</a>.</li>
+  <li><b>A list claim is a test.</b> <code>'read:notes' in $jwt.permissions</code> is
+    true or false for the whole token, and a rule holding it grants what it grants to
+    the tokens for which it is true. <code>permissions: []</code> is a list of none.</li>
+  <li><b>A name in quotes is a name.</b> <code>$jwt."https://example.test/role"</code>
+    is the claim of that name, the dots, colon and slashes in it just characters.
+    <code>--jwt-role-claim</code> makes such a claim the role of <code>for</code>:
+    with <code>cognito:groups</code>, <code>for editors</code> admits a token whose
+    groups list <code>editors</code>, and <code>role</code> is then a claim like any
+    other.</li>
+  <li><b>A person, not an anonymous sign-in.</b> Supabase's anonymous users have
+    <code>role: authenticated</code> too. <code>$jwt.is_anonymous = false</code> is true
+    only of a token that says so, and a rule that asks it does not apply to one that
+    says nothing.</li>
+  <li><b>Admins are rows.</b> The staff rule asks a collection, and works with any
+    provider because it asks nothing of the token but <code>sub</code>. <code>staff read
+    where user = $jwt.sub</code> lets the inner <code>get</code> see the token's own
+    row and no one else's; a rule's inner <code>get</code> reads what the token's own
+    would (<a href="/docs/http-access#scoped-access">Rules that read another
+    collection</a>).</li>
+  <li><b>One provider to a database.</b> The file above has every provider's section to
+    be tried against a server for each; a database serves the one it trusts, and carries its
+    section.</li>
+</ul>
+
+<h2 id="expiry">Expiry</h2>
+
+<p>A token is good until its <code>exp</code> and the server asks no one
+whether it was revoked. Keep tokens short, and for a person to turn away
+sooner, make it a row and let every rule that grants them anything ask for
+it:</p>
+
+<pre data-lang="text" data-label="policy-ban.txt"># A token is good until its `exp`, and the server asks no one whether it was
+# revoked. A person to turn away sooner is a row, and every rule that grants
+# them anything asks for it: they read `banned` for their own row alone, so
+# the rule sees whether it is there.
+notes         read,write                  where owner = $jwt.sub and $jwt.sub not in (get banned select user)
+banned        read                        where user = $jwt.sub</pre>
+
+<pre data-lang="text">bob reads                                  [{"title":"bob note"}] [200]
+bob reads, banned, the same token          [] [200]
+bob writes, banned                         {"error":"the document is outside what this token may write to `notes`"} [403]
+alice reads                                [{"title":"alice note"}] [200]</pre>
+
+<ul>
+  <li><b>Short tokens are normal.</b> A Clerk JWT template lives 60 seconds
+    by default. <code>FenecHttp</code> holds the token it was made with, so an
+    app that gets a fresh one per request makes a client per token
+    (<code>connect</code> opens no connection), and one that keeps a client
+    makes a new one when its provider refreshes.</li>
+  <li><b>A stream ends at its token's <code>exp</code></b>, with <code>event:
+    error</code> and <code>{"error":"the token has expired","status":401}</code>:
+    the client fetches a fresh token and opens the stream again. A member
+    taken off a team stops hearing the team no later than that.</li>
+  <li><b><code>--jwt-max-age &lt;s&gt;</code></b> refuses a token whose
+    <code>exp</code> lies further ahead than that: set to 3600, a provider
+    configured for day-long tokens is refused, and the fix is at the provider,
+    where the lifetime is set.</li>
+  <li><b>The ban is read at every statement</b>, so it takes hold on the next
+    one, whatever the token's age. It is the same for a subscription: a
+    scoped one is bound again when the collection its rules read is
+    written.</li>
+</ul>
+
+<h2 id="tenants">One database a tenant</h2>
+
+<p>On a <code>--dir</code> node (<a href="/docs/sharding">Tenants and
+sharding</a>) a token reaches <code>/t/&lt;tenant&gt;/</code> only when its
+<code>tenant</code> claim names the tenant, as a text or a list holding it. The
+policy is the node's, not a tenant's: <code>owner = $jwt.sub</code> would
+match the same user in every tenant's file, so a token that names none is
+refused on such a node, unless it is started with
+<code>--jwt-unbound-tenants</code>. <code>--jwt-tenant-claim &lt;name&gt;</code>
+reads another claim than <code>tenant</code>: Auth0's <code>org_id</code>
+below, a claim you add to Clerk's session token or Cognito's.</p>
+
+<pre data-lang="text">-- the claim `tenant`, which Clerk's session token carries once customized
+alice, token for acme, asks acme               [{"title":"acme note"}] [200]
+alice, token for acme, asks globex             {"error":"this token is for another tenant"} [403]
+a token naming no tenant, asks acme            {"error":"this token names no tenant, and this node serves tenants"} [403]
+-- --jwt-tenant-claim org_id, which Auth0 puts in a token for an organization
+alice, token for org_acme, asks org_acme       [{"title":"org_acme note"}] [200]
+alice, token for org_acme, asks org_globex     {"error":"this token is for another tenant"} [403]
+a token naming no tenant, asks org_acme        {"error":"this token names no tenant, and this node serves tenants"} [403]</pre>
+
+<ul>
+  <li><b>The tenant check comes before the tenant is looked up</b>, so a
+    refused token learns nothing of which tenants exist. It holds on every
+    route under the prefix, streams and <code>/_changes</code> among them.</li>
+  <li><b>A tenant is the unit of isolation</b>; rows inside it are the
+    policy's. A person in two organisations carries both in a list.</li>
+</ul>
+
+<p>Next: <a href="/docs/files">files in S3 or R2</a> with the same tokens, and
+<a href="/docs/functions">functions and webhooks</a> for reacting to
+writes.</p>

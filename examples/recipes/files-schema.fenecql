@@ -1,0 +1,1 @@
+create collection files (owner text @hash, name text, type text, size int, state text @hash, created timestamp @sorted)

@@ -1,0 +1,8 @@
+{
+  "name": "signup-function",
+  "main": "index.mjs",
+  "compatibility_date": "2026-10-01",
+  // Where fenec-server is. The key is a secret, not a var: `wrangler secret put
+  // SERVICE_KEY`, and in `wrangler dev` a line of .dev.vars.
+  "vars": { "FENEC_URL": "https://db.example.com" }
+}
