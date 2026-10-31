@@ -362,6 +362,9 @@ impl SortedIndex {
     pub fn bound(ty: &DataType, fold: Option<CaseFold>, v: &Value) -> Option<Key> {
         None
     }
+    pub fn by_kind(ty: &DataType, op: crate::query::CmpOp, v: &Value) -> Option<bool> {
+        None
+    }
     pub fn range_ids(&self, r: &Range, cap: usize) -> Option<Vec<DocId>> {
         match *self {}
     }
@@ -429,6 +432,9 @@ impl CompositeIndex {
         match *self {}
     }
     pub fn literal(&self, part: usize, v: &Value) -> Option<Vec<u8>> {
+        match *self {}
+    }
+    pub fn part_type(&self, part: usize) -> Option<DataType> {
         match *self {}
     }
     pub fn narrow(

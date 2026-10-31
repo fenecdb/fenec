@@ -350,9 +350,14 @@ scoped poll's tag digests its answer (`content_tag`), a scoped `match`
 scores its rows alone (`Match::within`), and the algorithm is the key's,
 never the token's. A claim held as `null`, `""` or a value its rule cannot
 compare (`usable`) is a claim the token lacks: the rule naming it does
-not apply and no filter is bound to it. A tenant claim naming no tenant
-reaches none, a `sub` of `""` is no subject, and a policy writing a `$<n>`
-of its own is refused at startup.
+not apply and no filter is bound to it. A claim a rule orders by holds
+the other side to its kind under any number of `not`s (`kind_held`), a row
+with no value answering as the rule written out, and an inner `get`'s rules
+are bound for the `not`s it stands under (`hold`); one inside a call or
+arithmetic -- `like`'s pattern aside -- or compared in order inside a
+value, is refused at startup (`claims_held`). A tenant claim naming no
+tenant reaches none, a `sub` of `""` is no subject, and a policy writing a
+`$<n>` of its own is refused at startup.
 
 **[A field a read rule withholds is held out of what a statement
 does.](docs/design/access.md#field-lists)** `fields::hold` and
@@ -709,7 +714,9 @@ stays `eval`: an error at the first row, never over none.
 
 **[`@sorted` must give the scan's answer, row for
 row.](docs/design/indexes.md#sorted)** Keys order as `Value::cmp_value`,
-`null` and `NaN` apart, ties in id order.
+`null` and `NaN` apart, ties in id order; a literal of another kind than a
+typed field's -- or part's -- is no bound or none (`SortedIndex::by_kind`),
+and a time claim's `or` edge is folded by the field's type (`fold_kinds`).
 
 **[An index over several fields is its parts' bytes laid end to
 end](docs/design/indexes.md#composite-indexes)** (`composite.rs`), a part's

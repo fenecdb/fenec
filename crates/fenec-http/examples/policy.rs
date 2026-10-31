@@ -1,6 +1,7 @@
 //! What a scoped token's rules cost: `make policy-bench`
 //! (`cargo run --release -p fenec-http --example policy -- [ROUNDS]
-//! [SIDE,SIDE...]`, `-- streams [N...]` or `-- beats [M...]`).
+//! [SIDE,SIDE...]`, `-- streams [N...]`, `-- beats [M...]` or `-- ranges
+//! [N...]`).
 //!
 //! The same `set` -- a lease moved on and a counter counted, a row of the
 //! token's own -- under the server's token and under a courier's, whose
@@ -46,6 +47,14 @@
 //! `beats` is examples/dispatch's beat beside M customers following their
 //! couriers: on the order (`courier_loc`), or on `positions` through such
 //! a rule.
+//!
+//! `ranges` reads an ordered index's range over N rows -- a count, and a
+//! page of twenty off its top -- under the server's token, the bound
+//! written, and under a token whose rule orders by a claim (`files read
+//! where level <= $jwt.clearance`), in process and in turns: the guard
+//! holding the field to the claim's kind must leave the range exact. Then
+//! the same over an index of two fields, `(team, level) @sorted`, under
+//! `team = $jwt.team and level <= $jwt.clearance`.
 
 use fenec_core::prelude::*;
 use fenec_http::access::{self, Access, CheckPlugin, Who};
@@ -940,6 +949,7 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("streams") => return streams(&counts(&[10, 100]), 20),
         Some("beats") => return beats(&counts(&[10, 50, 200]), 20),
+        Some("ranges") => return ranges(&counts(&[20_000, 200_000]), 400),
         _ => {}
     }
     let rounds: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(20_000);
@@ -951,4 +961,115 @@ fn main() {
     http(rounds, &only);
     read_engine((rounds / 10).max(200), &only);
     read_http(rounds, &only);
+}
+
+/// `ranges`: a count and a page over an ordered index's range under the
+/// server's token, the bound written, and a token whose rule orders by a
+/// claim, a tenth of the rows each, in process and in turns -- over an
+/// index of one field, then of two, a fourth of the rows each a team's.
+fn ranges(sizes: &[usize], rounds: usize) {
+    for (index, team) in [("level int @sorted", ""), ("level int", "t1")] {
+        for &n in sizes {
+            ranges_over(n, index, team, rounds);
+        }
+    }
+}
+
+fn ranges_over(n: usize, index: &str, team: &str, rounds: usize) {
+    {
+        let mut db = Database::new();
+        let made = format!("create collection files (name text, team text, {index})");
+        db.execute(&fenec_ql::parse_one(&made).unwrap()).unwrap();
+        if !team.is_empty() {
+            let two = "create index on files (team, level) @sorted";
+            db.execute(&fenec_ql::parse_one(two).unwrap()).unwrap();
+        }
+        for from in (0..n).step_by(10_000) {
+            let docs: Vec<String> = (from..(from + 10_000).min(n))
+                .map(|i| format!("{{name: \"n{i}\", team: \"t{}\", level: {i}}}", i % 4))
+                .collect();
+            let put = format!("put files [{}]", docs.join(", "));
+            db.execute(&fenec_ql::parse_one(&put).unwrap()).unwrap();
+        }
+        let clearance = n / 10;
+        let (rule, written) = match team {
+            "" => ("files read where level <= $jwt.clearance", String::new()),
+            t => (
+                "files read where team = $jwt.team and level <= $jwt.clearance",
+                format!("team = \"{t}\" and "),
+            ),
+        };
+        let a = Access::new(SECRET, rule).unwrap();
+        let token = a
+            .mint(&format!(
+                r#"{{"sub":"c1","team":"{team}","clearance":{clearance}}}"#
+            ))
+            .unwrap();
+        let scoped = Who::Scoped(Arc::new(a.scope(&token, 1).unwrap()));
+        for (what, root, claim) in [
+            (
+                "a count",
+                format!("get files where {written}level <= {clearance} count"),
+                "get files count".to_string(),
+            ),
+            (
+                "a page of 20 off its top",
+                format!("get files where {written}level <= {clearance} order level desc limit 20"),
+                "get files order level desc limit 20".to_string(),
+            ),
+        ] {
+            let sides = [
+                (
+                    "server token",
+                    Who::Full,
+                    fenec_ql::parse_one(&root).unwrap(),
+                ),
+                (
+                    "claim",
+                    scoped.clone(),
+                    fenec_ql::parse_one(&claim).unwrap(),
+                ),
+            ];
+            let (mut a, mut b) = (String::new(), String::new());
+            answered(&sides[0].1, &db, &sides[0].2, &[], &mut a);
+            answered(&sides[1].1, &db, &sides[1].2, &[], &mut b);
+            assert_eq!(a, b, "{what}");
+            let mut times = vec![Vec::new(); sides.len()];
+            let mut out = String::new();
+            for round in 0..rounds {
+                for k in 0..sides.len() {
+                    let side = (k + round) % sides.len();
+                    let t = Instant::now();
+                    for _ in 0..TURN / 10 {
+                        answered(&sides[side].1, &db, &sides[side].2, &[], &mut out);
+                    }
+                    times[side].push(t.elapsed().as_nanos() as f64 / (TURN / 10) as f64);
+                }
+            }
+            println!(
+                "\n{what} over a range of {} of {n} rows ({}), in process, the median of \
+                 {rounds} turns of {}:",
+                if team.is_empty() {
+                    clearance + 1
+                } else {
+                    clearance / 4 + 1
+                },
+                if team.is_empty() {
+                    "level @sorted"
+                } else {
+                    "(team, level) @sorted"
+                },
+                TURN / 10
+            );
+            let base = pct(&mut times[0], 0.5);
+            for (k, s) in sides.iter().enumerate() {
+                let f = pct(&mut times[k], 0.5);
+                println!(
+                    "  {:<14} {f:>9.0} ns   ({:+.0} ns against the server's token)",
+                    s.0,
+                    f - base
+                );
+            }
+        }
+    }
 }

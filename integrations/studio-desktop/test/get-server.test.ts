@@ -16,14 +16,20 @@ after(() => rmSync(work, { recursive: true, force: true }));
 const TRIPLE = "aarch64-apple-darwin";
 const sha = (file: string) => execFileSync("shasum", ["-a", "256", file]).toString().split(" ")[0]!;
 
-/** A release `version` whose server prints `help` for --help. */
-function release(version: string, help: string) {
+const SHELL_HELP = "usage: fenec backup <primary> <dir>  fenec verify <dir>  each takes --key-file <path>";
+
+/** A release `version` whose server prints `help` for --help, and whose shell prints `shellHelp` for `backup --help` (none: no shell in it). */
+function release(version: string, help: string, shellHelp: string | null = SHELL_HELP) {
 	const dir = join(work, "releases", `v${version}`);
 	const stage = join(work, `stage-${version}`, `fenec-v${version}-${TRIPLE}`);
 	mkdirSync(dir, { recursive: true });
 	mkdirSync(stage, { recursive: true });
 	writeFileSync(join(stage, "fenec-server"), `#!/bin/sh\necho '${help}'\n`);
 	chmodSync(join(stage, "fenec-server"), 0o755);
+	if (shellHelp !== null) {
+		writeFileSync(join(stage, "fenec"), `#!/bin/sh\necho '${shellHelp}'\n`);
+		chmodSync(join(stage, "fenec"), 0o755);
+	}
 	const asset = `fenec-v${version}-${TRIPLE}.tar.gz`;
 	execFileSync("tar", ["-czf", join(dir, asset), "-C", join(work, `stage-${version}`), `fenec-v${version}-${TRIPLE}`]);
 	// Another asset first, as a real SHA256SUMS lists many.
@@ -46,7 +52,26 @@ test("a release's asset is installed once its SHA-256 matches the release's own"
 	assert.ok(existsSync(out));
 	assert.match(r.stdout, /matches the release's SHA256SUMS/);
 	assert.match(execFileSync(out).toString(), /--studio/);
+	assert.match(execFileSync(join(work, "ok", "fenec")).toString(), /fenec verify/, "the shell beside it, from the same asset");
 	assert.ok(!existsSync(`${out}.new`), "no staging file left behind");
+	assert.ok(!existsSync(join(work, "ok", "fenec.new")));
+});
+
+test("a release whose shell cannot verify or seal backups is refused, and installs neither", () => {
+	release("9.0.6", "usage: fenec-server --file <path> --studio --exit-on-stdin-close", "usage: fenec backup <primary> <file>");
+	const out = join(work, "oldshell", "fenec-server");
+	const r = get("9.0.6", out);
+	assert.notEqual(r.status, 0);
+	assert.match(r.stderr, /no `fenec verify`/);
+	assert.ok(!existsSync(out));
+	assert.ok(!existsSync(join(work, "oldshell", "fenec")));
+});
+
+test("a release that carries no shell is refused", () => {
+	release("9.0.7", "usage: fenec-server --file <path> --studio --exit-on-stdin-close", null);
+	const r = get("9.0.7", join(work, "noshell", "fenec-server"));
+	assert.notEqual(r.status, 0);
+	assert.match(r.stderr, /holds no fenec shell/);
 });
 
 test("a v in front of the version is fine", () => {

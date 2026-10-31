@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { serverEnvironment } from "../src/bun/env.ts";
+import { childEnvironment, serverEnvironment } from "../src/bun/env.ts";
 
 test("the server gets the few variables a process needs and the token, and nothing else", () => {
 	const given = serverEnvironment(
@@ -32,4 +32,15 @@ test("the server gets the few variables a process needs and the token, and nothi
 
 test("a variable that is not set is not passed as the text 'undefined'", () => {
 	assert.deepEqual(serverEnvironment({ HOME: undefined, PATH: "/bin" }, "t"), { PATH: "/bin", FENEC_HTTP_TOKEN: "t" });
+});
+
+test("the replication token a backup asks with is the app's, and none is none", () => {
+	const env = { PATH: "/bin", FENEC_REPLICATION_TOKEN: "an old one", FENEC_KEY_FILE: "/tmp/leak.key" };
+	assert.deepEqual(serverEnvironment(env, "t", "r"), { PATH: "/bin", FENEC_HTTP_TOKEN: "t", FENEC_REPLICATION_TOKEN: "r" });
+	// Under --sync off the server refuses one, so it is given none, not the shell's.
+	assert.deepEqual(serverEnvironment(env, "t", null), { PATH: "/bin", FENEC_HTTP_TOKEN: "t" });
+	// The shell is given the allowlist and what is named, and never a key file of the app's environment.
+	assert.deepEqual(childEnvironment(env, { FENEC_REPLICATION_TOKEN: "r" }), { PATH: "/bin", FENEC_REPLICATION_TOKEN: "r" });
+	assert.deepEqual(childEnvironment(env, {}), { PATH: "/bin" });
+	assert.deepEqual(childEnvironment(env, { FENEC_REPLICATION_TOKEN: "" }), { PATH: "/bin" }, "an empty secret is none, as the shell reads it");
 });

@@ -172,7 +172,12 @@ impl Node {
             }
         }
         let status = heard.get(9..12).and_then(|s| s.parse().ok()).unwrap_or(0);
-        (status, heard)
+        // What came after the head, as `call` answers: the head's
+        // `X-Request-Id` is 16 random hex digits, which held "b1" in about
+        // one run of 15 and failed the check that Bob's row is not sent.
+        // With no head, all that came, for the failure to show.
+        let body = heard.split_once("\r\n\r\n").map_or(&*heard, |(_, b)| b);
+        (status, body.to_string())
     }
 
     /// MCP's `query` tool.

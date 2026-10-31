@@ -144,6 +144,28 @@ taken and taken again on a reload, its token in no storage, another
 token's session in `sessionStorage` passed over, a refused token, and a
 session for another origin or not frozen sending no request.
 
+The desktop app also serves a file to other apps and backs it up, with
+nothing of the format written by the app: a new file is made by a server
+started on it for a moment, an image is `fenec backup`'s, a file from one is
+`fenec restore`'s (the shell is bundled beside the server). A served
+database's window is a window on that server, handed the same session, so a
+file has one server of the app's at a time, and `<file>.lock` turns away
+another program's. Its token is made once and kept in the Keychain sealed for
+the file's path, reaching the server in its environment as a window's does;
+the server watches its stdin like every other the app starts, so it stops
+with the app, and a relaunch lists it stopped rather than starting it: a
+login item would outlive the app with nobody holding its stdin and its token
+where launchd reads it. Every server the app starts carries a replication
+token in its environment and `--replication-buffer 1`, since a backup speaks
+the replication stream and takes an image, not the writes a lagging replica
+is sent (under `--sync off`, which refuses the token, a backup is refused). A
+port asked for is refused when anything answers on 127.0.0.1 there: the server
+binds with SO_REUSEADDR, under which macOS let a second server bind
+127.0.0.1:P beside a first's 0.0.0.0:P, and the app reaches its servers on
+127.0.0.1 with the token. `fenec restore` wrote over the file at its output
+while a server served it (exit 0), so the app restores into a name of its own
+and puts the result in place with `link`, which refuses a name that is taken.
+
 ## MCP
 
 **An agent's MCP tool is a statement, held to the token as `/query` is**

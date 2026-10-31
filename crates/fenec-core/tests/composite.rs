@@ -219,6 +219,30 @@ fn filters() -> Vec<String> {
             "where meta.k = \"a\" and owner > 1",
             "where meta.k in [1, \"b\"]",
             "where title ~ \"x\"",
+            // A value of another kind than a typed part's: true of every
+            // value (no bound) or of none (no span), on the part an
+            // equality fixes, the part ranged and a later one.
+            "where owner = 2 and owner > true",
+            "where owner = 2 and owner < \"\"",
+            "where owner = 2 and owner >= \"\"",
+            "where owner >= 1 and owner > true",
+            "where owner <= \"top\" and owner >= \"\"",
+            "where owner > true",
+            "where owner = 2 and created <= \"2026-01-01\" and created > true",
+            "where owner = 2 and created <= \"top\"",
+            "where owner = 2 and created >= \"\"",
+            "where owner in [1, 2] and created < \"\" and created > true",
+            "where owner = 2 and (created >= \"\" or created >= \"0000-01-01\") \
+             and created <= \"2026-01-01\"",
+            "where status = \"open\" and score > true and score < \"\"",
+            "where status = \"open\" and score >= \"\"",
+            "where status = \"open\" and (status >= \"\" or status >= \"0000-01-01\")",
+            "where status <= \"2026-01-01\" and (status >= \"\" or status >= \"0000-01-01\")",
+            "where status = \"open\" and created > true",
+            "where flag = true and name >= \"\" and name < \"zz\"",
+            "where flag = true and name > 5",
+            "where meta.k > true and meta.k < \"\"",
+            "where meta.k <= \"b\" and (meta.k >= \"\" or meta.k >= \"0000-01-01\")",
         ]
         .map(String::from),
     );
@@ -464,6 +488,34 @@ fn explain_names_the_index_the_prefix_and_the_range() {
         !p.contains("order: walked"),
         "an `in`'s part is not one value: {p}"
     );
+    // A comparison with a value of another kind than a typed part's is
+    // true of every value or of none: no bound, or no span, and the plan
+    // and its count are the comparison's absence's -- a scoped token's
+    // rule holding a claim to its kind ANDs such edges in.
+    for (with, without) in [
+        (
+            "get c where owner = 2 and created <= \"2026-01-01\" and created > true count",
+            "get c where owner = 2 and created <= \"2026-01-01\" count",
+        ),
+        (
+            "get c where owner = 2 and owner < \"\" and owner > true count",
+            "get c where owner = 2 count",
+        ),
+        (
+            "get c where status = \"open\" and score >= 0 and score < \"\" count",
+            "get c where status = \"open\" and score >= 0 count",
+        ),
+        (
+            "get c where owner = 2 and (created >= \"\" or created >= \"0000-01-01\") \
+             and created <= \"2026-01-01\" count",
+            "get c where owner = 2 and created >= \"0000-01-01\" and created <= \"2026-01-01\" \
+             count",
+        ),
+    ] {
+        assert_eq!(plan(&ix, with), plan(&ix, without), "{with}");
+    }
+    let p = plan(&ix, "get c where owner = 2 and created >= \"\" count");
+    assert!(p.contains("owner fixed, a range on created"), "{p}");
 }
 
 /// `NaN` compares equal to everything: a row holding one is apart, the

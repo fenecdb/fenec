@@ -3,8 +3,8 @@
 //!
 //! A server's `--http-token` is all or nothing. With `--jwt-secret` it also
 //! takes HS256 JSON Web Tokens -- with `--jwt-keys`, those a JWKS file's
-//! keys verify, HS256 and RS256 (below) -- and a policy file says what each
-//! may do,
+//! keys verify, HS256, RS256 and ES256 (below) -- and a policy file says
+//! what each may do,
 //! collection by collection, down to the rows -- the way PostgreSQL's row
 //! level security lets a browser talk to the database directly:
 //!
@@ -113,9 +113,13 @@
 //! token holds as `null`, as `""`, as an object, as a list where the rule
 //! reads one value, or as a list holding any of those ([`usable`]): bound,
 //! `owner = $jwt.sub` given `null` read every row with no owner. A rule
-//! only grants, so one that does not apply grants nothing. The tenant claim
-//! is the one whose absence widens (`--jwt-unbound-tenants`): held as a
-//! value naming no tenant, it reaches none. A `sub` of `""` is no subject.
+//! only grants, so one that does not apply grants nothing. A claim a rule
+//! orders by (`level <= $jwt.clearance`) holds the other side to its kind,
+//! under a `not` too ([`kind_held`]); one inside a call or a sum, or in
+//! order inside a value, is refused at startup ([`claims_held`]). The
+//! tenant claim is the one whose absence widens (`--jwt-unbound-tenants`):
+//! held as a value naming no tenant, it reaches none. A `sub` of `""` is no
+//! subject.
 //!
 //! **A rule may read another collection** through `in (get ...)`, its
 //! claims bound inside the inner `get` as anywhere in the filter:
@@ -158,8 +162,9 @@
 //! tell every user the ids everyone else writes (see `sse`).
 //!
 //! **Keys.** A JWKS file holds the keys, `{"keys": [...]}` as an identity
-//! provider publishes it: `oct` keys verify HS256 and `RSA` keys RS256, so
-//! a token an identity provider signs is taken with its public keys alone.
+//! provider publishes it: `oct` keys verify HS256, `RSA` keys RS256 and
+//! `EC` keys on P-256 ES256, so a token an identity provider signs is taken
+//! with its public keys alone.
 //! A key's kind decides the algorithm it verifies, never the token: an
 //! RS256 key's modulus is public, and taken for an HS256 secret it would
 //! sign anything. A token naming a `kid` is checked against that key alone;
@@ -179,7 +184,7 @@
 //! nothing of them, as before. A refusal is 401 naming the check, never the
 //! token's value.
 
-use crate::crypto::{b64url_decode, b64url_encode, ct_eq, hmac_sha256, RsaKey};
+use crate::crypto::{b64url_decode, b64url_encode, ct_eq, hmac_sha256, P256Key, RsaKey};
 use fenec_core::prelude::*;
 use fenec_core::query::{eval, truthy, CmpOp, EvalCtx, Pick, RowAccess};
 use std::cell::RefCell;
@@ -223,13 +228,16 @@ pub struct Access {
     /// The JWKS file the keys are read again from as it changes.
     source: Option<Source>,
     rules: Vec<Rule>,
+    /// Whether a rule reads another collection: a token's rules are then
+    /// bound for a `not` as well ([`hold`]).
+    reaching: bool,
     /// The collections no scoped token updates or deletes in (`append-only`
     /// lines), `*` for every one.
     append_only: Arc<[String]>,
     /// Tokens already verified, by their text: a client sends the same one
     /// for as long as it lives, and an RS256 verification takes 38 us (166
-    /// in 32-bit limbs), an HS256 token's with its parses 2.9, a token
-    /// found here 0.5.
+    /// in 32-bit limbs), an ES256 one 145, an HS256 token's with its parses
+    /// 2.9, a token found here 0.5 (`make jwt-bench`).
     /// Emptied when the keys change, since a key taken out must take its
     /// tokens with it; `exp` and `nbf` are asked on every request.
     verified: [Mutex<HashMap<Box<str>, Claims>>; SHARDS],
@@ -381,14 +389,16 @@ enum KeyKind {
     Hmac(Vec<u8>),
     /// RS256.
     Rsa(RsaKey),
+    /// ES256.
+    Ec(P256Key),
 }
 
 const SHORT: &str = "a JWT secret shorter than 32 bytes can be guessed: HS256 needs 256 bits of it";
 
 /// The keys of a JWKS file: `{"keys": [...]}`, or the list alone. A key of
-/// another kind (`EC`, `OKP`) or for encryption (`"use": "enc"`) is passed
-/// over, as a verifier that does not know it would; a file with no key this
-/// server can use is refused.
+/// another kind (`OKP`), an `EC` key on another curve than P-256, or one for
+/// encryption (`"use": "enc"`) is passed over, as a verifier that does not
+/// know it would; a file with no key this server can use is refused.
 fn read_jwks(text: &str) -> std::result::Result<Vec<Jwk>, String> {
     let t = text.trim();
     let list = if t.starts_with('[') {
@@ -430,6 +440,8 @@ fn read_jwks(text: &str) -> std::result::Result<Vec<Jwk>, String> {
         }
         let kid = text("kid").map(str::to_string);
         let alg = text("alg");
+        // An `EC` key on P-384 or P-521 is ES384's or ES512's, passed over.
+        let p256 = text("crv") == Some("P-256");
         let kind = match text("kty") {
             Some("oct") if alg.is_none_or(|a| a == "HS256") => {
                 let k = bytes("k")?;
@@ -442,12 +454,16 @@ fn read_jwks(text: &str) -> std::result::Result<Vec<Jwk>, String> {
                 RsaKey::new(&bytes("n")?, &bytes("e")?)
                     .ok_or("an RSA key of 2048 bits at the least and an odd exponent from 3")?,
             ),
+            Some("EC") if p256 && alg.is_none_or(|a| a == "ES256") => KeyKind::Ec(
+                P256Key::new(&bytes("x")?, &bytes("y")?)
+                    .ok_or("an EC key's `x` and `y` must be a point of P-256, 32 bytes each")?,
+            ),
             _ => continue,
         };
         keys.push(Jwk { kid, kind });
     }
     if keys.is_empty() {
-        return Err("no HS256 or RS256 key in the JWKS file".into());
+        return Err("no HS256, RS256 or ES256 key in the JWKS file".into());
     }
     Ok(keys)
 }
@@ -633,6 +649,7 @@ impl Access {
         Ok(Access {
             keys: RwLock::new(Arc::new(keys)),
             source,
+            reaching: rules.iter().any(|r| !r.reads.is_empty()),
             rules,
             append_only: append_only.into(),
             verified: Default::default(),
@@ -734,9 +751,11 @@ impl Access {
             .iter()
             .find_map(|k| match &k.kind {
                 KeyKind::Hmac(s) => Some((k.kid.as_deref(), s)),
-                KeyKind::Rsa(_) => None,
+                KeyKind::Rsa(_) | KeyKind::Ec(_) => None,
             })
-            .ok_or("no HS256 key to sign with: an RS256 key's private half is its owner's")?;
+            .ok_or(
+                "no HS256 key to sign with: an RS256 or ES256 key's private half is its owner's",
+            )?;
         let mut head = String::from(r#"{"alg":"HS256","typ":"JWT""#);
         if let Some(kid) = kid {
             head.push_str(r#","kid":"#);
@@ -749,8 +768,9 @@ impl Access {
         Ok(format!("{head}.{body}.{}", b64url_encode(&sig)))
     }
 
-    /// The scope of a token, checked: HS256 or RS256, signed with one of the
-    /// keys, not expired and already valid, at `now` seconds since the epoch.
+    /// The scope of a token, checked: HS256, RS256 or ES256, signed with one
+    /// of the keys, not expired and already valid, at `now` seconds since
+    /// the epoch.
     pub fn scope(&self, token: &str, now: u64) -> std::result::Result<Scope, &'static str> {
         let claims = self.verify(token, now)?;
         let claim = |name: &str| claims.iter().find(|(k, _)| k == name).map(|(_, v)| v);
@@ -762,6 +782,10 @@ impl Access {
             _ => false,
         };
         let mut rules = Vec::new();
+        // Each rule bound for a place under an odd number of `not`s as
+        // well, where a rule reads another collection: what a `not ... in`
+        // over its collection is held to ([`hold`]).
+        let mut negated = Vec::new();
         'rules: for r in &self.rules {
             if r.role.as_deref().is_some_and(|role| !has_role(role)) {
                 continue;
@@ -793,10 +817,13 @@ impl Access {
                 text: r.text.clone(),
                 reaches: !r.reads.is_empty(),
             });
+            if self.reaching {
+                negated.push(r.filter.as_ref().map(|f| bind_held(f, &values, false)));
+            }
         }
         let reaching = rules.iter().any(|r| r.reaches);
         if reaching {
-            Scope::held(&mut rules);
+            Scope::held(&mut rules, negated);
         }
         // Anything but a text or a list of texts names no tenant: a number
         // or an object compared as text could be made to match. Only a
@@ -892,7 +919,11 @@ impl Access {
     }
 
     /// The claims of a token one of `keys` signed.
-    fn check(&self, token: &str, keys: &[Jwk]) -> std::result::Result<Claims, &'static str> {
+    fn check(
+        &self,
+        token: &str,
+        keys: &Arc<Vec<Jwk>>,
+    ) -> std::result::Result<Claims, &'static str> {
         let mut parts = token.split('.');
         let (Some(head), Some(body), Some(sig), None) =
             (parts.next(), parts.next(), parts.next(), parts.next())
@@ -918,10 +949,9 @@ impl Access {
             Some((_, Value::Text(a))) => Some(a.as_str()),
             _ => None,
         };
-        let rsa = match field("alg") {
-            Some("HS256") => false,
-            Some("RS256") => true,
-            _ => return Err("only HS256 and RS256 tokens are accepted"),
+        let alg = match field("alg") {
+            Some(a @ ("HS256" | "RS256" | "ES256")) => a,
+            _ => return Err("only HS256, RS256 and ES256 tokens are accepted"),
         };
         let kid = field("kid");
         let signed = format!("{head}.{body}");
@@ -931,9 +961,10 @@ impl Access {
             .iter()
             .filter(|k| kid.is_none() || k.kid.as_deref() == kid)
             .inspect(|_| named = true)
-            .any(|k| match (&k.kind, rsa) {
-                (KeyKind::Hmac(s), false) => ct_eq(&given, &hmac_sha256(s, signed.as_bytes())),
-                (KeyKind::Rsa(r), true) => r.verify_sha256(signed.as_bytes(), &given),
+            .any(|k| match (&k.kind, alg) {
+                (KeyKind::Hmac(s), "HS256") => ct_eq(&given, &hmac_sha256(s, signed.as_bytes())),
+                (KeyKind::Rsa(r), "RS256") => r.verify_sha256(signed.as_bytes(), &given),
+                (KeyKind::Ec(e), "ES256") => e.verify_sha256(signed.as_bytes(), &given),
                 _ => false,
             });
         if !good {
@@ -949,13 +980,29 @@ impl Access {
         // asked against. After the signature, so a token no key signed is
         // told nothing of what this server takes.
         self.demands.whom(&claims)?;
+        #[cfg(test)]
+        held::at(token);
         let mut kept = self.verified[shard(token)]
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if kept.len() >= KEPT {
-            kept.clear();
+        // Kept only if `keys` are still the keys. A reload writes the new
+        // keys and then empties every shard, so a token checked against
+        // the old ones and kept after its shard was emptied outlived the
+        // key it was signed with -- until its `exp`, its shard filling or
+        // the next change of keys (a review kept 3-5 of a removed key's
+        // tokens in 10 trials of 10). Under the shard's lock, keys still
+        // current mean a reload has yet to empty this shard, and will.
+        // `keys` holds the old list alive, so no new list shares its
+        // address. This request is answered under the keys it was checked
+        // against; the next one is held to the new keys.
+        let current = self.keys.read().unwrap_or_else(|e| e.into_inner());
+        if Arc::ptr_eq(keys, &current) {
+            drop(current);
+            if kept.len() >= KEPT {
+                kept.clear();
+            }
+            kept.insert(token.into(), claims.clone());
         }
-        kept.insert(token.into(), claims.clone());
         Ok(claims)
     }
 }
@@ -1095,6 +1142,9 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         let Statement::Select(sel) = stmt else {
             unreachable!("a get parses as a select")
         };
+        if let Some(f) = &sel.filter {
+            claims_held(f, true, &claims)?;
+        }
         // An inner `get` reads another collection, as the token's own `get`
         // would, and is answered before each statement under its lock
         // ([`Scope::bound`]): a document being written is tested on its
@@ -1142,6 +1192,101 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         role,
         reads,
     })
+}
+
+/// Refuses what a claim's kind cannot be held through ([`kind_held`]): a
+/// claim inside a call or an arithmetic -- `lower($jwt.c)`, `coalesce($jwt.c,
+/// 0)`, `least(level, $jwt.c)`, `$jwt.c + 1` -- whose result has a kind the
+/// rule cannot know until it runs, and which given a claim of another kind
+/// admitted every row (`least(level, "top")` is the level, every number
+/// ranking below every text), and an ordered comparison with a claim used
+/// as a value (`(level <= $jwt.c) = false`, a `case`'s condition), whose
+/// guard holds only where it is a condition, standing under `and`, `or` and
+/// `not` alone. `cond`: `e` is a condition. `claims` names them.
+fn claims_held(e: &Expr, cond: bool, claims: &[String]) -> std::result::Result<(), String> {
+    // The claim named by the last parameter `e` reads, for the refusal's words.
+    let named = |e: &Expr| {
+        let k = e.max_param().wrapping_sub(1);
+        claims.get(k).map_or("<claim>", String::as_str).to_string()
+    };
+    let operand = |x: &Expr| match x {
+        Expr::Param(_) => Ok(()),
+        x => claims_held(x, false, claims),
+    };
+    match e {
+        Expr::Param(_) | Expr::Field(_) | Expr::Lit(_) => Ok(()),
+        Expr::And(a, b) | Expr::Or(a, b) => {
+            claims_held(a, cond, claims)?;
+            claims_held(b, cond, claims)
+        }
+        Expr::Not(a) => claims_held(a, cond, claims),
+        Expr::Cmp(op, a, b) => {
+            let ordered = !matches!(op, CmpOp::Eq | CmpOp::Ne);
+            let claim = matches!(**a, Expr::Param(_)) || matches!(**b, Expr::Param(_));
+            if ordered && claim && !cond {
+                return Err(format!(
+                    "`$jwt.{}` is compared in order inside a value: an ordered comparison \
+                     with a claim is held to the claim's kind as a condition -- standing \
+                     under `and`, `or` and `not` -- not as a value another expression reads",
+                    named(e)
+                ));
+            }
+            operand(a)?;
+            operand(b)
+        }
+        // SQL's `like` and `ilike` (and `not like`, a `not` over one) are
+        // calls in the tree, but a claim as the pattern or the escape is
+        // compared in no order: a text matches it or not, and a claim of
+        // another kind is a type error, which refuses the read. Refused, a
+        // policy matching a home directory (`path like $jwt.home`) no
+        // longer started, naming a call it never wrote.
+        Expr::Call(name, args)
+            if matches!(name.as_str(), "like" | "ilike")
+                && args.len() > 1
+                && args[0].max_param() == 0 =>
+        {
+            claims_held(&args[0], false, claims)?;
+            args[1..].iter().try_for_each(operand)
+        }
+        Expr::Call(name, args) if args.iter().any(|a| a.max_param() > 0) => {
+            let a = args
+                .iter()
+                .find(|a| a.max_param() > 0)
+                .expect("one holds a claim");
+            Err(format!(
+                "`$jwt.{}` inside `{name}(...)`: a claim is compared as the token holds it, \
+                 and a call over it could hand the rule a value of any kind -- mint the claim \
+                 as the rule compares it",
+                named(a)
+            ))
+        }
+        Expr::Arith(_, a, b) if e.max_param() > 0 => {
+            let a = if a.max_param() > 0 { a } else { b };
+            Err(format!(
+                "`$jwt.{}` in arithmetic: a claim is compared as the token holds it, and a \
+                 sum over it could hand the rule a value of any kind -- mint the claim as the \
+                 rule compares it",
+                named(a)
+            ))
+        }
+        Expr::Call(_, args) => args.iter().try_for_each(|a| claims_held(a, false, claims)),
+        Expr::Arith(_, a, b) | Expr::Like(a, b) | Expr::Has(a, b) => {
+            operand(a)?;
+            operand(b)
+        }
+        Expr::IsNull(a) => operand(a),
+        Expr::In(x, items) => {
+            operand(x)?;
+            items.iter().try_for_each(operand)
+        }
+        Expr::InSelect(x, sel) => {
+            operand(x)?;
+            match &sel.filter {
+                Some(f) => claims_held(f, true, claims),
+                None => Ok(()),
+            }
+        }
+    }
 }
 
 /// Marks in `alone` each claim `e` reads as one value somewhere: anywhere
@@ -1563,15 +1708,39 @@ fn split_grants(grants: &str) -> std::result::Result<Vec<&str>, String> {
 
 /// `e` with each parameter replaced by the claim it stands for.
 fn bind(e: &Expr, values: &[Value]) -> Expr {
-    let b = |x: &Expr| Box::new(bind(x, values));
+    bind_held(e, values, true)
+}
+
+/// [`bind`] of `e` standing under an even number of `not`s (`pass`) or an
+/// odd one: an ordered comparison with a claim is held to the claim's kind
+/// ([`kind_held`]) as `cmp and held` under the first, and as `cmp or (not
+/// held and other is not null)` under the second, which the `not` above
+/// turns into `not cmp and (held or other is null)` -- so a value of another
+/// kind passes neither the comparison nor its negation, and a row with no
+/// value passes the negation as it passes `not cmp` alone. ANDed in under a
+/// `not` alone, the guard became an `or` there, and `not (score >
+/// $jwt.max)` admitted every text and list; negated whole, it held out the
+/// rows with no `level` that `not (level > $jwt.c)` admitted on main, and
+/// the server token's `not (level > 5)` admits.
+/// An inner `get`'s filter stands where its `in` does: under `not ... in`,
+/// a row of another kind is in its list and so held out.
+fn bind_held(e: &Expr, values: &[Value], pass: bool) -> Expr {
+    let b = |x: &Expr| Box::new(bind_held(x, values, pass));
     match e {
         Expr::Param(i) => Expr::Lit(values[*i].clone()),
         Expr::Field(_) | Expr::Lit(_) => e.clone(),
         Expr::And(x, y) => Expr::And(b(x), b(y)),
         Expr::Or(x, y) => Expr::Or(b(x), b(y)),
-        Expr::Not(x) => Expr::Not(b(x)),
+        Expr::Not(x) => Expr::Not(Box::new(bind_held(x, values, !pass))),
         Expr::IsNull(x) => Expr::IsNull(b(x)),
-        Expr::Cmp(op, x, y) => Expr::Cmp(*op, b(x), b(y)),
+        Expr::Cmp(op, x, y) => {
+            let cmp = Expr::Cmp(*op, b(x), b(y));
+            match kind_held(*op, x, y, values, pass) {
+                Some(held) if pass => Expr::And(Box::new(cmp), Box::new(held)),
+                Some(unheld) => Expr::Or(Box::new(cmp), Box::new(unheld)),
+                None => cmp,
+            }
+        }
         Expr::Like(x, y) => Expr::Like(b(x), b(y)),
         Expr::Has(x, y) => Expr::Has(b(x), b(y)),
         Expr::Arith(op, x, y) => Expr::Arith(*op, b(x), b(y)),
@@ -1585,7 +1754,7 @@ fn bind(e: &Expr, values: &[Value]) -> Expr {
                         Value::List(l) => out.extend(l.iter().cloned().map(Expr::Lit)),
                         v => out.push(Expr::Lit(v.clone())),
                     },
-                    i => out.push(bind(i, values)),
+                    i => out.push(bind_held(i, values, pass)),
                 }
             }
             Expr::In(b(x), out)
@@ -1593,12 +1762,101 @@ fn bind(e: &Expr, values: &[Value]) -> Expr {
         // An inner `get` holds its claims in its `where` alone ([`rule`]).
         Expr::InSelect(x, sel) => {
             let mut sel = (**sel).clone();
-            sel.filter = sel.filter.as_ref().map(|f| bind(f, values));
+            sel.filter = sel.filter.as_ref().map(|f| bind_held(f, values, pass));
             Expr::InSelect(b(x), Box::new(sel))
         }
-        Expr::Call(f, args) => {
-            Expr::Call(f.clone(), args.iter().map(|a| bind(a, values)).collect())
+        Expr::Call(f, args) => Expr::Call(
+            f.clone(),
+            args.iter().map(|a| bind_held(a, values, pass)).collect(),
+        ),
+    }
+}
+
+/// The lower edge of a text claim that reads as a time for a time, itself
+/// a time `time::parse` reads -- the first day of year 0 -- so that a time
+/// field orders against such a claim (`at <= $jwt.until`,
+/// `"2026-07-01T00:00:00Z"`) by time.
+const EARLIEST: &str = "0000-01-01";
+
+/// What holds the other side of `x op y` to the kind of the claim on one
+/// side, where `op` orders (`<`, `<=`, `>`, `>=`): `None` where it does not,
+/// or neither side is a claim. A filter orders two values of other kinds by
+/// kind (`cmp_value`) -- every bool below every number, every number below
+/// every text -- so `level <= $jwt.clearance` given the text `"top"`
+/// admitted every row of an `int` field, and `name >= $jwt.from` given `5`
+/// every row of a `text` one. Here a value of another kind is neither below
+/// the claim nor above it: the other side is held to the edges of the
+/// claim's kind, past which the other kinds rank -- `> true` and `< ""` for
+/// a number, `<= true` (and `>= false`) for a bool, `>= ""` and `<` the
+/// byte `0xFF` for a text: above every text, whose UTF-8 never holds that
+/// byte, and below every kind ranked above texts, bytes ranking with them
+/// (a vector literal, the next kind, is refused beside a json field).
+///
+/// A text claim that reads as a time is a time's kind as well, as
+/// `cmp_value` compares a time with a text by reading it: its lower edge
+/// is `>= ""` for a text and [`EARLIEST`] for a time, `other >= "" or
+/// other >= "0000-01-01"`. A time and an int order alike against every
+/// value but such a text, so no edge ANDed in says both: `>= "0000-01-01"`
+/// alone held a text field's `""`, `"-1"` and `"0.9"` out of `day <=
+/// "2026-01-01"`. The engine folds the `or` to the side the field's
+/// declared type reads (`fenec_core::engine`'s `fold_kinds`), so an
+/// ordered index still says it as a key.
+///
+/// Under an even number of `not`s (`held`) the edge on the side the
+/// comparison leaves open is enough, and this is it; under an odd one
+/// this is `not (both edges) and other is not null`, for the comparison
+/// to be ORed with ([`bind_held`]). A typed field's edges are true or false
+/// of every row, which `@sorted`'s range and an index over several fields
+/// take as no bound or none (`fenec_core::sorted::by_kind`), so the range
+/// stays exact. `=`, `!=` and `in` never take one kind for another
+/// (`cmp_value` is not `Equal` across kinds) and ask nothing more.
+fn kind_held(op: CmpOp, x: &Expr, y: &Expr, values: &[Value], held: bool) -> Option<Expr> {
+    // `other op claim`, or `claim op other` turned around: `below` where
+    // the other side is asked to be below the claim.
+    let lower = matches!(op, CmpOp::Lt | CmpOp::Le);
+    let upper = matches!(op, CmpOp::Gt | CmpOp::Ge);
+    let (other, claim, below) = match (x, y) {
+        _ if !lower && !upper => return None,
+        (o, Expr::Param(k)) => (o, &values[*k], lower),
+        (Expr::Param(k), o) => (o, &values[*k], upper),
+        _ => return None,
+    };
+    let blank = || Value::Text(String::new());
+    let (lo, hi) = match claim {
+        Value::Int(_) | Value::Float(_) => ((CmpOp::Gt, Value::Bool(true)), (CmpOp::Lt, blank())),
+        Value::Text(_) => ((CmpOp::Ge, blank()), (CmpOp::Lt, Value::Bytes(vec![0xFF]))),
+        Value::Bool(_) => (
+            (CmpOp::Ge, Value::Bool(false)),
+            (CmpOp::Le, Value::Bool(true)),
+        ),
+        _ => return None,
+    };
+    let bound = || Box::new(bind(other, values));
+    let edge = |(op, v): (CmpOp, Value)| Expr::Cmp(op, bound(), Box::new(Expr::Lit(v)));
+    let low = || {
+        let first = edge(lo.clone());
+        match claim {
+            Value::Text(t) if fenec_core::time::parse(t).is_ok() => {
+                let time = edge((CmpOp::Ge, Value::Text(EARLIEST.into())));
+                Expr::Or(Box::new(first), Box::new(time))
+            }
+            _ => first,
         }
+    };
+    match (held, below, claim) {
+        (false, ..) => {
+            let both = Expr::And(Box::new(low()), Box::new(edge(hi)));
+            let present = Expr::Not(Box::new(Expr::IsNull(bound())));
+            Some(Expr::And(
+                Box::new(Expr::Not(Box::new(both))),
+                Box::new(present),
+            ))
+        }
+        // Nothing ranks below a bool but `null`, which orders against
+        // nothing.
+        (true, true, Value::Bool(_)) => None,
+        (true, true, _) => Some(low()),
+        (true, false, _) => Some(edge(hi)),
     }
 }
 
@@ -1655,22 +1913,31 @@ fn granted(rules: &[Bound], collection: &str, op: u8) -> Option<Option<Expr>> {
     }
 }
 
-/// Each inner `get` in `e` held to the read rules of `rules` on the
+/// Each inner `get` in `e` held to the read rules of `pos` on the
 /// collection it reads, and the inner `get`s those bring held in turn
-/// ([`Scope::held`]).
-fn hold(rules: &[Bound], e: &mut Expr) {
-    let _ = e.each_subquery_mut(&mut |x| {
-        if let Expr::InSelect(_, sel) = x {
+/// ([`Scope::held`]) -- or of `neg`, the same rules bound for a place under
+/// an odd number of `not`s ([`bind_held`]), where the `get` stands so
+/// (`pass` false): a `not ... in`'s list. Its rules' ordered comparisons
+/// with a claim hold a row of another kind out of the list as a condition
+/// standing alone, and the list held out fewer rows: `author not in (get
+/// bans select author)` under `bans read where severity >= $jwt.min` read
+/// a post by an author banned with a `"high"` severity, which main held
+/// out. Bound for the `not`, the list keeps such a row.
+fn hold(pos: &[Bound], neg: &[Bound], e: &mut Expr, pass: bool) {
+    match e {
+        Expr::Not(x) => hold(pos, neg, x, !pass),
+        Expr::InSelect(_, sel) => {
+            let rules = if pass { pos } else { neg };
             sel.filter = match granted(rules, &sel.collection, READ) {
                 None => Some(Expr::Lit(Value::Bool(false))),
                 Some(read) => and(sel.filter.take(), read),
             };
             if let Some(f) = &mut sel.filter {
-                hold(rules, f);
+                hold(pos, neg, f, pass);
             }
         }
-        Ok(())
-    });
+        e => e.each_child_mut(&mut |c| hold(pos, neg, c, pass)),
+    }
 }
 
 /// Each inner `get` in `e` answered against `db` as the `in` list it is,
@@ -1987,6 +2254,24 @@ impl Scope {
         granted(&self.rules, collection, op)
     }
 
+    /// What [`Self::filter`] would answer, without making the filter:
+    /// `None` no access, `Some(false)` every row, `Some(true)` rows a
+    /// filter picks. Asked where only that is wanted: a `get` made the
+    /// filter twice, once to AND it in and once to see that there was one,
+    /// and a rule holding a claim to its kind (`kind_held`) copied two
+    /// comparisons more each time.
+    fn filtered(&self, collection: &str, op: u8) -> Option<bool> {
+        if op & (UPDATE | DELETE) != 0 && self.append_only(collection) {
+            return None;
+        }
+        let mut granting = self
+            .rules
+            .iter()
+            .filter(|r| r.ops & op != 0 && r.collection.as_deref().is_none_or(|c| c == collection));
+        let first = granting.next()?;
+        Some(first.using().is_some() && granting.all(|r| r.using().is_some()))
+    }
+
     /// Each reaching rule's inner `get`s held to the token's read rules on
     /// the collection each reads, at any depth -- the rules there may read
     /// further, which the ring check at startup bounds -- so that each is
@@ -1996,12 +2281,20 @@ impl Scope {
     /// gives a policy's subquery none of a table no policy grants: refused
     /// as missing, as the token's own `get` of it is, it would fail every
     /// read of `positions` over a collection the token is not to know of.
-    /// Done once a token, from the rules as bound to its claims.
-    fn held(rules: &mut [Bound]) {
+    /// Done once a token, from the rules as bound to its claims, and as
+    /// bound for an odd number of `not`s (`negated`, beside each), which a
+    /// `get` under `not ... in` is held to ([`hold`]).
+    fn held(rules: &mut [Bound], negated: Vec<Option<Expr>>) {
         let read: Vec<Bound> = rules.to_vec();
+        let mut unread = read.clone();
+        for (r, n) in unread.iter_mut().zip(negated) {
+            if n.is_some() {
+                r.filter = n;
+            }
+        }
         for r in rules.iter_mut().filter(|r| r.reaches) {
             if let Some(f) = &mut r.filter {
-                hold(&read, f);
+                hold(&read, &unread, f, true);
             }
             // A transition picks by what its row before can answer, its
             // inner `get`s held as the filter's are.
@@ -2168,7 +2461,7 @@ impl Scope {
         // naming them -- where `orders` does not exist for it.
         if let Some(n) = sel.flat.as_ref().and_then(|f| f.names.as_deref()) {
             for (_, c) in &n.tables {
-                if self.filter(c, READ).is_none() {
+                if self.filtered(c, READ).is_none() {
                     return Err(self.refused(c, "read"));
                 }
             }
@@ -2192,7 +2485,7 @@ impl Scope {
         // row told a user how many rows it could not read held a word --
         // alice's own memo scored 9.87, and 4.79 once bob had written 200
         // private ones holding it.
-        let held = matches!(self.filter(&sel.collection, READ), Some(Some(_)));
+        let held = self.filtered(&sel.collection, READ) == Some(true);
         if let Some(m) = sel.matcher.as_mut().filter(|_| held) {
             m.within = true;
         }
@@ -2801,6 +3094,70 @@ impl Plugin for CheckPlugin {
     }
 }
 
+/// A check held between its signature and keeping its token, for the
+/// test of a reload landing there: a token is held by its text, so no
+/// other test's checks meet the gate.
+#[cfg(test)]
+mod held {
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::Duration;
+
+    #[derive(Default)]
+    pub struct Gate {
+        /// Whether the check has arrived, and whether it may go on.
+        state: Mutex<(bool, bool)>,
+        changed: Condvar,
+    }
+
+    static HELD: Mutex<Vec<(String, Arc<Gate>)>> = Mutex::new(Vec::new());
+
+    /// Checks of `token` stop at the gate until it is released.
+    pub fn hold(token: &str) -> Arc<Gate> {
+        let gate = Arc::new(Gate::default());
+        HELD.lock()
+            .unwrap()
+            .push((token.to_string(), Arc::clone(&gate)));
+        gate
+    }
+
+    pub fn at(token: &str) {
+        let gate = HELD
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(t, _)| t == token)
+            .map(|(_, g)| Arc::clone(g));
+        if let Some(gate) = gate {
+            gate.state.lock().unwrap().0 = true;
+            gate.changed.notify_all();
+            gate.wait(|s| s.1);
+        }
+    }
+
+    impl Gate {
+        /// Waits for what must happen, bounded only so a broken test fails
+        /// rather than hangs.
+        fn wait(&self, until: impl Fn(&(bool, bool)) -> bool) {
+            let state = self.state.lock().unwrap();
+            let (state, timeout) = self
+                .changed
+                .wait_timeout_while(state, Duration::from_secs(60), |s| !until(s))
+                .unwrap();
+            drop(state);
+            assert!(!timeout.timed_out(), "the held check never moved");
+        }
+
+        pub fn arrived(&self) {
+            self.wait(|s| s.0);
+        }
+
+        pub fn release(&self) {
+            self.state.lock().unwrap().1 = true;
+            self.changed.notify_all();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2857,7 +3214,7 @@ mod tests {
         );
         assert_eq!(
             a.verify(&none, 1_000).unwrap_err(),
-            "only HS256 and RS256 tokens are accepted"
+            "only HS256, RS256 and ES256 tokens are accepted"
         );
         let early = a.mint(r#"{"sub":"alice","nbf":5000}"#).unwrap();
         assert!(a.verify(&early, 1_000).is_err());
@@ -2906,9 +3263,9 @@ mod tests {
         );
     }
 
-    /// A JWKS as an identity provider publishes it -- an EC key this server
-    /// passes over, an RSA key -- and tokens node:crypto signed with the
-    /// RSA key's private half.
+    /// A JWKS as an identity provider publishes it -- an EC key on P-256
+    /// (tests/es256.rs has its tokens), an RSA key -- and tokens
+    /// node:crypto signed with the RSA key's private half.
     #[test]
     fn an_identity_providers_keys_verify_its_tokens() {
         let mut lines = include_str!("jwks_vectors.txt").lines();
@@ -2975,6 +3332,51 @@ mod tests {
         ] {
             assert!(read_jwks(bad).is_err(), "{bad}");
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A reload landing between a check's signature and its keeping the
+    /// token: the token was kept after the reload emptied its shard, and a
+    /// key taken out went on verifying it from there.
+    #[test]
+    fn a_token_checked_across_a_reload_is_not_kept_past_it() {
+        let dir = std::env::temp_dir().join(format!("fenec-jwks-race-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("keys.json");
+        let oct = |kid: &str, byte: u8| {
+            let k = b64url_encode(&[byte; 32]);
+            format!(r#"{{"keys":[{{"kty":"oct","kid":"{kid}","k":"{k}"}}]}}"#)
+        };
+        std::fs::write(&path, oct("old", 1)).unwrap();
+        let a = Arc::new(Access::from_jwks(&path, "").unwrap());
+        let token = a.mint(r#"{"sub":"alice"}"#).unwrap();
+        let now = unix_now();
+
+        let gate = held::hold(&token);
+        let checking = {
+            let (a, token) = (Arc::clone(&a), token.clone());
+            std::thread::spawn(move || a.scope(&token, now).map(|_| ()))
+        };
+        // Its signature checked against the old key, the check waits to
+        // keep the token; the old key goes meanwhile.
+        gate.arrived();
+        std::fs::write(&path, oct("new", 2)).unwrap();
+        let later = SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert_eq!(a.keys(now + 1)[0].kid.as_deref(), Some("new"));
+        gate.release();
+        // Answered under the keys it was checked against, and kept by
+        // none: the next use meets the new keys.
+        assert!(checking.join().unwrap().is_ok());
+        assert_eq!(
+            a.scope(&token, now + 1).err(),
+            Some("no key has the token's kid")
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -3558,6 +3960,127 @@ mod tests {
         }
     }
 
+    /// An ordered comparison with a claim holds the other side to the
+    /// claim's kind: under an even number of `not`s on the side the
+    /// comparison leaves open, under an odd one -- `cmp or (not held and
+    /// other is not null)` -- by both edges. A text that reads as a time
+    /// takes a text's lower edge or a time's; `=` asks nothing more.
+    #[test]
+    fn an_ordered_claim_is_held_to_its_kind() {
+        let a = access(
+            "files read where level <= $jwt.c\n\
+             people read where $jwt.c < name\n\
+             notes read where owner = $jwt.c\n\
+             negated read where not (level > $jwt.c)\n",
+        );
+        let filter = |c: &str, collection: &str| {
+            let s = a
+                .scope(&a.mint(&format!(r#"{{"c":{c}}}"#)).unwrap(), 0)
+                .unwrap();
+            s.filter(collection, READ).unwrap().unwrap()
+        };
+        let lit = |v: Value| Box::new(Expr::Lit(v));
+        let edge = |op, v| Expr::Cmp(op, Box::new(Expr::Field("level".into())), lit(v));
+        let held = |e: Expr| match e {
+            Expr::And(_, held) => Some(*held),
+            Expr::Cmp(..) => None,
+            e => panic!("{e:?}"),
+        };
+        let blank = || Value::Text(String::new());
+        assert_eq!(
+            held(filter("5", "files")),
+            Some(edge(CmpOp::Gt, Value::Bool(true)))
+        );
+        assert_eq!(
+            held(filter("\"top\"", "files")),
+            Some(edge(CmpOp::Ge, blank()))
+        );
+        assert_eq!(
+            held(filter("\"2026-07-01T00:00:00Z\"", "files")),
+            Some(Expr::Or(
+                Box::new(edge(CmpOp::Ge, blank())),
+                Box::new(edge(CmpOp::Ge, Value::Text(EARLIEST.into())))
+            ))
+        );
+        assert_eq!(held(filter("true", "files")), None);
+        let name = |op, v| Expr::Cmp(op, Box::new(Expr::Field("name".into())), lit(v));
+        assert_eq!(held(filter("5", "people")), Some(name(CmpOp::Lt, blank())));
+        assert_eq!(
+            held(filter("\"b\"", "people")),
+            Some(name(CmpOp::Lt, Value::Bytes(vec![0xFF])))
+        );
+        assert_eq!(
+            held(filter("false", "people")),
+            Some(name(CmpOp::Le, Value::Bool(true)))
+        );
+        assert_eq!(held(filter("5", "notes")), None);
+        // Under a `not`: both edges, negated beside the comparison.
+        let Expr::Not(inner) = filter("5", "negated") else {
+            panic!("a not");
+        };
+        let both = Expr::And(
+            Box::new(edge(CmpOp::Gt, Value::Bool(true))),
+            Box::new(edge(CmpOp::Lt, blank())),
+        );
+        let cmp = Expr::Cmp(
+            CmpOp::Gt,
+            Box::new(Expr::Field("level".into())),
+            lit(Value::Int(5)),
+        );
+        let present = Expr::Not(Box::new(Expr::IsNull(Box::new(Expr::Field(
+            "level".into(),
+        )))));
+        assert_eq!(
+            *inner,
+            Expr::Or(
+                Box::new(cmp),
+                Box::new(Expr::And(
+                    Box::new(Expr::Not(Box::new(both))),
+                    Box::new(present)
+                ))
+            )
+        );
+    }
+
+    /// A claim whose kind a rule cannot hold -- inside a call or a sum, or
+    /// compared in order inside a value -- stops the server at startup;
+    /// one compared bare, under `and`, `or`, `not` or in an inner `get`'s
+    /// condition, is taken.
+    #[test]
+    fn a_claim_held_nowhere_is_refused_at_startup() {
+        for bad in [
+            "files read where level <= lower($jwt.c)",
+            "files read where coalesce($jwt.c, 0) >= level",
+            "files read where least(level, $jwt.c) = level",
+            "files read where owner = upper($jwt.sub)",
+            "files read where level < $jwt.c * 2",
+            "files read where (level <= $jwt.c) = true",
+            "files read where ((level <= $jwt.c) and x) = true",
+            "files read where (level <= $jwt.c) is null",
+            "files read where case when level <= $jwt.c then 1 else 0 end = 1",
+            "files read where id in (get other select x where y = lower($jwt.c))",
+            // `like`'s pattern is exempt as the claim it is, not a call
+            // over one; the text matched is no claim.
+            "files read where path like lower($jwt.home)",
+            "files read where $jwt.home like path",
+        ] {
+            assert!(Access::new(SECRET, bad).is_err(), "{bad}");
+        }
+        for good in [
+            "files read where level <= $jwt.c or not (level > $jwt.d)",
+            "files read where (level = $jwt.c) = true",
+            "files read where id in (get other select x where not (y > $jwt.c))",
+            "files read where room in [$jwt.rooms, 'lobby'] and $jwt.rooms has room",
+            "files read where level <= length(name)",
+            "files read where path like $jwt.home",
+            "files read where email ilike $jwt.domain",
+            "files read where path not like $jwt.home escape $jwt.esc",
+            "files read where id in (get other select x where name like $jwt.p)",
+        ] {
+            assert!(Access::new(SECRET, good).is_ok(), "{good}");
+        }
+    }
+
     /// A token for another app as an adversary would send one: a member
     /// given twice, an audience or issuer differing by case, Unicode form,
     /// a slash or white space, an `azp` that is no text beside a matching
@@ -3755,7 +4278,14 @@ mod tests {
             let e = Access::new(SECRET, bad).err().unwrap_or_default();
             assert!(e.contains(&format!("quote it: `{quoted}`")), "{bad}: {e}");
         }
-        assert!(Access::new(SECRET, "notes read where n = $jwt.n - 1").is_ok());
+        // Spaced, the dash is a minus after the claim `n` -- read so, and
+        // refused as a claim in arithmetic is (`claims_held`), not as a
+        // claim to quote.
+        let e = Access::new(SECRET, "notes read where n = $jwt.n - 1")
+            .err()
+            .unwrap_or_default();
+        assert!(e.contains("`$jwt.n` in arithmetic"), "{e}");
+        assert!(Access::new(SECRET, "notes read where n - 1 = $jwt.n").is_ok());
         assert!(Access::new(SECRET, r#"notes read where x = $jwt."x-hasura-user-id""#).is_ok());
     }
 

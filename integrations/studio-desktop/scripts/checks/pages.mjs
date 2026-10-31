@@ -7,7 +7,8 @@
 // by navigation rules, and a navigation anywhere else, a web page, a file, or
 // another of the app's pages, is refused. (sandbox.mjs holds a studio window.)
 import assert from 'node:assert/strict';
-import { assertClean, cmd, evalIn, file, lines, quit, startApp, step, waitFor, waitNone, waitNotice, log } from './lib.mjs';
+import { spawn } from 'node:child_process';
+import { EXE, REPORT, assertClean, cmd, evalIn, file, lines, quit, startApp, step, waitFor, waitNone, waitNotice, log } from './lib.mjs';
 
 assertClean('before');
 
@@ -69,6 +70,23 @@ step('a link out of an app page is not handed to the browser: only a studio wind
 const m = lines().length;
 await evalIn('launcher', `window.open("https://example.com/"); return 1`);
 await waitNone((l, i) => i >= m && l.what === 'external', 1200, 'a link from an app page was handed to the browser');
+
+step('the app\'s own pages run their bundle alone: their CSP refuses eval and inline script');
+for (const key of ['launcher', 'newdb']) {
+  const r = await evalIn(key, `try { new Function('return 1')(); return 'ran'; } catch (e) { return 'refused'; }`);
+  assert.equal(r.value, 'refused', `${key}: eval under the page's CSP`);
+  const inline = await evalIn(key, `window.__inlineRan = false; const s = document.createElement('script'); s.textContent = 'window.__inlineRan = true'; document.head.append(s); return window.__inlineRan`);
+  assert.equal(inline.value, false, `${key}: an inline script is not run`);
+}
+
+step('a second instance asks this one to show itself and quits, opening nothing');
+const k = lines().length;
+const second = spawn(EXE, [], { env: { ...process.env, FENEC_DESKTOP_REPORT: REPORT }, stdio: 'ignore' });
+const secondExit = new Promise((r) => second.on('exit', r));
+await waitFor((l, i) => i >= k && l.what === 'second-instance', 30000, 'the second instance found this one');
+await waitFor((l, i) => i >= k && l.what === 'instance-asked', 30000, 'this one was asked to show itself');
+await secondExit;
+assert.ok(!lines().slice(k).some((l) => l.what === 'ready'), 'the second instance booted nothing');
 
 step('quit');
 await quit(app);

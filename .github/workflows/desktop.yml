@@ -52,22 +52,38 @@ on:
     paths:
       - 'integrations/studio-desktop/**'
       - 'studio/**'
-      # The server the app bundles is built from these, and the studio's
-      # pages are embedded in it by fenec-http.
+      # The server and the shell the app bundles are built from these (each
+      # crate either binary depends on, and the lock that pins them), and the
+      # studio's pages are embedded in the server by fenec-http.
       - 'crates/fenec-server/**'
+      - 'crates/fenec-cli/**'
       - 'crates/fenec-http/**'
       - 'crates/fenec-core/**'
+      - 'crates/fenec-ql/**'
+      - 'crates/fenec-abi/**'
+      - 'crates/fenec-import/**'
+      - 'crates/fenec-wire/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.github/workflows/desktop.yml'
   push:
     branches: [main]
     paths:
       - 'integrations/studio-desktop/**'
       - 'studio/**'
-      # The server the app bundles is built from these, and the studio's
-      # pages are embedded in it by fenec-http.
+      # The server and the shell the app bundles are built from these (each
+      # crate either binary depends on, and the lock that pins them), and the
+      # studio's pages are embedded in the server by fenec-http.
       - 'crates/fenec-server/**'
+      - 'crates/fenec-cli/**'
       - 'crates/fenec-http/**'
       - 'crates/fenec-core/**'
+      - 'crates/fenec-ql/**'
+      - 'crates/fenec-abi/**'
+      - 'crates/fenec-import/**'
+      - 'crates/fenec-wire/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.github/workflows/desktop.yml'
   workflow_dispatch:
     inputs:
@@ -133,7 +149,7 @@ jobs:
           security list-keychains -d user -s "$RUNNER_TEMP/checks.keychain-db"
           security default-keychain -s "$RUNNER_TEMP/checks.keychain-db"
 
-      # The server (cargo build --release -p fenec-server), the release app,
+      # The server and the shell (scripts/get-server.sh), the release app,
       # the sources type-checked and the unit tests, the test variant, and the
       # checks. No signing variable is set here, so the build is unsigned.
       - name: Build and check
@@ -290,8 +306,8 @@ jobs:
 
       # What Gatekeeper will say on a Mac that has never seen this app, asked
       # here: the signature, the hardened runtime and the Developer ID on the
-      # bundled fenec-server (each its own grep: one is not the other), and the
-      # notarization ticket stapled to the app and to the DMG.
+      # bundled fenec-server and fenec shell (each its own grep: one is not the
+      # other), and the notarization ticket stapled to the app and to the DMG.
       - name: Hold the result to what Gatekeeper checks
         if: steps.have.outputs.available == 'true'
         run: |
@@ -299,10 +315,12 @@ jobs:
           cd integrations/studio-desktop
           app="build/stable-macos-arm64/fenec studio.app"
           codesign --verify --deep --strict --verbose=2 "$app"
-          codesign -dv --verbose=4 "$app/Contents/Resources/app/bin/fenec-server" > "$RUNNER_TEMP/server-signature.txt" 2>&1
-          cat "$RUNNER_TEMP/server-signature.txt"
-          grep -E 'flags=.*runtime' "$RUNNER_TEMP/server-signature.txt"
-          grep -F 'Authority=Developer ID Application' "$RUNNER_TEMP/server-signature.txt"
+          for bin in fenec-server fenec; do
+            codesign -dv --verbose=4 "$app/Contents/Resources/app/bin/$bin" > "$RUNNER_TEMP/$bin-signature.txt" 2>&1
+            cat "$RUNNER_TEMP/$bin-signature.txt"
+            grep -E 'flags=.*runtime' "$RUNNER_TEMP/$bin-signature.txt"
+            grep -F 'Authority=Developer ID Application' "$RUNNER_TEMP/$bin-signature.txt"
+          done
           spctl --assess --type execute --verbose=4 "$app"
           xcrun stapler validate "$app"
           for dmg in artifacts/*.dmg; do

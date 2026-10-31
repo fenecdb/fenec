@@ -142,7 +142,8 @@ deliberately with <code>--insecure</code>.</p>
 
 <p>With <code>--jwt-secret</code> (HS256, at least 32 bytes) or
 <code>--jwt-keys</code> (a JWKS file: <code>oct</code> keys for HS256,
-<code>RSA</code> keys for an identity provider's RS256, a token's
+<code>RSA</code> keys for an identity provider's RS256 and <code>EC</code>
+keys on P-256 for its ES256, a token's
 <code>kid</code> picking the key, the file read again as it changes) the
 server also takes JSON Web Tokens, each held to the rules of
 <code>--policy</code>: which collections, to read, insert, update or delete,

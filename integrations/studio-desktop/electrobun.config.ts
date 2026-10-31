@@ -33,7 +33,7 @@ export default {
 		name: test ? "fenec studio test" : "fenec studio",
 		identifier,
 		version,
-		description: "fenec studio as a desktop app: open a database file, or connect to a server.",
+		description: "fenec studio as a desktop app: make, open, serve and back up database files, or connect to a server.",
 		// A double-click on a .fenec file in Finder arrives as an `open-url`
 		// event with a file: URL (macOS only; Windows and Linux file
 		// associations are not implemented by Electrobun 2.0.4).
@@ -73,8 +73,10 @@ export default {
 			"src/newdb/index.html": "views/newdb/index.html",
 			"src/notice/index.html": "views/notice/index.html",
 			"src/ui/app.css": "views/ui/app.css",
-			// The server the app starts for a file: put here by scripts/get-server.sh.
+			// The server the app starts for a file, and the shell that takes,
+			// verifies and restores its backups: put here by scripts/get-server.sh.
 			"bin/fenec-server": "bin/fenec-server",
+			"bin/fenec": "bin/fenec",
 		},
 		mac: {
 			bundleCEF: false,

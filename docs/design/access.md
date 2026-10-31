@@ -31,11 +31,12 @@ the query run every time): the change counter's tag, and a 304 answered
 unrun, told it when anyone wrote to what it reads. The algorithm is the key's,
 never the token's: `--jwt-keys` reads a JWKS file, `oct` keys for HS256 and
 `RSA` keys (2048 bits up, `crypto::RsaKey`, 64-bit limbs: 166 us a check in
-32-bit ones, 38 now) for an identity provider's RS256, a `kid` picking the
-key; an RSA modulus taken for an HS256 secret would sign anything. The file
-is read again as it changes, looked at once a second, which is the rotation.
-A verified token is kept by its text (`verified`, 16 shards of 256, emptied
-when the keys change, `exp` asked each time): 0.27 us against 2.9 for HS256.
+32-bit ones, 38 now) for an identity provider's RS256 and `EC` keys on
+P-256 for its ES256 (below), a `kid` picking the key; an RSA modulus taken
+for an HS256 secret would sign anything. The file is read again as it
+changes, looked at once a second, which is the rotation. A verified token
+is kept by its text (`verified`, 16 shards of 256, emptied when the keys
+change, `exp` asked each time): 0.27 us against 2.9 for HS256.
 A token naming no `exp` is refused (`Demands::require_exp`,
 `--jwt-require-exp off` takes it), and `--jwt-max-age` bounds how far ahead
 one may lie; `mint` stamps an hour on claims naming none. Grants are
@@ -159,16 +160,135 @@ over the server token's was +2.2-4.4 us a `set`, +2.5-4.4 a row and
 +2.5-4.7 a page on main, +2.2-4.6, +2.5-3.9 and +2.7-4.8 with it (six
 runs each in turns, the machine loaded: the spread is the load's).
 
-**Known open: an ordered comparison against a claim of another kind.**
-Values of two kinds order by kind (`cmp_value`'s type rank), every number
-below every text, so `level <= $jwt.clearance` given the text `"top"`
-reads every row of an `int` level, and `name >= $jwt.from` given `5`
-every name; a claim inside a call (`lower($jwt.c)`, `coalesce($jwt.c,
-0)`, `least(level, $jwt.c)`) does the same. A token's issuer types its
-claims, and `=`, `in` and `has` are not touched by it, but an ordered rule
-is held to the claim's kind in a follow-up of #408 ("ordered comparisons
-against a claim"), which has to keep the guard right under `not`, a time
-field's ISO claims and `@sorted`'s exact ranges.
+**An ordered comparison against a claim holds the other side to the
+claim's kind** (`kind_held`, `claims_held`). Values of two kinds order by
+kind (`cmp_value`'s type rank), every bool below every number and every
+number below every text, so `level <= $jwt.clearance` given the text
+`"top"` read every row of an `int` level, and `name >= $jwt.from` given `5`
+every name. The scope is bound per token with no schema at hand, and a
+`compare` ordering nothing across kinds would part the scan from
+`@sorted`'s ranges, so `bind` ANDs in the edges of the claim's kind, past
+which every other kind ranks: `> true` and `< ""` for a number, `>= ""` and
+`<` the byte `0xFF` for a text (above every text, whose UTF-8 never holds
+it, and below every kind ranked above texts, bytes ranking with them; a
+vector literal, the next kind, is refused beside a json field), `>= false`
+and `<= true` for a bool. A value of another kind is then neither below the
+claim nor above it, which `=`, `!=` and `in` already hold, `cmp_value`
+being `Equal` across no two kinds. Polarity: ANDed in under a `not`, the
+guard became an `or` -- `not (score > $jwt.max)` admitted every text and
+list over a json field, which the bare comparison left out -- so under an
+odd number of `not`s it is `cmp or (not (both edges) and other is not
+null)`, which the `not` turns into `not cmp and (both edges or other is
+null)` (`bind_held`); under an even number the edge on the side the
+comparison leaves open is enough. The `is null` is #415's review: negated
+whole, the guard held out the rows with no `level` that `not (level >
+$jwt.c)` admitted on main and the server token's `not (level > 5)` admits,
+where a row with no value is of no kind and the rule written out is the
+answer. An inner `get`'s filter stands where its `in` does, so under `not
+... in` a row of another kind is in its list and held out -- and the read
+rules of the collection an inner `get` reads, ANDed into it
+(`Scope::held`), are bound for where it stands too: `hold` takes the rules
+bound for an odd number of `not`s under `not ... in`, which a token whose
+policy has an inner `get` gets beside the others at `scope`. Bound only for
+a place standing alone, `posts read where author not in (get bans select
+author)` under `bans read where severity >= $jwt.min` shrank its list by
+the ban of a `"high"` severity and read that author's post, which main held
+out. A comparison is held only where it is a condition, under `and`, `or`
+and `not`, so one used as a value -- `(level <= $jwt.c) = false`, a
+`case`'s condition -- is refused at startup, and so is a claim inside a call
+or arithmetic, whose result's kind no rule can know until it runs:
+`least(level, "top")` is the level (every number ranking below every text),
+so `least(level, $jwt.c) = level` admitted every row, and `lower(5)` hands
+the comparison whatever it hands. SQL's `like` and `ilike` are calls in the
+tree (`not like` a `not` over one) but compare in no order, so a bare claim
+as the pattern or the escape is taken -- refused, `path like $jwt.home` no
+longer started, naming a call the policy never wrote -- and one as the text
+matched, or inside a call there, is not. Folding a call over claims alone
+at bind was the other way, not taken: the functions are the database's,
+plugins among them, and a mixed one (`least(level, ...)`) would be refused
+anyway. Times: a text claim that reads as a time is a time's kind too, as
+`cmp_value` compares a time with a text by reading it, so its lower edge
+must take a time from year 0 (`"0000-01-01"`) as well as every text --
+with `""` alone no time passed, `at <= $jwt.until` given
+`"2026-07-01T00:00:00Z"` matching nothing, and with `"0000-01-01"` alone a
+text field's `""`, `"-1"` and `"0.9"` were held out of `day <=
+"2026-01-01"`. An int and a time order alike against every value but a
+text that reads as a time, so no edge ANDed in says both, and the scope
+holds no schema to choose by: the edge is `other >= "" or other >=
+"0000-01-01"`, and the engine folds it to the side the field's declared
+type reads (`fold_kinds`, indexes.md) wherever a filter is answered -- the
+second for a `timestamp` field, the first for any other, json among them,
+whose times are their ISO texts -- so an ordered index says it as a key. A
+time field's values before year 0 are held out of such a rule; a text that
+reads as no time leaves a time field nothing. A typed field's edges are
+true or false of every value, which `@sorted`'s range and an index over
+several fields take as no bound or none (`SortedIndex::by_kind`,
+indexes.md), so the range stays exact: without it a scoped count over 20
+001 of 200 000 rows went 44 us -> 790 us in process, 216 us -> 1 ms over
+HTTP; with it the rule costs +0.35 us a read over main's, what any second
+comparison costs (`level > -1` the same), and a `get` no longer copies its
+rules' filter a second time to see that there was one (`Scope::filtered`),
+which the rewrite had paid with every rule (`make policy-bench
+ARGS=ranges`, three runs in turns). Over `(team, level) @sorted`, `team =
+$jwt.team and level <= $jwt.c` read every row of its span until the index
+over several fields took the verdict too: a count over 5 000 of 200 000
+rows 285 us against the server token's 0.85, 1.3 us after; a page of 20
++1.9 us -> +0.55 (three runs in turns, load 2.1 on 8 cores).
+`tests/ordered_claims.rs` holds it: the review of #408's wrapped claims, ISO
+claims, json, `nocase` and collated indexes against a scan, plans, counts,
+`not`s, rows with no value, `like` patterns, text fields under a time
+claim, indexes over several fields and deny lists.
+
+### ES256, and the algorithms still refused
+
+An `EC` key on P-256 verifies ES256 (`crypto::P256Key`,
+`crypto/p256.rs`), RFC 7518's ECDSA with SHA-256, its signature the 64
+bytes `R || S` and never DER. Before it a JWKS's EC keys were passed over:
+a provider signing with one -- Supabase Auth's EC signing keys, the auth
+recipes' table found -- could only be used by making it an RSA key, and a
+file mixing the two kinds verified only the RSA key's tokens. Written
+without a dependency, as `RsaKey` is: field elements and scalars are four
+64-bit limbs in Montgomery form under one `Modulus` (p and n, its
+constants worked out by `const fn` from the modulus alone), points are
+Jacobian, and `u1·G + u2·Q` is Shamir's trick over an addition that asks
+first whether its two points share an x -- a doubling or infinity, which
+the formulas get wrong and the trick meets (`G + Q` is `2G` for Q = G and
+infinity for Q = -G, both tried by signing in the module's tests). A key's
+coordinates are 32 bytes each, below p and on the curve, or the file is
+refused, as a short RSA key refuses it (a file whose malformed EC key
+was passed over before no longer loads, and a reload keeps the keys read
+last); r and s lie in [1, n), and R's x is reduced mod n before it is
+compared. Nothing runs in constant time: a public key and a signature are
+public. It is held to every case of Project Wycheproof's
+`ecdsa_secp256r1_sha256_p1363_test.json` (262: 173 valid, 89 invalid, none
+acceptable, committed with its licence in `fenec-http/tests/es256/`, the
+nine groups giving their key in hex alone included -- they are the ones
+whose R has an x past n), RFC 7515's A.3, and tokens node:crypto signed
+(`tests/es256/tokens.mjs`) taken over HTTP and refused once changed.
+Dropping the reduction of x, the doubling branch or the range check of r
+and s each fails the vectors.
+
+A check costs 145 us against RS256's 37 in the same run, a token's first
+`scope` 149 against 42, one found in `verified` 0.35 (`make jwt-bench`,
+Apple M1): a field multiplication is 21 ns, a doubling 0.21 us, an addition
+0.33, and a verification 256 doublings, some 192 additions and two
+inversions of 6 us each. A window method, additions with an affine point
+or a reduction using p's special form would take a share of that off, each
+at the price of code a reader has to take on trust, and `verified` already
+makes it once a token on each server: a client sends one token for its
+lifetime, and only a server with more than 4 096 live tokens -- a shard
+emptied as it fills -- checks one again. It made fenec-server's code and
+constants 10.2 KB larger (`__TEXT` 4 289 588 -> 4 299 816 bytes), the file
+16.5 KB, Mach-O's 16 KiB pages rounding it.
+
+Still refused, with `only HS256, RS256 and ES256 tokens are accepted`:
+EdDSA, which is a second curve (2^255 - 19) and SHA-512, neither here; PS256,
+whose RSA is `RsaKey`'s but whose padding is MGF1's; and RS384, RS512,
+ES384 and ES512, which need SHA-384 or SHA-512, and the last two P-384's
+and P-521's fields besides. OpenID Connect makes RS256 the algorithm every
+provider must offer, and the providers whose keys a server is likely to
+read sign with RS256 or ES256; each other one is added when a provider a
+user meets signs with nothing else, held to its own vectors as these are.
 
 ## Field lists
 
@@ -396,8 +516,8 @@ whose `refused` line names it as `reason`, and a refused token clears no
 wait (`audit::verified` is called only on a scope). Told none, a server
 asks three `is_empty`s of a token's first check and takes what it took;
 told some, the first check scans the token's claims once more beside its
-signature's 2.9 us (HS256) or 38 (RS256), and a kept token, every request
-after a client's first, pays nothing. `--mint-token` stamps the first
+signature's 2.9 us (HS256), 38 (RS256) or 145 (ES256), and a kept token,
+every request after a client's first, pays nothing. `--mint-token` stamps the first
 issuer, audience and client told on claims naming none, as it stamps
 `exp`, and an `exp` no further ahead than `--jwt-max-age` (an hour's was
 refused by the server minting it): it mints no token it would refuse.

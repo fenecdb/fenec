@@ -34,23 +34,19 @@ fn token(claims: &str) -> String {
 /// A server over a file of notes, teams and a board, keyed with the
 /// secret, the policy above and `flags`.
 fn serve(tag: &str, flags: &[&str]) -> Server {
+    serve_keyed(tag, &["--jwt-secret", SECRET], flags)
+}
+
+/// [`serve`], keyed by `keys`: `--jwt-secret` or `--jwt-keys` and its file.
+fn serve_keyed(tag: &str, keys: &[&str], flags: &[&str]) -> Server {
     let dir = tmp("providers", tag);
     std::fs::create_dir_all(&dir).unwrap();
     let policy = dir.join("policy.txt");
     std::fs::write(&policy, POLICY).unwrap();
     let file = dir.join("data.fenec");
-    let mut args = vec![
-        "--file",
-        file.to_str().unwrap(),
-        "--http-token",
-        "root",
-        "--jwt-secret",
-        SECRET,
-        "--policy",
-        policy.to_str().unwrap(),
-        "--auth-delay",
-        "0",
-    ];
+    let mut args = vec!["--file", file.to_str().unwrap(), "--http-token", "root"];
+    args.extend_from_slice(keys);
+    args.extend(["--policy", policy.to_str().unwrap(), "--auth-delay", "0"]);
     args.extend_from_slice(flags);
     let s = start(&args);
     let mut root = s.http().with_token("root");
@@ -149,6 +145,42 @@ fn a_token_is_held_to_the_issuer_audience_and_role_claim_given() {
     );
     let (status, body) = ask(&s, &role, r#"put board {msg: "no"}"#);
     assert_eq!(status, 403, "{body}");
+}
+
+/// An ES256 token an identity provider signed (fenec-http's fixture,
+/// node:crypto's) is held to `--jwt-audience` as an HS256 one is: its
+/// signature good either way, the token for another app is refused 401
+/// naming the check.
+#[test]
+fn an_es256_token_for_another_audience_is_refused() {
+    let fixture = include_str!("../../fenec-http/tests/es256/tokens.txt");
+    let token = |name: &str| {
+        fixture
+            .lines()
+            .find_map(|l| l.strip_prefix(name)?.strip_prefix(' '))
+            .unwrap()
+            .to_string()
+    };
+    let dir = tmp("providers", "es256-keys");
+    std::fs::create_dir_all(&dir).unwrap();
+    let jwks = dir.join("jwks.json");
+    std::fs::write(&jwks, fixture.lines().next().unwrap()).unwrap();
+    let s = serve_keyed(
+        "es256",
+        &["--jwt-keys", jwks.to_str().unwrap()],
+        &["--jwt-audience", "notes-api"],
+    );
+    let (status, body) = ask(&s, &token("aud-ours"), "get notes");
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("a1") && !body.contains("b1"), "{body}");
+    for name in ["aud-other", "alice"] {
+        let (status, body) = ask(&s, &token(name), "get notes");
+        assert_eq!(status, 401, "{name}: {body}");
+        assert!(
+            body.contains("audience (aud)") && !body.contains("billing"),
+            "{name}: {body}"
+        );
+    }
 }
 
 #[test]
