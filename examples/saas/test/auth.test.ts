@@ -4,7 +4,7 @@
 // give a stolen copy away, and links that work once and lapse.
 import assert from 'node:assert/strict';
 import { after, before, describe, test } from 'node:test';
-import { checkPassword, digest, hashPassword, normaliseEmail } from '../src/passwords.ts';
+import { checkPassword, digest, hashPassword, normaliseEmail, watchScrypt, type ScryptCost } from '../src/passwords.ts';
 import { LIMITED, WRONG } from '../src/trellis.ts';
 import { Browser, mailedLink, PASSWORD, person, query, start, type Env } from './harness.ts';
 
@@ -77,30 +77,25 @@ describe('sign-in', () => {
     assert.equal(unknown.headers.get('set-cookie'), null);
   });
 
-  test('an unknown email takes as long as a wrong password', async () => {
-    // Ten accounts, so no one account meets its limit; alternated, so a
-    // machine getting busier slows both alike.
-    const known: string[] = [];
-    for (let i = 0; i < 10; i++) {
-      await person(env, `timing${i}@x.io`, 'Timing');
-      known.push(`timing${i}@x.io`);
-    }
-    const time = async (email: string, ip: string) => {
-      const t0 = performance.now();
-      const r = await new Browser(env, ip).signIn(email, 'not the password');
-      assert.equal(r.status, 401);
-      return performance.now() - t0;
+  test('an unknown email does the work a wrong password does', async () => {
+    // The property is the work, not the time: how long a sign-in takes
+    // measures the machine (two equal paths differed by 40% on a loaded
+    // one), while the scrypt runs it makes are a count and a cost.
+    await person(env, 'work@x.io', 'Work');
+    const work = async (email: string, ip: string) => {
+      const runs: ScryptCost[] = [];
+      const stop = watchScrypt((cost) => runs.push(cost));
+      try {
+        assert.equal((await new Browser(env, ip).signIn(email, 'not the password')).status, 401);
+      } finally {
+        stop();
+      }
+      return runs;
     };
-    const k: number[] = [];
-    const u: number[] = [];
-    for (let i = 0; i < 40; i++) {
-      k.push(await time(known[i % 10], `10.7.${i}.1`));
-      u.push(await time(`ghost${i}@x.io`, `10.7.${i}.2`));
-    }
-    const median = (xs: number[]) => xs.sort((a, b) => a - b)[xs.length >> 1];
-    const [mk, mu] = [median(k), median(u)];
-    console.log(`  median sign-in: wrong password ${mk.toFixed(2)} ms, unknown email ${mu.toFixed(2)} ms`);
-    assert.ok(Math.abs(mk - mu) / mk < 0.25, `${mk} against ${mu}`);
+    const wrong = await work('work@x.io', '10.7.0.1');
+    const unknown = await work('ghost@x.io', '10.7.0.2');
+    assert.deepEqual(wrong, [{ N: env.cfg.scryptN, r: 8, p: 1 }], 'a wrong password is one scrypt run at the configured cost');
+    assert.deepEqual(unknown, wrong, 'an unknown email runs the same, against the dummy hash');
   });
 
   test('an account takes 8 attempts in ten minutes, from any number of addresses', async () => {

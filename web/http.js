@@ -578,6 +578,8 @@ function refused(res, body, message) {
   const e = new FenecError(message ?? body?.error ?? `HTTP ${res.status}`);
   e.status = res.status;
   if (typeof body?.at === 'number') e.at = body.at;
+  // What a `require n else '<reason>'` said: the statement's own words.
+  if (typeof body?.reason === 'string') e.reason = body.reason;
   if (typeof body?.completed === 'number') e.completed = body.completed;
   const quota = body?.quota ?? res.headers?.get?.('fenec-quota');
   if (quota) e.quota = quota;

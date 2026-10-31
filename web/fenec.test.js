@@ -669,6 +669,57 @@ test('a run of several says which statement stopped it, as a /batch does', { ski
   assert.deepEqual((await db.from('accounts').order('name').rows()).map((r) => r.balance), [100, 0]);
 });
 
+test('a require that says why is refused with its reason, in the module and over HTTP', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection accounts (name text @unique, balance int)');
+  db.run('put accounts [{name: "a", balance: 100}, {name: "b", balance: 0}]');
+  const stop = (f) => {
+    try {
+      f();
+    } catch (e) {
+      return e;
+    }
+    assert.fail('no error');
+  };
+  // The debit and the credit each say why: the reason tells them apart
+  // where `at` is only their place.
+  const move = (from, to, n) =>
+    db.run(
+      "set accounts {balance: balance - $3} where name = $1 and balance >= $3 require 1 else 'insufficient funds'; " +
+        "set accounts {balance: balance + $3} where name = $2 require 1 else 'no account to credit'",
+      [from, to, n],
+    );
+  const funds = stop(() => move('a', 'b', 500));
+  assert.deepEqual([funds.at, funds.reason], [0, 'insufficient funds']);
+  assert.equal(funds.message, 'unmet: insufficient funds (`set accounts` wrote 0 rows, and requires 1)');
+  assert.deepEqual([stop(() => move('a', 'ghost', 5)).at, stop(() => move('a', 'ghost', 5)).reason], [1, 'no account to credit']);
+  assert.deepEqual((await db.from('accounts').order('name').rows()).map((r) => r.balance), [100, 0]);
+  // Through the builder, a write's and a read's, a quote in it.
+  const e = await db.from('accounts').where('name', 'nobody').delete({ require: 1, reason: "it's gone" }).catch((x) => x);
+  assert.equal(e.reason, "it's gone");
+  const r = await db.from('accounts').where('name', 'nobody').limit(1).require(1, { reason: 'no such account' }).rows().catch((x) => x);
+  assert.equal(r.reason, 'no such account');
+  // None given, none said.
+  assert.equal(stop(() => db.run('del accounts where name = "x" require 1')).reason, undefined);
+  assert.throws(() => db.from('accounts').require(1, 'why'), /require\(n, \{ reason \}\)/);
+  assert.throws(() => db.from('accounts').where('name', 'a').toDelete({ require: 1, reason: 5 }), /a text of 1 to 200 bytes/);
+
+  // Over HTTP, from the 412's body: a lone statement's and a batch's.
+  const answers = [
+    new Response(JSON.stringify({ error: 'insufficient funds (`set accounts` wrote 0 rows, and requires 1)', reason: 'insufficient funds' }), { status: 412 }),
+    new Response(JSON.stringify({ error: 'unmet: no account to credit (...)', completed: 0, at: 1, reason: 'no account to credit' }), { status: 412 }),
+    new Response(JSON.stringify({ error: '`del accounts` wrote 0 rows, and requires 1' }), { status: 412 }),
+  ];
+  const http = new FenecHttp('http://x', { fetch: async () => answers.shift() });
+  const one = await http.run("set accounts {balance: 0} where name = 'a' require 1 else 'insufficient funds'").catch((x) => x);
+  assert.deepEqual([one.status, one.reason], [412, 'insufficient funds']);
+  const batch = await http.batch(['put accounts {name: "c"}', 'set accounts {balance: 1} where name = "ghost" require 1']).catch((x) => x);
+  assert.deepEqual([batch.at, batch.reason], [1, 'no account to credit']);
+  const none = await http.run('del accounts where name = "x" require 1').catch((x) => x);
+  assert.equal(none.reason, undefined);
+});
+
 test('a batch in the page: each statement its parameters and its answer, one block', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
   const { Fenec } = await import('./fenec.js');
   const db = await Fenec.open(wasm);

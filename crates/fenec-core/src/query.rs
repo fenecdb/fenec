@@ -1957,6 +1957,52 @@ impl Pick {
     }
 }
 
+/// The longest reason `require <n> else '<reason>'` gives, in bytes: a
+/// sentence an app tells its user or maps to one -- "insufficient funds",
+/// 66 characters of a script three bytes each -- and no more, since it
+/// goes out in every refusal it makes, in the 412's body, the sync's
+/// refusal and the shell's line. A longer one is refused, never cut.
+pub const MAX_REASON: usize = 200;
+
+/// `require <n> [else '<reason>']`: a statement's count made a condition
+/// -- the rows a write writes, a `get` answers -- and what its refusal
+/// says where the count is another ([`Error::Unmet`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Require {
+    pub n: u64,
+    /// `else '<reason>'`: the statement's own words, a literal of its
+    /// text and never a parameter, as `n` is never one -- a caller tells
+    /// "insufficient funds" from "no such account" by it, where the place
+    /// of the statement in its `/batch` (`at`) changes with every
+    /// statement added in front. At most [`MAX_REASON`] bytes, and empty
+    /// where the statement gave none: the parser refuses an empty one, so
+    /// an empty box, which allocates nothing, says none, where an `Option`
+    /// of it made every `require` 8 bytes more to move -- 0.3 KB of the
+    /// browser module.
+    pub reason: Box<str>,
+}
+
+impl Require {
+    /// The clause as FenecQL writes it, ` require <n> [else '<reason>']`,
+    /// the reason's quote and backslash escaped: what a sync replica sends
+    /// for a write it read.
+    pub fn clause_into(&self, out: &mut String) {
+        out.push_str(" require ");
+        out.push_str(&self.n.to_string());
+        if !self.reason.is_empty() {
+            out.push_str(" else '");
+            for c in self.reason.chars() {
+                match c {
+                    '\'' => out.push_str("''"),
+                    '\\' => out.push_str("\\\\"),
+                    c => out.push(c),
+                }
+            }
+            out.push('\'');
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Select {
     pub collection: String,
@@ -2006,8 +2052,9 @@ pub struct Select {
     /// `limit`, not counting a `lookup`'s children -- must number `n`, or
     /// it is refused as `Error::Unmet` and the block it is in put back, as
     /// a write's `require` is: a checkout's "the price is still 12" or "the
-    /// coupon is still good", read under the block's lock.
-    pub require: Option<u64>,
+    /// coupon is still good", read under the block's lock. With `else
+    /// '<reason>'`, the refusal says why ([`Require::reason`]).
+    pub require: Option<Require>,
     /// SQL's join, answered as SQL answers one: flat rows rather than the
     /// `lookup`'s children nested in their parents ([`Flat`]). Set by the
     /// SQL spelling alone -- `select o.id, c.name from orders o join
@@ -3011,8 +3058,9 @@ pub enum Statement {
         /// one statement under the write lock.
         else_set: Option<Vec<(String, Expr)>>,
         /// `... require <n>`: the statement is refused (`Error::Unmet`), and
-        /// so its block put back whole, unless it wrote exactly `n` rows.
-        require: Option<u64>,
+        /// so its block put back whole, unless it wrote exactly `n` rows;
+        /// with `else '<reason>'`, saying why.
+        require: Option<Require>,
         /// `returning * | a, b`: the rows it wrote answered rather than
         /// counted, ids and all, in the order of its documents -- a row
         /// `if absent` passed over is neither, the row `else set` set is.
@@ -3030,7 +3078,7 @@ pub enum Statement {
         set: Vec<(String, Expr)>,
         filter: Option<Expr>,
         /// As `Put`'s: the rows it changed must be exactly this many.
-        require: Option<u64>,
+        require: Option<Require>,
         /// `order`, `limit`, `returning`: boxed, since every other `set`
         /// has none and a `Statement` is as large as its largest variant.
         pick: Option<Box<Pick>>,
@@ -3039,7 +3087,7 @@ pub enum Statement {
         collection: String,
         filter: Option<Expr>,
         /// As `Put`'s: the rows it deleted must be exactly this many.
-        require: Option<u64>,
+        require: Option<Require>,
         /// As `Update`'s.
         pick: Option<Box<Pick>>,
     },

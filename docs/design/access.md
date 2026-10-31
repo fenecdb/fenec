@@ -1,6 +1,6 @@
 # Access
 
-The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *Access*: scoped tokens, field lists, rules reading another collection, a token bound to its tenant, and empty tokens. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *Access*: scoped tokens, field lists, rules reading another collection, a token bound to its tenant, whom a token is for, and empty tokens. Each section below but *Whom a token is for*, added after the move, is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Scoped tokens
 
@@ -31,11 +31,12 @@ the query run every time): the change counter's tag, and a 304 answered
 unrun, told it when anyone wrote to what it reads. The algorithm is the key's,
 never the token's: `--jwt-keys` reads a JWKS file, `oct` keys for HS256 and
 `RSA` keys (2048 bits up, `crypto::RsaKey`, 64-bit limbs: 166 us a check in
-32-bit ones, 38 now) for an identity provider's RS256, a `kid` picking the
-key; an RSA modulus taken for an HS256 secret would sign anything. The file
-is read again as it changes, looked at once a second, which is the rotation.
-A verified token is kept by its text (`verified`, 16 shards of 256, emptied
-when the keys change, `exp` asked each time): 0.27 us against 2.9 for HS256.
+32-bit ones, 38 now) for an identity provider's RS256 and `EC` keys on
+P-256 for its ES256 (below), a `kid` picking the key; an RSA modulus taken
+for an HS256 secret would sign anything. The file is read again as it
+changes, looked at once a second, which is the rotation. A verified token
+is kept by its text (`verified`, 16 shards of 256, emptied when the keys
+change, `exp` asked each time): 0.27 us against 2.9 for HS256.
 A token naming no `exp` is refused (`Demands::require_exp`,
 `--jwt-require-exp off` takes it), and `--jwt-max-age` bounds how far ahead
 one may lie; `mint` stamps an hour on claims naming none. Grants are
@@ -159,16 +160,135 @@ over the server token's was +2.2-4.4 us a `set`, +2.5-4.4 a row and
 +2.5-4.7 a page on main, +2.2-4.6, +2.5-3.9 and +2.7-4.8 with it (six
 runs each in turns, the machine loaded: the spread is the load's).
 
-**Known open: an ordered comparison against a claim of another kind.**
-Values of two kinds order by kind (`cmp_value`'s type rank), every number
-below every text, so `level <= $jwt.clearance` given the text `"top"`
-reads every row of an `int` level, and `name >= $jwt.from` given `5`
-every name; a claim inside a call (`lower($jwt.c)`, `coalesce($jwt.c,
-0)`, `least(level, $jwt.c)`) does the same. A token's issuer types its
-claims, and `=`, `in` and `has` are not touched by it, but an ordered rule
-is held to the claim's kind in a follow-up of #408 ("ordered comparisons
-against a claim"), which has to keep the guard right under `not`, a time
-field's ISO claims and `@sorted`'s exact ranges.
+**An ordered comparison against a claim holds the other side to the
+claim's kind** (`kind_held`, `claims_held`). Values of two kinds order by
+kind (`cmp_value`'s type rank), every bool below every number and every
+number below every text, so `level <= $jwt.clearance` given the text
+`"top"` read every row of an `int` level, and `name >= $jwt.from` given `5`
+every name. The scope is bound per token with no schema at hand, and a
+`compare` ordering nothing across kinds would part the scan from
+`@sorted`'s ranges, so `bind` ANDs in the edges of the claim's kind, past
+which every other kind ranks: `> true` and `< ""` for a number, `>= ""` and
+`<` the byte `0xFF` for a text (above every text, whose UTF-8 never holds
+it, and below every kind ranked above texts, bytes ranking with them; a
+vector literal, the next kind, is refused beside a json field), `>= false`
+and `<= true` for a bool. A value of another kind is then neither below the
+claim nor above it, which `=`, `!=` and `in` already hold, `cmp_value`
+being `Equal` across no two kinds. Polarity: ANDed in under a `not`, the
+guard became an `or` -- `not (score > $jwt.max)` admitted every text and
+list over a json field, which the bare comparison left out -- so under an
+odd number of `not`s it is `cmp or (not (both edges) and other is not
+null)`, which the `not` turns into `not cmp and (both edges or other is
+null)` (`bind_held`); under an even number the edge on the side the
+comparison leaves open is enough. The `is null` is #415's review: negated
+whole, the guard held out the rows with no `level` that `not (level >
+$jwt.c)` admitted on main and the server token's `not (level > 5)` admits,
+where a row with no value is of no kind and the rule written out is the
+answer. An inner `get`'s filter stands where its `in` does, so under `not
+... in` a row of another kind is in its list and held out -- and the read
+rules of the collection an inner `get` reads, ANDed into it
+(`Scope::held`), are bound for where it stands too: `hold` takes the rules
+bound for an odd number of `not`s under `not ... in`, which a token whose
+policy has an inner `get` gets beside the others at `scope`. Bound only for
+a place standing alone, `posts read where author not in (get bans select
+author)` under `bans read where severity >= $jwt.min` shrank its list by
+the ban of a `"high"` severity and read that author's post, which main held
+out. A comparison is held only where it is a condition, under `and`, `or`
+and `not`, so one used as a value -- `(level <= $jwt.c) = false`, a
+`case`'s condition -- is refused at startup, and so is a claim inside a call
+or arithmetic, whose result's kind no rule can know until it runs:
+`least(level, "top")` is the level (every number ranking below every text),
+so `least(level, $jwt.c) = level` admitted every row, and `lower(5)` hands
+the comparison whatever it hands. SQL's `like` and `ilike` are calls in the
+tree (`not like` a `not` over one) but compare in no order, so a bare claim
+as the pattern or the escape is taken -- refused, `path like $jwt.home` no
+longer started, naming a call the policy never wrote -- and one as the text
+matched, or inside a call there, is not. Folding a call over claims alone
+at bind was the other way, not taken: the functions are the database's,
+plugins among them, and a mixed one (`least(level, ...)`) would be refused
+anyway. Times: a text claim that reads as a time is a time's kind too, as
+`cmp_value` compares a time with a text by reading it, so its lower edge
+must take a time from year 0 (`"0000-01-01"`) as well as every text --
+with `""` alone no time passed, `at <= $jwt.until` given
+`"2026-07-01T00:00:00Z"` matching nothing, and with `"0000-01-01"` alone a
+text field's `""`, `"-1"` and `"0.9"` were held out of `day <=
+"2026-01-01"`. An int and a time order alike against every value but a
+text that reads as a time, so no edge ANDed in says both, and the scope
+holds no schema to choose by: the edge is `other >= "" or other >=
+"0000-01-01"`, and the engine folds it to the side the field's declared
+type reads (`fold_kinds`, indexes.md) wherever a filter is answered -- the
+second for a `timestamp` field, the first for any other, json among them,
+whose times are their ISO texts -- so an ordered index says it as a key. A
+time field's values before year 0 are held out of such a rule; a text that
+reads as no time leaves a time field nothing. A typed field's edges are
+true or false of every value, which `@sorted`'s range and an index over
+several fields take as no bound or none (`SortedIndex::by_kind`,
+indexes.md), so the range stays exact: without it a scoped count over 20
+001 of 200 000 rows went 44 us -> 790 us in process, 216 us -> 1 ms over
+HTTP; with it the rule costs +0.35 us a read over main's, what any second
+comparison costs (`level > -1` the same), and a `get` no longer copies its
+rules' filter a second time to see that there was one (`Scope::filtered`),
+which the rewrite had paid with every rule (`make policy-bench
+ARGS=ranges`, three runs in turns). Over `(team, level) @sorted`, `team =
+$jwt.team and level <= $jwt.c` read every row of its span until the index
+over several fields took the verdict too: a count over 5 000 of 200 000
+rows 285 us against the server token's 0.85, 1.3 us after; a page of 20
++1.9 us -> +0.55 (three runs in turns, load 2.1 on 8 cores).
+`tests/ordered_claims.rs` holds it: the review of #408's wrapped claims, ISO
+claims, json, `nocase` and collated indexes against a scan, plans, counts,
+`not`s, rows with no value, `like` patterns, text fields under a time
+claim, indexes over several fields and deny lists.
+
+### ES256, and the algorithms still refused
+
+An `EC` key on P-256 verifies ES256 (`crypto::P256Key`,
+`crypto/p256.rs`), RFC 7518's ECDSA with SHA-256, its signature the 64
+bytes `R || S` and never DER. Before it a JWKS's EC keys were passed over:
+a provider signing with one -- Supabase Auth's EC signing keys, the auth
+recipes' table found -- could only be used by making it an RSA key, and a
+file mixing the two kinds verified only the RSA key's tokens. Written
+without a dependency, as `RsaKey` is: field elements and scalars are four
+64-bit limbs in Montgomery form under one `Modulus` (p and n, its
+constants worked out by `const fn` from the modulus alone), points are
+Jacobian, and `u1·G + u2·Q` is Shamir's trick over an addition that asks
+first whether its two points share an x -- a doubling or infinity, which
+the formulas get wrong and the trick meets (`G + Q` is `2G` for Q = G and
+infinity for Q = -G, both tried by signing in the module's tests). A key's
+coordinates are 32 bytes each, below p and on the curve, or the file is
+refused, as a short RSA key refuses it (a file whose malformed EC key
+was passed over before no longer loads, and a reload keeps the keys read
+last); r and s lie in [1, n), and R's x is reduced mod n before it is
+compared. Nothing runs in constant time: a public key and a signature are
+public. It is held to every case of Project Wycheproof's
+`ecdsa_secp256r1_sha256_p1363_test.json` (262: 173 valid, 89 invalid, none
+acceptable, committed with its licence in `fenec-http/tests/es256/`, the
+nine groups giving their key in hex alone included -- they are the ones
+whose R has an x past n), RFC 7515's A.3, and tokens node:crypto signed
+(`tests/es256/tokens.mjs`) taken over HTTP and refused once changed.
+Dropping the reduction of x, the doubling branch or the range check of r
+and s each fails the vectors.
+
+A check costs 145 us against RS256's 37 in the same run, a token's first
+`scope` 149 against 42, one found in `verified` 0.35 (`make jwt-bench`,
+Apple M1): a field multiplication is 21 ns, a doubling 0.21 us, an addition
+0.33, and a verification 256 doublings, some 192 additions and two
+inversions of 6 us each. A window method, additions with an affine point
+or a reduction using p's special form would take a share of that off, each
+at the price of code a reader has to take on trust, and `verified` already
+makes it once a token on each server: a client sends one token for its
+lifetime, and only a server with more than 4 096 live tokens -- a shard
+emptied as it fills -- checks one again. It made fenec-server's code and
+constants 10.2 KB larger (`__TEXT` 4 289 588 -> 4 299 816 bytes), the file
+16.5 KB, Mach-O's 16 KiB pages rounding it.
+
+Still refused, with `only HS256, RS256 and ES256 tokens are accepted`:
+EdDSA, which is a second curve (2^255 - 19) and SHA-512, neither here; PS256,
+whose RSA is `RsaKey`'s but whose padding is MGF1's; and RS384, RS512,
+ES384 and ES512, which need SHA-384 or SHA-512, and the last two P-384's
+and P-521's fields besides. OpenID Connect makes RS256 the algorithm every
+provider must offer, and the providers whose keys a server is likely to
+read sign with RS256 or ES256; each other one is added when a provider a
+user meets signs with nothing else, held to its own vectors as these are.
 
 ## Field lists
 
@@ -342,6 +462,124 @@ held it. A tenant's
 database installs the `Check` hook as a single one does
 (`Tenants::check_scoped_writes`, from `Server::with_tenants`): none did,
 and a scoped write to a tenant went unchecked.
+
+## Whom a token is for
+
+**A token is taken only from the issuers, for the audiences and clients, a
+server was told** (`Demands::whom`, `--jwt-issuer`, `--jwt-audience`,
+`--jwt-client`). A good signature says who issued a token, not whom for:
+an identity provider's keys sign every token it issues, and the recipes for
+Clerk, Auth0, Supabase Auth, Cognito and Cloudflare Access found each
+signing for more than one app under one set of keys -- a Cloudflare Access
+team's keys sign every application's token, a Cognito pool's every app
+client's, an Auth0 tenant's every API's and every application's ID tokens,
+and Firebase's every project's there is -- so a token a user was given for
+another app read this database under its policy. The policy could pin it
+(`'<tag>' in $jwt.aud` in every rule), which a rule forgotten, or a new
+one, left open, and nothing pinned the issuer. Told issuers, `iss` must be
+one of them; told audiences, `aud`, a text or a list (RFC 7519 allows
+both), must hold one; told clients, `azp` must be one of them or, where the
+token names no `azp`, `client_id`. The two lists are independent, not
+pairs: any issuer told with any audience told, which a policy whose
+providers must each keep to their own audience pins in its rules
+(`$jwt.iss = ... and '...' in $jwt.aud`); pairs in the flags were one more
+syntax for the rare server trusting two providers. Cognito's access tokens
+carry the app client's id in `client_id` and no `aud` unless the app asked
+for one bound to a resource server, whose identifier `aud` then holds, so
+`--jwt-audience <client id>` alone would refuse them; its ID tokens carry
+the client's id in `aud`. Auth0's, Keycloak's and Clerk's name the party in
+`azp` (Clerk's session tokens have no `aud`; `azp` is the page's origin,
+left out where the request carried no `Origin`, and such a token is
+refused under `--jwt-client`). A token naming both is judged by `azp`, the
+party it was issued to: the order is the claims', not a match on either.
+Okta's `cid` and other names stay a rule's (`$jwt.cid = "..."`), which
+applies to no token lacking the claim; a fourth spelling in the flag was
+not worth guessing at. Compared as written, as RFC 7519 compares a
+StringOrURI: `https://idp.example` is not `https://idp.example/` (Auth0's
+issuer ends in `/`), and a server that trimmed slashes or cases would take
+an issuer that differed. An empty text names nothing: a server told `""`
+takes no token rather than one whose claim is empty, the flags given empty
+are refused at the start (`told` in fenec-server's main), and a library
+`Demands` holding one refuses every token. Asked once a token, in
+`Access::check` after the signature -- so a token no key signed is told
+nothing of what the server takes -- and before it is kept in `verified`: a
+kept token passed them, the demands fixed with the `Access` (`demanding`
+lets the kept ones go). Every route reaches `Access::scope` through
+lib.rs's `authenticate` -- `/query`, REST, `/batch`, a subscription, MCP,
+`/_whoami`, a held write each time it runs -- and fenec-shard verifies no
+token, forwarding `Authorization` to the node that does. A refusal is 401
+naming the check (`NO_ISSUER`, `NO_AUDIENCE`, `NO_CLIENT`), never the
+value the token holds, which its sender knows and a log or proxy between
+need not; `authenticate` hands the same text to the audit log
+(`audit::refusal`, let go by `audit::request` as the next request begins),
+whose `refused` line names it as `reason`, and a refused token clears no
+wait (`audit::verified` is called only on a scope). Told none, a server
+asks three `is_empty`s of a token's first check and takes what it took;
+told some, the first check scans the token's claims once more beside its
+signature's 2.9 us (HS256), 38 (RS256) or 145 (ES256), and a kept token,
+every request after a client's first, pays nothing. `--mint-token` stamps the first
+issuer, audience and client told on claims naming none, as it stamps
+`exp`, and an `exp` no further ahead than `--jwt-max-age` (an hour's was
+refused by the server minting it): it mints no token it would refuse.
+
+Where the flags are needed and where they are not enough, the docs say by
+issuer, and the server says one: `--jwt-keys` with no `--jwt-issuer` is a
+warning on stderr at the start, not a refusal, since keys of the app's own
+sign for it alone. Firebase is the case it is for: Google signs every
+Firebase project's ID tokens with one set of keys, and a server keyed with
+them and told no issuer took a token minted in anyone's project, its claims
+whatever that project's owner wrote. Issuers that let whoever asks name the
+audience -- Google's identity tokens (`gcloud auth print-identity-token
+--audiences`, any account), GitHub Actions' (`core.getIDToken(audience)`,
+any workflow on GitHub), a cluster's projected service account tokens (the
+pod spec names it) -- are where the issuer and the audience say only that
+some account of that issuer asked for a token for this database: the rules
+pin whose (`sub`, `azp`, `repository`). Every `--jwt-*` flag but the keys'
+is refused where no `--jwt-secret` or `--jwt-keys` is given: taken and
+ignored, a server told `--jwt-audience` with no keys looked held to it.
+
+`for <role>` reads the claim `--jwt-role-claim` names (`Demands::role_claim`,
+`role` unless told), a text or a list holding the role as `role` was, so a
+server told nothing reads roles as before; told another, `role` is a claim
+like any other there, and `/_whoami` answers the roles the server read
+(`roles`, from the claim and the configured name a `Scope` holds by two
+reference counts, read only there), which the studio shows where it showed
+the token's own `role`. A rule's role is the word after its last `for`
+standing alone (`role_of`), or a name in double quotes (`for "Account
+Admin"`): cut at the letters `for` wherever they stood, `for
+platform-admins` lost its role's own and `for information-security` was
+refused at startup, which provider group names made likelier. Cognito puts
+groups in `cognito:groups`, Auth0 a namespaced URL. A policy names such a
+claim in double quotes (`$jwt."cognito:groups"`,
+`$jwt."https://example.com/roles"`, `claim_name`), a `.`, `:`, `/` or `#`
+inside part of the name: comments are cut at the first `#` outside quotes
+(`uncommented`), where the first `#` anywhere cut `$jwt."https://example.com/#user"`
+and a filter's `'#general'`. `$jwt.<name>` takes letters, digits and `_` as
+it did, and one running into `-` or `:` (`$jwt.x-hasura-user-id`) is
+refused saying to quote it: it parsed as the claim `x` minus fields, a
+filter no one wrote. A path into a nested object (`$jwt.app_metadata.role`)
+is refused at startup rather than read: Supabase and Auth0 keep what a
+user edits of themselves (`user_metadata`) beside what only the app may
+(`app_metadata`), one word apart in a rule, and a path into the wrong one
+is a user granting themselves rows; a claim at the top of the token is one
+the provider was told to sign there. Before this a path parsed as
+`$1.role`, a FenecQL error naming nothing of the cause. A quoted name holds
+no `\`: a token's member names are read unescaped, and a policy that could
+escape one would be read two ways. A tenant claim named `""` is refused at
+the start, and a library's `Demands` holding one binds every token to no
+tenant: read as a claim no token holds, it left every token unbound, which
+`--jwt-unbound-tenants` took for every tenant. `tests/providers.rs` in
+fenec-http (every route, a refused token's 401 holding the check and not
+the value, `aud` as a text and a list, a client by `azp` or `client_id`, a
+role from a URL-named list, quoted claims in read and write rules, and the
+same server told nothing taking every token), `access.rs`'s tests (near
+spellings of an issuer or audience, a duplicated member, roles holding
+`for`, a `#` in quotes, `-` and `:`, the roles `/_whoami` names, a minted
+token's age), `tests/audit.rs` (a signed token for another audience clears
+no wait, on a node's every route) and fenec-server's `tests/providers.rs`
+(the flags on the binary, `--mint-token`, the flags given empty or without
+keys, the warning, a refusal's audit line and a nested claim refused at
+the start) fail without it.
 
 ## Empty tokens
 

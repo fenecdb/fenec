@@ -41,6 +41,8 @@
 //! del    <name> [where <expr>]
 //! set | del ... [order <key> [desc], ...] [limit N] [returning * | a, b]
 //!                                        -- the rows a get would page to, answered as written
+//! put | set | del | get ... require N [else '<reason>']
+//!                                        -- N rows written or answered, or refused (412), saying why
 //! collections | describe <name> | compact [<name>]
 //! create [or replace] statement <name>($p <type> [= <literal>], ...) [claims (<c> <type> [from "<claim>"], ...)]
 //!        [public] [scans] [comment '<text>'] [check <expr>] as <statement> | as begin <statement>; ... end
@@ -104,6 +106,16 @@ const NO_RULE: &str = "a field holds its type, `not null` (`required`) and `uniq
 /// What an insert that names no fields is answered with.
 const NAMED: &str = "an insert names its fields: `insert into <collection> (<field>, ...) values \
                      (...)`, or `insert <collection> {<field>: <value>}`";
+
+/// How a `require`'s reason is written, which each refusal of one shows.
+const REASON_EMPTY: &str = "a `require`'s reason is empty: say why, \
+                            `require 1 else 'no such account'`";
+const REASON: &str = "`else` after `require <n>` takes its reason in quotes: \
+                      `require 1 else 'no such account'`";
+const REASON_PARAM: &str = "a `require`'s reason is written in the statement, never a parameter, \
+                            as its count is: `require 1 else 'no such account'`";
+const REASON_TICK: &str = "a `require`'s reason holds no backtick, which its refusal quotes the \
+                           statement with: `require 1 else 'no such account'`";
 
 /// The words a clause of a `get` or a join begins with, which no alias SQL
 /// writes without `as` is.
@@ -2263,14 +2275,57 @@ impl Parser {
     /// refused and its block put back. A clause of the write rather than an
     /// `assert` statement of its own: the count is the write's, known under
     /// the lock that wrote it, with no second read to race or to scope.
-    fn require(&mut self) -> Result<Option<u64>> {
+    ///
+    /// `else '<reason>'` after it says why, in the refusal's words and its
+    /// own `reason`: a text written in the statement, never a parameter --
+    /// as `n` is never one, it is the statement's contract, which a caller
+    /// tells one refusal from another by, and a value bound at each run
+    /// would let whoever binds them say what refused. It is parsed with the
+    /// text, so a statement the parse cache holds holds its reason.
+    /// `require 1 else` was "unknown command `else`" before, so no text
+    /// that parsed reads otherwise.
+    fn require(&mut self) -> Result<Option<Require>> {
         if !self.eat_kw("require") {
             return Ok(None);
         }
-        match self.int()? {
-            n if n >= 0 => Ok(Some(n as u64)),
-            n => self.err(format!("`require` takes a count of rows, not {n}")),
+        let n = match self.int()? {
+            n if n >= 0 => n as u64,
+            n => return self.err(format!("`require` takes a count of rows, not {n}")),
+        };
+        if !self.eat_kw("else") {
+            return Ok(Some(Require {
+                n,
+                reason: Box::default(),
+            }));
         }
+        let reason = match self.peek() {
+            Tok::Str(r) | Tok::Single(r) => r.clone(),
+            Tok::Param(_) => return self.err(REASON_PARAM),
+            // At the text's end, "end of input": a next line moves it.
+            _ => return Err(self.taught(REASON)),
+        };
+        if reason.is_empty() {
+            return self.err(REASON_EMPTY);
+        }
+        if reason.len() > MAX_REASON {
+            return self.err(format!(
+                "a `require`'s reason is at most {MAX_REASON} bytes, not {}",
+                reason.len()
+            ));
+        }
+        // The refusal quotes its statement with backticks after the reason,
+        // and `Error::reason` reads the reason back as the message up to the
+        // first `` (` ``: one in the reason would end it there. A quoted
+        // collection name may hold one, so the count's words cannot be
+        // where the reason's end is looked for.
+        if reason.bytes().any(|b| b == b'`') {
+            return self.err(REASON_TICK);
+        }
+        self.next();
+        Ok(Some(Require {
+            n,
+            reason: reason.into_boxed_str(),
+        }))
     }
 
     /// `{k: v, ...}`: a document's fields, a `set`'s, or an object's
@@ -3399,7 +3454,7 @@ impl Parser {
     fn write_clauses(
         &mut self,
         at: usize,
-    ) -> Result<(Option<Expr>, Option<u64>, Option<Box<Pick>>)> {
+    ) -> Result<(Option<Expr>, Option<Require>, Option<Box<Pick>>)> {
         let (mut filter, mut require, mut pick) = (None, None, Pick::default());
         loop {
             if self.eat_kw("where") {
@@ -4886,6 +4941,10 @@ mod tests {
         "put ev $1",
         "set jobs {owner: $1, run_at: now() + 30000, attempts: attempts + 1} where run_at <= now() order run_at limit 10 returning *",
         "set docs {body: $1, version: version + 1} where id = $2 and version = $3 require 1",
+        // A guard that says why: its `else` on the next line goes on with it.
+        "set accounts {balance: balance - $1} where id = $2 and balance >= $1 require 1 else 'insufficient funds'",
+        "get accounts where id = $1 limit 1 require 1 else \"no such account\"",
+        "insert likes {post: $1, user: $2} if absent require 1 else 'it''s liked already' returning id",
         "update notes set {topic: 4} where id = 3",
         "del notes where id = 3",
         "delete from notes where topic = 4 order posted limit 1 returning id",

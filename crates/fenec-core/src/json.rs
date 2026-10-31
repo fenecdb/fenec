@@ -429,9 +429,17 @@ pub fn composites_into(out: &mut String, s: &crate::schema::Schema) {
     out.push(']');
 }
 
+/// An error as the browser module and the native library answer one:
+/// `{"kind":"error","message":...}`, and `"reason"` where a statement's
+/// `require <n> else '<reason>'` refused it -- its own words, which an app
+/// tells one refusal from another by, as a server's 412 says them.
 pub fn error_to_string(e: &Error) -> String {
     let mut out = String::from("{\"kind\":\"error\",\"message\":");
     escape_into(&mut out, &e.to_string());
+    if let Some(r) = e.reason() {
+        out.push_str(",\"reason\":");
+        escape_into(&mut out, r);
+    }
     out.push('}');
     out
 }

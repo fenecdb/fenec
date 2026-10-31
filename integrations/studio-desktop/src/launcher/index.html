@@ -2,55 +2,344 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<!-- The app's own page, with the bridge to the main process: its script and
+     style are the bundle's files alone (no inline script, no eval), and it
+     connects only to the bridge's socket on 127.0.0.1 (Electrobun's RPC).
+     Whatever a server or a file name puts in the page is text, and even
+     markup slipped in could neither run nor send anything elsewhere. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' views:; style-src 'self' views:; img-src 'self' views:; connect-src ws://127.0.0.1:*; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>fenec studio</title>
 <link rel="stylesheet" href="../ui/app.css">
 </head>
-<body>
-<main>
-  <header>
-    <h1>fenec studio</h1>
-    <p class="sub">Open a database file, or connect to a server.</p>
-  </header>
+<body class="main-window">
+<div class="app">
+  <nav class="side" aria-label="Sections">
+    <div class="side-head">This Mac</div>
+    <button type="button" class="nav" data-section="databases" aria-current="page">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="5.5" rx="7.5" ry="3"></ellipse><path d="M4.5 5.5v13c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-13"></path><path d="M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3"></path></svg>
+      Databases
+    </button>
+    <button type="button" class="nav" data-section="servers">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3.5" y="4" width="17" height="6.5" rx="1.5"></rect><rect x="3.5" y="13.5" width="17" height="6.5" rx="1.5"></rect><path d="M7.5 7.25h.01M7.5 16.75h.01"></path></svg>
+      Servers
+      <span class="nav-note" id="running-count"></span>
+    </button>
+    <div class="side-head">Elsewhere</div>
+    <button type="button" class="nav" data-section="connections">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8.5"></circle><path d="M3.5 12h17M12 3.5c2.4 2.4 3.5 5.3 3.5 8.5s-1.1 6.1-3.5 8.5c-2.4-2.4-3.5-5.3-3.5-8.5s1.1-6.1 3.5-8.5z"></path></svg>
+      Remote connections
+    </button>
+    <button type="button" class="nav" data-section="backups">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3.5" y="4" width="17" height="5" rx="1"></rect><path d="M5 9v10.5h14V9M10 13h4"></path></svg>
+      Backups
+    </button>
+    <div class="side-foot">Bundled server<br><code id="bundled"></code></div>
+  </nav>
 
-  <section>
-    <div class="row-head">
-      <h2>Files</h2>
-      <div class="actions">
-        <button id="new">New database…</button>
-        <button id="open" class="primary">Open file…</button>
+  <main>
+    <!-- Databases -->
+    <section id="databases" class="view" aria-labelledby="databases-title">
+      <header class="head">
+        <div>
+          <h1 id="databases-title">Databases</h1>
+          <p class="sub">Files on this Mac. Open one in the studio, or serve it so your apps can connect.</p>
+        </div>
+        <div class="actions">
+          <button type="button" id="open">Open file…</button>
+          <button type="button" id="new" class="primary">New database</button>
+        </div>
+      </header>
+      <div class="find">
+        <label for="find" class="vh">Find a database</label>
+        <input id="find" type="search" placeholder="Find a database" spellcheck="false">
+        <span id="db-count" class="muted"></span>
       </div>
+      <div class="table-box">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Name</th>
+              <th scope="col">Location</th>
+              <th scope="col" class="num">Size</th>
+              <th scope="col" class="num">Collections</th>
+              <th scope="col">Last opened</th>
+              <th scope="col">Server</th>
+              <th scope="col"><span class="vh">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody id="db-rows"></tbody>
+        </table>
+        <p class="empty" id="db-empty" hidden>No database yet. Make one with New database, or open a .fenec file.</p>
+      </div>
+
+      <div class="cards-row" id="db-detail" hidden>
+        <section class="card grow" aria-labelledby="db-name">
+          <div class="title-row">
+            <h2 id="db-name"></h2>
+            <span class="mono muted" id="db-path"></span>
+          </div>
+          <dl class="figures">
+            <div><dt>Size</dt><dd id="db-size">—</dd></div>
+            <div><dt>Rows</dt><dd id="db-rows-count">—</dd></div>
+            <div><dt>Collections</dt><dd id="db-collections">—</dd></div>
+            <div><dt>Dead space</dt><dd id="db-dead">—</dd></div>
+          </dl>
+          <p class="note" id="db-seen"></p>
+          <p class="note">The file compacts itself once half of it is dead. A server keeps it open; the studio and your apps talk to that server.</p>
+          <div class="actions">
+            <button type="button" id="db-open" class="primary">Open in studio</button>
+            <button type="button" id="db-backup">Back up now</button>
+            <button type="button" id="db-compact">Compact now</button>
+            <button type="button" id="db-reveal">Reveal in Finder</button>
+            <button type="button" id="db-forget" class="quiet">Remove from list</button>
+          </div>
+        </section>
+        <section class="card" aria-labelledby="db-serving">
+          <div class="title-row"><span class="dot" id="db-dot" aria-hidden="true"></span><span class="strong" id="db-serving"></span><span class="muted" id="db-for"></span></div>
+          <div class="mono" id="db-url"></div>
+          <div class="note" id="db-facts"></div>
+          <div class="actions bottom">
+            <button type="button" id="db-show-server">Show server</button>
+            <button type="button" id="db-serve" class="primary">Serve…</button>
+            <button type="button" id="db-stop" class="danger">Stop</button>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <!-- Servers -->
+    <section id="servers" class="view" aria-labelledby="servers-title" hidden>
+      <header class="head">
+        <div>
+          <h1 id="servers-title">Servers</h1>
+          <p class="sub">What your apps connect to. Each one keeps one database file open.</p>
+        </div>
+        <div class="actions"><button type="button" id="serve-pick" class="primary">Serve a database</button></div>
+      </header>
+      <div class="split">
+        <ul class="picks" id="srv-list" aria-label="Servers"></ul>
+        <section class="detail" id="srv-detail" aria-labelledby="srv-name" hidden>
+          <div class="card">
+            <div class="title-row wrap">
+              <h2 id="srv-name"></h2>
+              <span class="chip" id="srv-chip"></span>
+              <span class="actions end">
+                <button type="button" id="srv-open">Open studio</button>
+                <button type="button" id="srv-settings">Settings</button>
+                <button type="button" id="srv-restart">Restart</button>
+                <button type="button" id="srv-start" class="primary">Start</button>
+                <button type="button" id="srv-stop" class="danger">Stop</button>
+                <button type="button" id="srv-remove" class="quiet">Remove</button>
+              </span>
+            </div>
+            <dl class="figures">
+              <div><dt>Statements / s</dt><dd id="srv-rate">—</dd></div>
+              <div><dt>Median answer</dt><dd id="srv-median">—</dd></div>
+              <div><dt>Connections</dt><dd id="srv-conns">—</dd></div>
+              <div><dt>File</dt><dd id="srv-file">—</dd></div>
+            </dl>
+            <div class="note" id="srv-facts"></div>
+            <div class="note mono" id="srv-where"></div>
+          </div>
+          <div class="card" id="srv-connect">
+            <div class="title-row wrap">
+              <h3>Connect from your app</h3>
+              <span class="tabs" role="group" aria-label="Language">
+                <button type="button" class="tab" data-tab="curl" aria-pressed="true">curl</button>
+                <button type="button" class="tab" data-tab="js" aria-pressed="false">JavaScript</button>
+                <button type="button" class="tab" data-tab="py" aria-pressed="false">Python</button>
+                <button type="button" class="tab" data-tab="env" aria-pressed="false">.env</button>
+              </span>
+              <button type="button" id="snippet-copy" class="end">Copy</button>
+            </div>
+            <pre id="snippet"></pre>
+            <span class="hint">The token stays out of the snippet: copy it from Settings, or read it from your Keychain.</span>
+          </div>
+          <div class="card">
+            <div class="title-row"><h3>Server output</h3><button type="button" id="log-full" class="quiet end">Show full log</button></div>
+            <pre id="srv-log" class="log"></pre>
+          </div>
+        </section>
+        <p class="empty" id="srv-empty" hidden>No database is served yet. Pick one under Databases and choose Serve…, or Serve a database here.</p>
+      </div>
+    </section>
+
+    <!-- Remote connections -->
+    <section id="connections-view" class="view" aria-labelledby="connections-title" hidden>
+      <header class="head">
+        <div>
+          <h1 id="connections-title">Remote connections</h1>
+          <p class="sub">Servers and routers elsewhere. Each opens in its own studio window; tokens live in your Keychain.</p>
+        </div>
+        <div class="actions"><button type="button" id="conn-add">Add a connection</button></div>
+      </header>
+      <div class="split">
+        <ul class="picks" id="connections" aria-label="Saved connections"></ul>
+        <form id="add" class="detail card" autocomplete="off" aria-labelledby="conn-title">
+          <div class="title-row"><h2 id="conn-title">A new connection</h2><span class="chip" id="conn-chip" hidden></span></div>
+          <div class="grid2">
+            <label>Name <input name="name" placeholder="production" spellcheck="false"></label>
+            <label><span>Tenant <span class="muted">(for a router or a node)</span></span><input name="tenant" placeholder="none" spellcheck="false"></label>
+          </div>
+          <label>Address <input name="url" placeholder="https://db.example.com" required spellcheck="false"></label>
+          <span class="hint">Changing the address forgets the saved token, so it never reaches another server by accident.</span>
+          <p class="hint warn" id="clear" hidden>This address is plain http: the token would cross the network unencrypted. Use https:// unless the server is on a network you trust.</p>
+          <label><span>Token: <span id="token-note">kept in your Keychain</span></span><input name="token" type="password" placeholder="kept in your Keychain" spellcheck="false"></label>
+          <div class="field" id="last-check-box" hidden><span class="label">Last check</span><span id="last-check"></span></div>
+          <div class="buttons spread">
+            <button type="button" id="conn-remove" class="danger" hidden>Remove</button>
+            <span class="actions">
+              <button type="button" id="forget-token" hidden title="Remove the token saved for this server from the keychain; the connection stays">Forget token</button>
+              <button type="button" id="cancel-edit" hidden>Cancel</button>
+              <button type="button" id="conn-check" hidden>Check now</button>
+              <button type="submit" id="save">Save connection</button>
+              <button type="button" id="conn-open" class="primary" hidden>Open studio</button>
+            </span>
+          </div>
+          <p class="hint">The server must be started with <code>--studio</code>. Its own studio opens in the window, so there is no CORS to set up. <span id="keychain"></span></p>
+        </form>
+      </div>
+    </section>
+
+    <!-- Backups -->
+    <section id="backups" class="view" aria-labelledby="backups-title" hidden>
+      <header class="head">
+        <div>
+          <h1 id="backups-title">Backups</h1>
+          <p class="sub">An image of a database, taken while it runs, into a folder you pick. Restore makes a new file; it never writes over one.</p>
+        </div>
+      </header>
+      <section class="card" aria-labelledby="archives-title">
+        <div class="title-row wrap"><h2 id="archives-title">Archives</h2><span class="hint">A folder of backups for each database, which <code>fenec verify</code>, <code>restore</code> and <code>prune</code> read as well.</span></div>
+        <div class="table-box flat">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Database</th>
+                <th scope="col">Folder</th>
+                <th scope="col">Sealed</th>
+                <th scope="col">Last backup</th>
+                <th scope="col"><span class="vh">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody id="bk-rows"></tbody>
+          </table>
+          <p class="empty" id="bk-empty" hidden>No database yet.</p>
+        </div>
+      </section>
+
+      <form class="card" id="bk-setup" hidden aria-labelledby="bk-setup-title" autocomplete="off">
+        <h2 id="bk-setup-title"></h2>
+        <div class="field">
+          <label for="bk-dir">Folder</label>
+          <div class="pick"><input id="bk-dir" spellcheck="false" required><button type="button" id="bk-dir-choose">Choose…</button></div>
+          <span class="hint">Its backups go into this folder, one image each time; a new folder is made if it is not there.</span>
+        </div>
+        <fieldset>
+          <legend>Sealed</legend>
+          <label class="radio"><input type="radio" name="seal" value="none" checked> No: anyone who can read the folder can read the data</label>
+          <label class="radio"><input type="radio" name="seal" value="key"> With a key file: encrypted and authenticated, readable only with the key</label>
+          <div class="pick" id="bk-key-box" hidden>
+            <input id="bk-key" spellcheck="false" placeholder="the key file">
+            <button type="button" id="bk-key-choose">Choose…</button>
+            <button type="button" id="bk-key-make">Make a new key…</button>
+          </div>
+          <span class="hint" id="bk-key-note" hidden>Keep the key apart from the backups: without it nothing can be restored, and anyone with both can read them.</span>
+        </fieldset>
+        <p class="err" id="bk-setup-error" role="alert"></p>
+        <div class="buttons"><button type="button" id="bk-setup-cancel">Cancel</button><button type="submit" class="primary">Save</button></div>
+      </form>
+
+      <form class="card" id="bk-restore" hidden aria-labelledby="bk-restore-title" autocomplete="off">
+        <h2 id="bk-restore-title"></h2>
+        <div class="field">
+          <label for="bk-image">As it stood at</label>
+          <select id="bk-image"></select>
+        </div>
+        <div class="grid2">
+          <div class="field">
+            <label for="bk-to-folder">Into the folder</label>
+            <div class="pick"><input id="bk-to-folder" spellcheck="false" required><button type="button" id="bk-to-choose">Choose…</button></div>
+          </div>
+          <div class="field">
+            <label for="bk-to-name">As a new file</label>
+            <input id="bk-to-name" spellcheck="false" required>
+          </div>
+        </div>
+        <span class="hint">Restore makes a new file and opens it; a name that is taken is refused, so no file is ever written over, a served one least of all.</span>
+        <p class="err" id="bk-restore-error" role="alert"></p>
+        <div class="buttons"><button type="button" id="bk-restore-cancel">Cancel</button><button type="submit" class="primary" id="bk-restore-go">Restore</button></div>
+      </form>
+    </section>
+
+    <p id="status" role="status"></p>
+  </main>
+</div>
+
+<dialog id="sheet" aria-labelledby="sheet-title">
+  <form id="sheet-form" autocomplete="off">
+    <div>
+      <h1 id="sheet-title">Serve</h1>
+      <p class="sub">Your apps reach it over HTTP. It runs until you stop it or quit the app.</p>
     </div>
-    <ul id="recents" class="list"></ul>
-    <p class="hint">The file is opened by a fenec-server this app starts for it and stops when you close the window.</p>
-  </section>
-
-  <section>
-    <div class="row-head">
-      <h2>Servers</h2>
+    <div class="field" id="sheet-db-box" hidden>
+      <label for="sheet-db">Database</label>
+      <select id="sheet-db"></select>
     </div>
-    <ul id="connections" class="list"></ul>
-    <form id="add" autocomplete="off">
-      <div class="grid">
-        <label>Name <input name="name" placeholder="production" spellcheck="false"></label>
-        <label>URL <input name="url" placeholder="https://db.example.com" required spellcheck="false"></label>
-        <label>Token <input name="token" type="password" placeholder="kept in the system keychain" spellcheck="false"></label>
-        <label>Tenant <input name="tenant" placeholder="a node or router, if the token names none" spellcheck="false"></label>
+    <div class="grid2">
+      <div class="field">
+        <label for="port">Port</label>
+        <input id="port" inputmode="numeric" placeholder="any free port" spellcheck="false">
+        <span class="hint" id="port-note">Empty picks any free port.</span>
       </div>
-      <p class="hint warn" id="clear" hidden>This address is plain http: the token would cross the network unencrypted. Use https:// unless the server is on a network you trust.</p>
-      <div class="buttons">
-        <button type="button" id="forget-token" hidden title="Remove the token saved for this server from the keychain; the connection stays">Forget token</button>
-        <button type="button" id="cancel-edit" hidden>Cancel</button>
-        <button type="submit" id="save">Save connection</button>
+      <fieldset>
+        <legend>Who can reach it</legend>
+        <label class="choice"><input type="radio" name="reach" value="mac" checked><span><span class="strong">This Mac only</span> <span class="mono muted">127.0.0.1</span><span class="hint block">Apps and tools on this computer.</span></span></label>
+        <label class="choice"><input type="radio" name="reach" value="lan"><span><span class="strong">My network</span> <span class="mono muted">0.0.0.0</span><span class="hint block">Other machines too. The server refuses to listen here without a token, and it always has one.</span></span></label>
+      </fieldset>
+    </div>
+    <p class="hint warn" id="lan-warn" hidden>The server speaks plain http: on the network the token and the data cross it unencrypted. Use it on a network you trust, or put a TLS proxy in front.</p>
+    <div class="field">
+      <span class="label" id="tok-label">Token</span>
+      <div class="pick">
+        <code class="token" id="tok-shown" aria-labelledby="tok-label">••••••••••••••••••••••••••</code>
+        <button type="button" id="tok-show">Show</button>
+        <button type="button" id="tok-copy">Copy</button>
+        <button type="button" id="tok-new">New token</button>
       </div>
-    </form>
-    <p class="hint">The server must be started with <code>--studio</code>. Its own studio opens in the window, so there is no CORS to set up.</p>
-  </section>
-
-  <p id="status" role="status"></p>
-  <p class="foot" id="keychain"></p>
-</main>
+      <span class="hint">Kept in your Keychain. The server gets it in its environment, never on its command line.</span>
+    </div>
+    <fieldset>
+      <legend>When a write is safe on disk</legend>
+      <div class="inline">
+        <label class="radio"><input type="radio" name="sync" value="always"> Every write</label>
+        <label class="radio"><input type="radio" name="sync" value="250" checked> Every 250 ms</label>
+        <label class="radio"><input type="radio" name="sync" value="off"> When the system writes</label>
+      </div>
+      <span class="hint" id="sync-note"></span>
+    </fieldset>
+    <fieldset>
+      <legend>Beside the data</legend>
+      <div class="grid2 two">
+        <label class="choice"><input type="checkbox" name="studio" checked><span><span class="strong">The studio</span><span class="hint block">Browse and query at /_studio/ in any browser.</span></span></label>
+        <label class="choice"><input type="checkbox" name="compact" checked><span><span class="strong">Compact by itself</span><span class="hint block">Once half the file is dead, beside the queries.</span></span></label>
+        <label class="choice"><input type="checkbox" name="mcp"><span><span class="strong">Tools for AI agents</span><span class="hint block">MCP: schema, search, query and get.</span></span></label>
+        <label class="choice"><input type="checkbox" name="metrics"><span><span class="strong">Prometheus metrics</span><span class="hint block">On a port of their own, on this Mac.</span></span></label>
+      </div>
+    </fieldset>
+    <div class="field">
+      <span class="label">What the app runs</span>
+      <pre id="command"></pre>
+    </div>
+    <p class="err" id="sheet-error" role="alert"></p>
+    <div class="buttons">
+      <button type="button" id="sheet-cancel">Cancel</button>
+      <button type="submit" id="sheet-start" class="primary">Start server</button>
+    </div>
+  </form>
+</dialog>
 <script type="module" src="index.js"></script>
 </body>
 </html>

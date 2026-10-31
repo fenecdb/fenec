@@ -14,7 +14,7 @@ const tail = (text: string, lines = 8) => text.trim().split("\n").slice(-lines).
 export function heldNotice(name: string, serverSaid: string): Notice {
 	return {
 		title: "This database is open in another program",
-		message: `${name} is open in another program: another fenec studio, a fenec-server, or an app that uses the file.`,
+		message: `${name} is open in another program: another fenec studio, a fenec-server, the fenec shell, or an app that uses the file.`,
 		hint: "Close it there first. Two programs over one file would corrupt it.",
 		detail: tail(serverSaid),
 		actions: [{ id: "retry", label: "Try again" }],
@@ -140,6 +140,36 @@ export function remoteNotice(name: string, origin: string, probe: Exclude<Probe,
 			};
 	}
 }
+
+/** A served database's port is another program's. */
+export function portTakenNotice(name: string, port: number, serverSaid: string): Notice {
+	return {
+		title: `Port ${port} is taken`,
+		message: `Another program listens on port ${port}, so ${name} was not served.`,
+		hint: "Pick another port, or leave it empty for any free port.",
+		detail: tail(serverSaid, 4),
+		actions: [{ id: "settings", label: "Change the port" }],
+	};
+}
+
+/** A served database's server exited without being asked to. */
+export function servedDiedNotice(name: string, exit: number | null, serverSaid: string): Notice {
+	return {
+		title: "A database server stopped",
+		message: `The fenec-server serving ${name} exited (${exit === null ? "killed by a signal" : `code ${exit}`}). Apps connected to it get no answer now.`,
+		hint: "Nothing written before it stopped is lost. Start it again with the same settings, or look at its output in Servers.",
+		detail: tail(serverSaid),
+		actions: [{ id: "start", label: "Start again" }],
+	};
+}
+
+/** What a backup of a database whose writes the system syncs says: its server serves no stream. */
+export const SYNC_OFF_BACKUP =
+	"Its writes are synced when the system decides (When the system writes), and a backup is taken from what is on disk, which such a server does not promise. Choose Every 250 ms or Every write in its server's settings, or stop it: a database nothing serves is backed up by a server started for that alone.";
+
+/** What a backup through a server started before its backups were set up says: it was given no stream (serving.ts). */
+export const STARTED_BEFORE_BACKUPS =
+	"Its server was started before its backups were set up, so it serves no stream to take them from. Restart it, or close its window, and back it up again.";
 
 export function gone(what: string): Notice {
 	return { title: "That is gone", message: `${what} does not exist any more.` };

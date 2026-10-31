@@ -292,12 +292,42 @@ func TestAWriteThatMissesItsCountIsRefusedAndPutBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = db.Batch(ctx, fenecdb.Stmt(met, metParams...), fenecdb.Stmt(unmet, unmetParams...))
-	if e := statusOf(t, err); e.Status != 412 || e.Code != fenecdb.CodeUnmet || e.Completed != 0 || e.At != 1 {
+	// A require that gave no reason says none.
+	if e := statusOf(t, err); e.Status != 412 || e.Code != fenecdb.CodeUnmet || e.Completed != 0 || e.At != 1 || e.Reason != "" {
 		t.Fatalf("an unmet batch: %+v", e)
 	}
 	rows := must(db.Query(ctx, "get "+name+" select balance")).of(t)
 	if len(rows) != 1 || rows[0]["balance"] != 5.0 {
 		t.Fatalf("an unmet batch left %v", rows)
+	}
+	// A reason tells which guard refused, wherever it stands in the batch.
+	debit, debitParams, err := accounts.Where("name", "=", "a").Where("balance", ">=", 50).
+		ToUpdate(fenecdb.D("balance", 0), fenecdb.Require(1), fenecdb.Reason("insufficient funds"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	credit, creditParams, err := accounts.Where("name", "=", "nobody").
+		ToUpdate(fenecdb.D("balance", 50), fenecdb.Require(1), fenecdb.Reason("no account to credit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Batch(ctx, fenecdb.Stmt(debit, debitParams...), fenecdb.Stmt(credit, creditParams...))
+	if e := statusOf(t, err); e.Status != 412 || e.At != 0 || e.Reason != "insufficient funds" {
+		t.Fatalf("a batch whose debit is unmet: %+v", e)
+	}
+	_, err = db.Batch(ctx, fenecdb.Stmt(credit, creditParams...))
+	if e := statusOf(t, err); e.At != 0 || e.Reason != "no account to credit" {
+		t.Fatalf("a batch whose credit is unmet: %+v", e)
+	}
+	// Written into the text, its quote and backslash come back as given.
+	_, err = accounts.Where("name", "=", "nobody").Delete(ctx, fenecdb.Require(1), fenecdb.Reason(`it's a \ b`))
+	if e := statusOf(t, err); e.Reason != `it's a \ b` {
+		t.Fatalf("an unmet delete: %+v", e)
+	}
+	// A read's guard says its reason too.
+	_, err = accounts.Where("name", "=", "nobody").Require(1, fenecdb.Reason("no such account")).Rows(ctx)
+	if e := statusOf(t, err); e.Status != 412 || e.Reason != "no such account" {
+		t.Fatalf("an unmet read: %+v", e)
 	}
 }
 

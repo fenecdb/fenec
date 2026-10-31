@@ -36,6 +36,12 @@ public struct FenecError: Error, CustomStringConvertible, Sendable, Equatable {
     /// quota's 429 to the millisecond (`retry_after_ms`), a move's or a
     /// failover's 503 in whole seconds (`Retry-After`).
     public let retryAfter: Double?
+    /// What a `require n else '<reason>'` that refused said (`.unmet`):
+    /// the statement's own words, by which a caller tells "insufficient
+    /// funds" from "no such account" -- where `at` moves with every
+    /// statement put in front of it. From the library and a server alike;
+    /// nil where the statement gave none.
+    public let reason: String?
     /// The parameters the library asked for again as JSON (`exact`).
     let exact: [Int]?
 
@@ -43,7 +49,7 @@ public struct FenecError: Error, CustomStringConvertible, Sendable, Equatable {
         self.init(code: code, message: message, exact: nil)
     }
 
-    init(code: Code, message: String, exact: [Int]?) {
+    init(code: Code, message: String, exact: [Int]?, reason: String? = nil) {
         self.code = code
         self.message = message
         self.exact = exact
@@ -52,11 +58,12 @@ public struct FenecError: Error, CustomStringConvertible, Sendable, Equatable {
         self.completed = nil
         self.quota = nil
         self.retryAfter = nil
+        self.reason = reason
     }
 
     init(
         code: Code, message: String, status: Int, at: Int?, completed: Int?,
-        quota: String? = nil, retryAfter: Double? = nil
+        quota: String? = nil, retryAfter: Double? = nil, reason: String? = nil
     ) {
         self.code = code
         self.message = message
@@ -66,6 +73,7 @@ public struct FenecError: Error, CustomStringConvertible, Sendable, Equatable {
         self.completed = completed
         self.quota = quota
         self.retryAfter = retryAfter
+        self.reason = reason
     }
 
     public var description: String { message }
@@ -462,7 +470,8 @@ public final class Fenec: @unchecked Sendable {
         throw FenecError(
             code: FenecError.Code(rawValue: code) ?? .panic,
             message: v["message"]?.string ?? "error \(code)",
-            exact: v["exact"]?.array?.compactMap(\.int)
+            exact: v["exact"]?.array?.compactMap(\.int),
+            reason: v["reason"]?.string
         )
     }
 

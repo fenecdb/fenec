@@ -314,12 +314,23 @@ function tenantControl() {
 
 // ------------------------------------------------------------------ identity
 
+/**
+ * The roles the server read, from the claim it reads them from
+ * (`--jwt-role-claim`): `/_whoami`'s `roles`. The token's own `role` claim
+ * only where a server from before names none -- under another role claim,
+ * `role` is a claim like any other there.
+ */
+function rolesOf(w, c) {
+  if (Array.isArray(w?.roles)) return w.roles;
+  return c.role === undefined ? [] : [c.role].flat();
+}
+
 function identityLine() {
   const w = state.who;
   const c = state.claims ?? {};
   if (w?.kind === 'open') return 'Open server, no token';
   if (w?.kind === 'full') return 'Server token';
-  const role = Array.isArray(c.role) ? c.role.join(', ') : c.role;
+  const role = rolesOf(w, c).join(', ');
   return [w?.sub ?? c.sub ?? 'Token with no subject', role ? `as ${role}` : null].filter(Boolean).join(' ');
 }
 
@@ -384,7 +395,7 @@ function identity() {
   const rows = [
     ['Access', { open: 'Everything: the server asks for no token', full: "Everything: the server's own token", scoped: 'What its policy rules allow, below' }[w.kind] ?? '–'],
     ['Subject', w.sub ?? c.sub ?? '–'],
-    ['Role', c.role === undefined ? '–' : [c.role].flat().join(', ')],
+    ['Role', rolesOf(w, c).join(', ') || '–'],
     ['Tenant', state.tenant ?? (w.tenants ? w.tenants.join(', ') : '–')],
     ['Expires', typeof c.exp === 'number' ? `${new Date(c.exp * 1000).toLocaleString()}, ${clock(s)}` : 'never'],
   ];

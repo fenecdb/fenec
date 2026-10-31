@@ -527,6 +527,14 @@ export declare class FenecError extends Error {
    */
   at?: number;
   /**
+   * The reason the statement's `require n else '<reason>'` gave, where that
+   * refused it (412 over HTTP, a write `FenecSync` was refused, an error in
+   * the page): its own words, by which a caller tells "insufficient funds"
+   * from "no such account" -- beside `at`, which moves with every
+   * statement added in front.
+   */
+  reason?: string;
+  /**
    * How many statements of a stopped `/batch` stayed applied: none, but
    * for a batch holding a `compact`, whose statements run on their own.
    */
@@ -895,9 +903,11 @@ export declare class Query<
    * `n`, or it is refused -- 412 (`unmet`) over HTTP -- and the batch it is
    * in put back. A checkout's guard on a read: `.where({ sku, price })
    * .require(1)`. Not with `count` or an aggregate without `group`; a
-   * write takes `{ require: n }` instead.
+   * write takes `{ require: n }` instead. `{ reason }` says why in the
+   * refusal (`require n else '<reason>'`), the error's `reason`: 1 to 200
+   * bytes, written into the text.
    */
-  require(n: number): Query<F, P, L, Rel, At, Fa>;
+  require(n: number, opts?: { reason?: string }): Query<F, P, L, Rel, At, Fa>;
 
   /** The generated FenecQL and its parameters -- inspectable before running. */
   toFenecQL(): [sql: string, params: unknown[]];
@@ -997,10 +1007,13 @@ export declare class Query<
 /**
  * `require`: the write must write exactly this many rows, a whole number
  * from 0 (`... require n`), or it is refused -- 412 over HTTP, an error in
- * the page -- and the batch it is in put back whole.
+ * the page -- and the batch it is in put back whole. `reason` beside it
+ * says why (`require n else '<reason>'`), the error's `reason`: 1 to 200
+ * bytes, written into the text, never a parameter.
  */
 export interface RequireOptions {
   require?: number;
+  reason?: string;
 }
 
 /**

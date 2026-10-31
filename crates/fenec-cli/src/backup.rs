@@ -297,10 +297,33 @@ pub fn main(command: &str, args: &[String]) -> i32 {
         Upstream::new(a, token).unwrap_or_else(|e| fail(&e))
     };
 
+    // The primary's address and token are checked first: a token missing
+    // is said, exit 2, before anything is made beside the file.
+    let backup_from = (command == "backup").then(upstream);
+
+    // A database file a backup or a restore writes is renamed into its
+    // place, its sync log removed first: held meanwhile, so a server or an
+    // app with the file open -- whose writes would go on into the file
+    // renamed away, and whose log would be gone -- refuses it and is
+    // refused while it is written. An archive's directory is not one.
+    let _held = match command {
+        "backup" if !Path::new(b).is_dir() => Some(b),
+        "restore" => Some(b),
+        _ => None,
+    }
+    .map(|out| {
+        crate::held::take(out, crate::held::Way::Copy).unwrap_or_else(|why| {
+            eprintln!("fenec {command}: {why}");
+            std::process::exit(1);
+        })
+    });
     let result = match command {
-        "backup" => archive::backup(&upstream(), Path::new(b), key.as_ref()).map(|seq| {
-            println!("{b}: the database at change {seq}");
-        }),
+        "backup" => {
+            let from = backup_from.unwrap_or_else(upstream);
+            archive::backup(&from, Path::new(b), key.as_ref()).map(|seq| {
+                println!("{b}: the database at change {seq}");
+            })
+        }
         "archive" => {
             on_signals();
             let upstream = upstream();

@@ -1,0 +1,14 @@
+ecdsa_secp256r1_sha256_p1363_test.json is Project Wycheproof's, unchanged:
+
+  https://github.com/C2SP/wycheproof
+  testvectors_v1/ecdsa_secp256r1_sha256_p1363_test.json
+  at commit d17cc89fa5c8f4f4d378b5385ebf75da5d0926c9
+  (the file last changed in 878e5366008753df2064d40c49f8e2f50f9c6af7)
+  sha256 c60de693930e386c3a5472d08081623ef8504decc54b38ac01ec6b2a2575c986
+
+It is licensed under the Apache License, Version 2.0, a copy of which is
+LICENSE-wycheproof beside it, as Wycheproof's repository holds it.
+tests/es256.rs runs every case in it against crypto::P256Key.
+
+tokens.txt is written by tokens.mjs (node:crypto), whose private keys were
+never kept.

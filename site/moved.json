@@ -89,6 +89,18 @@
     "vector-search": "http-reference#vector-search",
     "wait": "http-reference#wait"
   },
+  "docs/quickstart": {
+    "apps": "install#packages",
+    "as-a-server": "quickstart",
+    "bring-your-own-data": "import",
+    "build": "build",
+    "generate-typescript-from-the-file": "javascript#typescript",
+    "in-the-browser": "quickstart-browser",
+    "in-the-shell": "shell#quickstart",
+    "make-targets-worth-knowing": "build#make-targets",
+    "search-by-meaning": "fenecql-vector#the-vector-clause",
+    "try": "quickstart-browser"
+  },
   "docs/sharding": {
     "a-file-per-tenant": "sharding-design#a-file-per-tenant",
     "across-tenants": "sharding-tenants#across-tenants",

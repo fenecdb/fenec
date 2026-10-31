@@ -22,7 +22,7 @@ SCHEMA ?= 1
 STUDIO_SERVER ?=
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js sync-scenarios-check builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench fence-bench policy-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \
+.PHONY: all test test-js sync-scenarios-check builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench fence-bench policy-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \
 	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down grafana-check deploy-check drill memory clean \
@@ -96,7 +96,7 @@ sync-scenarios-check:
 builder-golden:
 	node web/golden.mjs
 
-## The SDKs' tests of the FenecQL pages' builder tabs written again: each
+## The SDKs' tests of the site's builder tabs written again: each
 ## Go, .NET, Swift, Kotlin and Dart tab as the page shows it, which that
 ## SDK's tests run (site/builder_tabs.py; its --check runs the JavaScript
 ## and Python tabs and fails while these are behind the pages)
@@ -115,10 +115,11 @@ studio-test: wasm
 	cd studio && npm ci --no-audit --no-fund --loglevel=error && npm run e2e
 
 ## fenec studio as a desktop app (beta; macOS on Apple silicon, see
-## integrations/studio-desktop/README.md): the server it bundles built from this
-## checkout (scripts/get-server.sh; STUDIO_SERVER=0.1.12 downloads that
-## release's asset instead and checks its SHA-256 against the release's
-## SHA256SUMS), then the unsigned .app and .dmg, in build/ and artifacts/ there.
+## integrations/studio-desktop/README.md): the server and the `fenec` shell it
+## bundles built from this checkout (scripts/get-server.sh; STUDIO_SERVER=0.1.12
+## downloads that release's asset, which holds both, instead and checks its
+## SHA-256 against the release's SHA256SUMS), then the unsigned .app and .dmg,
+## in build/ and artifacts/ there.
 ## The toolchain (Electrobun's Hutch, its Bun and runtime) is fetched into
 ## .hutch-home/ in that directory on first use: nothing is installed globally
 ## and no shell file is touched. With ELECTROBUN_DEVELOPER_ID set (and the
@@ -132,12 +133,15 @@ studio-desktop:
 ## none of the test hooks, the sources type-checked and the unit tests run
 ## (names, the remote probe, wording, the token hand-off script, the server's
 ## environment, a token and its address, get-server.sh, the signing
-## switches, the Hutch pin), then the test variant, the same app with the
+## switches, the Hutch pin, a server's arguments, the figures of /_metrics,
+## and the real server and shell from bin/ started, backed up and restored
+## through the app's own code), then the test variant, the same app with the
 ## hooks and an identifier of its own, is built and driven through every
 ## scripted check (integrations/studio-desktop/scripts/checks): open, edit,
 ## close and reopen a file, a file another program holds, a server that dies,
 ## the app killed, the sandbox, every window held to where it is, what a window
-## keeps, saved servers and the Keychain, a new database, a file from Finder.
+## keeps, saved servers and the Keychain, a new database, a database served
+## and its token, backups and restores, a file from Finder.
 ## Needs a window server (a logged-in Mac); logs of a failure are in $$SD_DIR
 ## (default: fenec-desktop-checks under the temp directory). It leaves the
 ## test variant (build-test/) a program LaunchServices may offer for a .fenec
@@ -330,10 +334,17 @@ fence-bench:
 ## under a policy of a plain rule, a field list, a transition, a field
 ## list answering its row and a rule reading another collection, and a read
 ## by id under three of them, in process and over HTTP, in turns; ARGS="20000
-## plain,reach" names sides, ARGS=streams a write beside scoped streams
+## plain,reach" names sides, ARGS=streams a write beside scoped streams,
+## ARGS=ranges an ordered index's range under a rule ordering by a claim
 ## (crates/fenec-http/examples/policy.rs)
 policy-bench:
 	$(CARGO) run --release -p fenec-http --example policy -- $(or $(ARGS),20000)
+
+## What checking a JSON Web Token costs, HS256, RS256 and ES256 in turns: the
+## signature alone, a token's first check and one found among those verified
+## (crates/fenec-http/examples/jwt.rs)
+jwt-bench:
+	$(CARGO) run --release -p fenec-http --example jwt -- $(or $(ARGS),300)
 
 ## Replication: a replica's lag under each sync policy, how fast it
 ## catches up and starts from an image, and what a failover loses.

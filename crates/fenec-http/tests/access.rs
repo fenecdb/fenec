@@ -1513,6 +1513,42 @@ fn a_scoped_token_puts_a_parameter_s_documents_and_upserts_its_own_rows() {
     );
 }
 
+/// A `require`'s reason is the statement's own words: a scoped token is
+/// told it, alone and in a `/batch` beside `at`, as it is told the count
+/// -- they name nothing of a row it may not read. Another user's row its
+/// rules leave out counts as no row, so the reason is what the guard says
+/// of the rows the token reaches.
+#[test]
+fn a_scoped_token_is_told_its_require_s_reason() {
+    let n = start();
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let bob = n.token(r#"{"sub":"bob"}"#);
+    assert_eq!(n.query(&alice, "insert notes {title: \"a\"}").0, 200);
+    let (status, body) = n.query(
+        &bob,
+        "set notes {title: \"b\"} where title = \"a\" require 1 else 'no such note'",
+    );
+    assert_eq!(status, 412, "{body}");
+    assert_eq!(
+        body,
+        r#"{"error":"no such note (`set notes` wrote 0 rows, and requires 1)","reason":"no such note"}"#
+    );
+    let batch = [
+        line("insert notes {title: \"c\"}"),
+        line("get notes where title = \"a\" limit 1 require 1 else 'not yours'"),
+    ]
+    .join("\n");
+    let (status, body) = n.call(Some(&bob), "POST", "/batch", &batch);
+    assert_eq!(status, 412, "{body}");
+    assert_eq!(
+        body,
+        r#"{"error":"unmet: not yours (`get notes` answered 0 rows, and requires 1)","completed":0,"at":1,"reason":"not yours"}"#
+    );
+    // Put back whole: bob's note is not there, alice's is as it was.
+    let (_, body) = n.query(ROOT, "get notes select owner, title order id");
+    assert_eq!(body, r#"[{"owner":"alice","title":"a"}]"#);
+}
+
 const QUEUES: &str = "\
 jobs  read                               where queue = $jwt.queue and hidden = false
 jobs  update(owner, run_at, attempts)    where queue = $jwt.queue          for worker

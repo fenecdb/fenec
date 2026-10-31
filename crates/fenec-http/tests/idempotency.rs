@@ -189,6 +189,36 @@ fn a_key_is_for_one_request_one_user_and_a_write_that_landed() {
     assert!(matches!(peek, 403 | 404), "{peek}");
 }
 
+/// A key is kept as its owner, `U+001F` and the key, so a key holding that
+/// character, beside a subject holding it, named another subject's: `sub`
+/// "a\u{1f}b" with key "c" is `sub` "a" with key "b\u{1f}c", which was
+/// replayed the other's answer. A key holds no control character.
+#[test]
+fn a_key_holding_a_control_character_is_refused() {
+    let n = start(Duration::from_secs(3600));
+    let joined = n.access.mint("{\"sub\":\"a\\u001fb\"}").unwrap();
+    let a = n.access.mint("{\"sub\":\"a\"}").unwrap();
+    let put = "put notes {t: \"mine\"}";
+    let first = n.query(&joined, Some("c"), put);
+    assert_eq!(first.status, 200, "{}", first.body);
+    let other = n.query(&a, Some("b\u{1f}c"), put);
+    assert_eq!(
+        (other.status, other.replayed),
+        (400, false),
+        "{}",
+        other.body
+    );
+    assert!(other.body.contains("control"), "{}", other.body);
+    for key in ["tab\there", "nul\u{0}", "del\u{7f}"] {
+        assert_eq!(
+            n.query(ROOT, Some(key), "put logs {t: \"x\"}").status,
+            400,
+            "{key:?}"
+        );
+    }
+    assert_eq!(n.count("logs"), "[{\"count\":0}]");
+}
+
 #[test]
 fn a_key_past_its_time_is_a_new_request() {
     let n = start(Duration::from_millis(200));

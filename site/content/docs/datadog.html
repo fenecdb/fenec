@@ -116,7 +116,7 @@ same attributes. The Agent tails both files; the pipeline makes their
 attributes Datadog's own.</p>
 
 <pre data-lang="json">{"at":"2026-10-05T09:30:12.310Z","event":"slow","level":"warn","proto":"http","peer":"10.0.0.7:53112","request_id":"9f2c41d07ab35e18","duration_ms":312.408,"kind":"read","failed":false,"tenant":"acme","statement":"POST /query {\"query\":\"get people order name\"}"}
-{"at":"2026-10-05T09:32:05.117Z","event":"refused","level":"warn","proto":"http","peer":"198.51.100.4:40031","request_id":"5d0e7c2a91f4b366","method":"GET","path":"/notes"}</pre>
+{"at":"2026-10-05T09:32:05.117Z","event":"refused","level":"warn","proto":"http","peer":"198.51.100.4:40031","request_id":"5d0e7c2a91f4b366","method":"GET","path":"/notes","reason":"the token has expired"}</pre>
 
 <pre data-lang="yaml">logs:
   - type: file

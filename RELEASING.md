@@ -11,11 +11,13 @@ nothing reaches a registry before the notes have had a read.
    packages, the Flutter plugin, `Package.swift`'s release, the image the
    README pulls and the examples' dependencies (`examples/`). The site needs
    nothing more: `site/build.py` writes the workspace's version into every
-   `{{version}}` of the docs (the Quickstart's install lines and the image's
-   tag among them). Then `cargo check` moves `Cargo.lock`, and the change goes
-   through a pull request like any other. Once the release is published, run
-   the Quickstart's commands once more: the outputs it shows come from the
-   release it installs.
+   `{{version}}` of the docs (Install's lines and the image's tag among them).
+   Then `cargo check` moves `Cargo.lock`, and the change goes through a pull
+   request like any other. Once the release is published, run the commands of
+   the Quickstart, Quickstart: in the browser, Install and The shell once
+   more: the outputs they show come from the release they install (the
+   Quickstart's curl steps and its eight programs are held to their answers by
+   `make languages-test`; the rest are compared by hand).
 2. Build the Swift package's binary: `gh workflow run swift-binary.yml -f
    version=X.Y.Z`. SwiftPM fetches the package by its tag, and the
    `Package.swift` at that tag must already name the XCFramework's zip by

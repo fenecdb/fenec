@@ -305,13 +305,13 @@ moving its lease on. Each names the owner it was claimed by and requires
 its row, so a worker whose lease lapsed, and whose job another worker
 claimed meanwhile, finds out:</p>
 
-<pre data-lang="fenecql">del jobs where id = 1 and owner = "w1" require 1                       -- → 1: done
+<pre data-lang="fenecql">del jobs where id = 1 and owner = "w1" require 1 else 'not your job'    -- → 1: done
 -- 20 s later
-set jobs {run_at: now() + 30000} where id = 2 and owner = "w1" require 1   -- → 1: 30 s more
+set jobs {run_at: now() + 30000} where id = 2 and owner = "w1" require 1 else 'not your job'   -- → 1: 30 s more
 -- 15 s later
 set jobs {owner: "w3", run_at: now() + 30000, attempts: attempts + 1} where run_at &lt;= now() order run_at limit 10 returning id, attempts   -- → 3: w2's lease lapsed
-del jobs where id = 3 and owner = "w2" require 1                       -- → refused: 412, w3 holds it now
-del jobs where id = 3 and owner = "w3" require 1                       -- → 1
+del jobs where id = 3 and owner = "w2" require 1 else 'not your job'    -- → refused: 412, w3 holds it now
+del jobs where id = 3 and owner = "w3" require 1 else 'not your job'    -- → 1
 </pre>
 
 <ul>
@@ -321,6 +321,11 @@ del jobs where id = 3 and owner = "w3" require 1                       -- → 1
     a <code>@unique</code> key on what it writes, or an
     <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a> on
     the request it sends.</li>
+  <li><b>A refused ack says why.</b> The 412 carries the
+    <code>else</code>'s words as <code>reason</code>
+    (<a href="/docs/fenecql-writing#require-reason">A reason for the refusal</a>),
+    so a worker tells a lost lease from a failure of its own by what it
+    reads, not by the place of a statement.</li>
   <li><b>A token a claim</b> rather than the worker's name as the owner —
     <code>"w1:1842"</code> — also tells apart two claims of one job by the
     same worker.</li>

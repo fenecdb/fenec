@@ -245,7 +245,14 @@ struct Failure {
     node: String,
     status: u16,
     why: String,
+    /// What the tenant's `require <n> else '<reason>'` said, where its 412
+    /// carried one: the statement's own words, beside `why`, as a lone
+    /// tenant's answer gives them.
+    reason: Option<String>,
 }
+
+/// A call's failure: its status, why, and the reason a node's 412 named.
+type Failed = (u16, String, Option<String>);
 
 /// What the workers share.
 struct Shared {
@@ -570,6 +577,7 @@ impl Router {
                     node: t.node.clone(),
                     status: 500,
                     why: "the router's call to it failed".into(),
+                    reason: None,
                 }),
             })
             .collect()
@@ -600,27 +608,29 @@ impl Router {
                              across tenants asks the tenants this router places, and region \
                              `{r}`'s router asks its own"
                         ),
+                        None,
                     )),
-                    None => Err((502, format!("no node `{node}` in the directory"))),
+                    None => Err((502, format!("no node `{node}` in the directory"), None)),
                 },
                 Some((addr, token)) => {
                     let headers = Headers::new(token, id, context, &node);
                     self.call(addr, &node, &target, &headers, ask, deadline, shared)
                 }
             };
-            let (status, why) = match called {
+            let (status, why, reason) = match called {
                 Ok(Some(body)) => {
                     let max = self.cfg.fanout.max_rows;
                     return read_answer(ask, max, shared, &t.tenant, &node, body);
                 }
                 Ok(None) => return Got::Unasked,
                 // Asked nowhere, so nothing moved under it.
-                Err((status, why)) if node.starts_with(crate::directory::HOME) => {
+                Err((status, why, reason)) if node.starts_with(crate::directory::HOME) => {
                     return Got::Failed(Failure {
                         tenant: t.tenant.clone(),
                         node,
                         status,
                         why,
+                        reason,
                     })
                 }
                 Err(failed) => failed,
@@ -639,6 +649,7 @@ impl Router {
                         node,
                         status: 404,
                         why: format!("deleted from the directory while the query ran ({why})"),
+                        reason: None,
                     })
                 }
                 Some((n, a)) if n != node => (node, at) = (n, a),
@@ -648,6 +659,7 @@ impl Router {
                         node,
                         status,
                         why,
+                        reason,
                     })
                 }
             }
@@ -657,6 +669,7 @@ impl Router {
             node,
             status: 503,
             why: format!("moved {ASKS} times while the query ran"),
+            reason: None,
         })
     }
 
@@ -672,7 +685,7 @@ impl Router {
         ask: &Ask,
         deadline: Instant,
         shared: &Shared,
-    ) -> std::result::Result<Option<Vec<u8>>, (u16, String)> {
+    ) -> std::result::Result<Option<Vec<u8>>, Failed> {
         let noted = |failed: bool| {
             let mut nodes = shared.nodes.lock().unwrap_or_else(|e| e.into_inner());
             let e = nodes
@@ -688,8 +701,13 @@ impl Router {
                 std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => (
                     504,
                     format!("node `{node}` did not answer within the query's time"),
+                    None,
                 ),
-                _ => (502, format!("node `{node}` ({addr}) did not answer: {e}")),
+                _ => (
+                    502,
+                    format!("node `{node}` ({addr}) did not answer: {e}"),
+                    None,
+                ),
             }
         };
         let answer = self
@@ -724,6 +742,7 @@ impl Router {
             return Err((
                 status,
                 format!("node `{node}` answered {status}, with {length} bytes"),
+                None,
             ));
         }
         let body = answer.read_body_by(&self.pool, deadline).map_err(io)?;
@@ -735,8 +754,12 @@ impl Router {
             401 => Err((
                 502,
                 format!("node `{node}` refused the router's admin token"),
+                None,
             )),
-            _ => Err((status, message_of(&body))),
+            _ => {
+                let (why, reason) = said(&body);
+                Err((status, why, reason))
+            }
         }
     }
 }
@@ -787,19 +810,29 @@ fn over(shared: &Shared, why: String) {
     }
 }
 
-/// What a node said in an error's body: its `error`, or the text.
-fn message_of(body: &[u8]) -> String {
+/// What a node said in an error's body: its `error`, or the text, and the
+/// `reason` a 412 carries where a `require <n> else '<reason>'` gave one.
+fn said(body: &[u8]) -> (String, Option<String>) {
     let text = String::from_utf8_lossy(body);
     if let Ok(members) = fenec_core::json::parse_object(&text) {
-        if let Some((_, Value::Text(e))) = members.into_iter().find(|(k, _)| k == "error") {
-            return e;
+        let (mut error, mut reason) = (None, None);
+        for (k, v) in members {
+            match (k.as_str(), v) {
+                ("error", Value::Text(e)) => error = Some(e),
+                ("reason", Value::Text(r)) => reason = Some(r),
+                _ => {}
+            }
+        }
+        if let Some(e) = error {
+            return (e, reason);
         }
     }
     let t = text.trim();
-    match t.char_indices().nth(300) {
+    let why = match t.char_indices().nth(300) {
         Some((at, _)) => format!("{}...", &t[..at]),
         None => t.to_string(),
-    }
+    };
+    (why, None)
 }
 
 /// The status a failed query answers with: the tenants' own where they
@@ -825,6 +858,10 @@ fn failures_into(out: &mut String, failures: &[Failure]) {
         out.push_str(&quote(&f.node));
         out.push_str(&format!(",\"status\":{},\"error\":", f.status));
         out.push_str(&quote(&f.why));
+        if let Some(r) = &f.reason {
+            out.push_str(",\"reason\":");
+            out.push_str(&quote(r));
+        }
         out.push('}');
     }
     out.push(']');
@@ -1112,6 +1149,7 @@ fn read_answer(
             node: node.to_string(),
             status: 400,
             why,
+            reason: None,
         })
     };
     let Ok(text) = String::from_utf8(body) else {

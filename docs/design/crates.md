@@ -10,7 +10,8 @@ auditable; own codec, own JSON, own HNSW, own SCRAM/crypto, own decimal-to-`f64`
 and back (`str::parse` drags in a 12 KB table, `{}` on a float 20.8 KB of
 Grisu and Dragon -- see `num.rs`). `fenec-core` does
 dev-depend on `fenec-ql` (Cargo allows the cycle through a dev dependency) so tests
-can write real queries.
+can write real queries. `fenec-bench` is the one exception: a measurement
+harness (`publish = false`), where `rusqlite` and `postgres` live.
 
 ## Limits
 
