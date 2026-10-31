@@ -29,19 +29,16 @@ const pause = (ms, signal) => new Promise((resolve) => {
 export async function follow({ fenec, adminToken, s3, bucket, prefix = '', name = 'blobs', wait = 10_000, signal, log = console.log }) {
   const headers = { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' };
   const keys = keysOf(prefix);
-  const move = (since) => fetch(`${fenec}/_changes/consumers/${name}`, { method: 'POST', headers, body: JSON.stringify({ since }) });
+  // PATCH moves the consumer; a POST only makes it.
+  const move = (since) => fetch(`${fenec}/_changes/consumers/${name}`, { method: 'PATCH', headers, body: JSON.stringify({ since }) });
   const commit = async (since) => {
     const res = await move(since);
     if (!res.ok) throw new Error(`commit of ${name} at ${since}: ${res.status}`);
   };
-  // Made once, where there is none. A POST to a consumer that exists moves it
-  // to the last write on disk, and every deletion since it was stopped is lost.
-  const listing = await fetch(`${fenec}/_changes/consumers`, { headers });
-  if (!listing.ok) throw new Error(`/_changes/consumers: ${listing.status}`);
-  if (!(await listing.json()).some((c) => c.name === name)) {
-    const made = await fetch(`${fenec}/_changes/consumers/${name}`, { method: 'POST', headers });
-    if (!made.ok) throw new Error(`/_changes/consumers/${name}: ${made.status}`);
-  }
+  // Made at every start: a POST makes the consumer (201) and leaves one that
+  // exists where it stands (200), so a restart carries on from the last commit.
+  const made = await fetch(`${fenec}/_changes/consumers/${name}`, { method: 'POST', headers });
+  if (!made.ok) throw new Error(`/_changes/consumers/${name}: ${made.status}`);
   // A server restarted, or not answering for a while, is waited for with a back-off;
   // after RETRIES answers missed the follower ends with an error, so that whatever
   // supervises it starts it again. It ends with a zero only at its own signal.

@@ -1,13 +1,19 @@
 #!/bin/sh
 # docs/auth, run: a fenec-server that takes tokens, held to policy.txt, and
-# what it answers a token it should and one it should not. Two servers, one
+# what it answers a token it should and one it should not. Servers, one
 # after the other:
 #
 #   1. HS256, the secret a file holds and `--mint-token` signing with it:
 #      what to try first, with nothing to sign up for;
 #   2. RS256 from a JWKS file, as an identity provider's tokens come: the
 #      stand-in provider of idp.mjs publishes the file, and the run rotates
-#      its key, breaks the file and sends a token the server does not take.
+#      its key, breaks the file, adds a P-256 key (ES256) and sends a token
+#      the server does not take (ES384);
+#   3. the flags that hold a token to its application, one server for each
+#      provider, and rules that name a claim's value.
+#
+#   (4 to 7: a keys file the server cannot use, a person turned away, a tenant
+#   node, a legacy secret.)
 #
 #   FENEC_SERVER=target/debug/fenec-server sh examples/recipes/auth.sh
 #
@@ -157,37 +163,99 @@ noted() { accepts "$token" || true; grep -q 'the keys read before stay' "$dir/se
 poll 5 noted
 call "the same token" "$token" 'get notes select title'
 grep -o 'jwks.json: .*' "$dir/server.log" | sed 's/ request_id=.*//' | sed "s#$dir/##"
-echo "-- a provider that signs with EC keys"
-call "an ES384 token" "$(node "$here/idp.mjs" ec-token user_2xYzAbc)" 'get notes select title'
+echo "-- a provider that signs with EC keys (Supabase's ES256): its P-256 key comes with the next fetch"
+node "$here/idp.mjs" add-ec-key "$idp" ec-1
+JWKS_PROTO='=http' sh "$here/refresh-jwks.sh" "$idpurl/.well-known/jwks.json" "$dir/jwks.json"
+es256=$(node "$here/idp.mjs" es256-token "$idp" ec-1 user_2xYzAbc)
+poll 5 accepts "$es256"
+call "an ES256 token" "$es256" 'get notes select title'
+call "an ES384 token" "$(node "$here/idp.mjs" es384-token user_2xYzAbc)" 'get notes select title'
 stop
 
 echo
-echo "== 3. rules that name a claim's value, every one pinned to this application"
-policy="$here/policy-claims.txt"
-cp "$idp/jwks.json" "$dir/jwks.json"
-start claims --jwt-keys "$dir/jwks.json"
-setup
-call "" root 'put staff {user: "auth0|dana"}' >/dev/null
-call "" root 'put notes [{owner: "auth0|ada", title: "auth0 note"}, {owner: "ada", title: "ada note"}, {owner: "bob", title: "bob note"}]' >/dev/null
+echo "== 3. a token made for another application, and rules that name a claim's value"
+node "$here/idp.mjs" merge "$idp" "$dir/jwks.json" # the provider's keys and the service's, as refresh-jwks.sh leaves them
 t() { node "$here/idp.mjs" token "$idp" "$@"; }
-API='https://api.example.test'
-call "auth0, a token for the API" "$(t auth0 ada '{"permissions":[]}')" 'get notes select title'
-call "auth0, one holding read:notes" "$(t auth0 ada)" 'get notes select title'
+fresh() { # fresh <name> <owner> <flags...>: a server told the provider's flags, over a note of the owner's and bob's
+    name=$1
+    owner=$2
+    shift 2
+    start "$name" --jwt-keys "$dir/jwks.json" "$@"
+    setup
+    call "" root "put notes [{owner: \"$owner\", title: \"ada note\"}, {owner: \"bob\", title: \"bob note\"}]" >/dev/null
+}
+AUTH0='--jwt-issuer https://acme.us.auth0.com/ --jwt-audience https://api.example.test'
+CLERK='--jwt-issuer https://clerk.example.test --jwt-client https://app.example.test'
+ACCESS='--jwt-issuer https://acme.cloudflareaccess.com --jwt-audience 32eafc7626e974616deaf0dc3ba5c0a0eb5f4d2d1e3b8f0a6c1a2e7d9a4b5c6d'
+FIREBASE='--jwt-issuer https://securetoken.google.com/demo-project --jwt-audience demo-project'
+COGNITO='--jwt-issuer https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_Example --jwt-client 1example23456789'
+SUPABASE='--jwt-issuer https://abcdefgh.supabase.co/auth/v1 --jwt-audience authenticated'
+
+echo "-- the flags of each provider: the keys sign other applications' tokens too (policy.txt)"
+# shellcheck disable=SC2086
+fresh auth0 'auth0|ada' $AUTH0
+call "auth0, a token for the API" "$(t auth0 ada)" 'get notes select title'
 call "auth0, an ID token (aud is the client)" "$(t auth0 ada '{"aud":"Zr8Example"}')" 'get notes select title'
 call "auth0, a token for another API" "$(t auth0 ada '{"aud":["https://other.example.test"]}')" 'get notes select title'
-call "no aud, holding read:notes" "$(t plain ada '{"permissions":["read:notes"]}')" 'get notes select title'
-call "profiles, a token for the API" "$(t auth0 ada)" 'get profiles'
-call "profiles, a token for another API" "$(t auth0 ada '{"aud":["https://other.example.test"]}')" 'get profiles'
-call "dana, in staff, a token for the API" "$(t auth0 dana '{"permissions":[]}')" 'get notes select title'
-call "dana, in staff, another API's" "$(t auth0 dana '{"aud":["https://other.example.test"],"permissions":[]}')" 'get notes select title'
+call "auth0, another tenant" "$(t auth0 ada '{"iss":"https://other.us.auth0.com/"}')" 'get notes select title'
+stop
+# shellcheck disable=SC2086
+fresh clerk ada $CLERK
+call "clerk, this origin" "$(t clerk ada)" 'get notes select title'
+call "clerk, another origin" "$(t clerk ada '{"azp":"https://evil.example.test"}')" 'get notes select title'
+call "clerk, a request with no origin" "$(t clerk ada '{"azp":null}')" 'get notes select title'
+stop
+# shellcheck disable=SC2086
+fresh access ada $ACCESS
 call "access, this application" "$(t access ada)" 'get notes select title'
 call "access, another application of the team" "$(t access ada '{"aud":["0123456789abcdef"]}')" 'get notes select title'
+stop
+# shellcheck disable=SC2086
+fresh firebase ada $FIREBASE
 call "firebase, this project" "$(t firebase ada)" 'get notes select title'
-call "firebase, another project" "$(t firebase ada '{"aud":"other-project"}')" 'get notes select title'
-call "clerk, this origin" "$(t clerk ada '{"azp":"https://app.example.test"}')" 'get notes select title'
-call "clerk, another origin" "$(t clerk ada '{"azp":"https://evil.example.test"}')" 'get notes select title'
+call "firebase, another project" "$(t firebase ada '{"iss":"https://securetoken.google.com/other-project","aud":"other-project"}')" 'get notes select title'
+stop
+# shellcheck disable=SC2086
+fresh cognito ada $COGNITO
 call "cognito, an access token of this client" "$(t cognito ada)" 'get notes select title'
-call "cognito, an ID token" "$(t cognito ada '{"token_use":"id","aud":"1example23456789"}')" 'get notes select title'
+call "cognito, an ID token" "$(t cognito-id ada)" 'get notes select title'
+call "cognito, another app client" "$(t cognito ada '{"client_id":"2other"}')" 'get notes select title'
+stop
+# shellcheck disable=SC2086
+fresh supabase ada $SUPABASE
+call "supabase, this project" "$(t supabase ada)" 'get notes select title'
+call "supabase, another project" "$(t supabase ada '{"iss":"https://zzzzzzzz.supabase.co/auth/v1"}')" 'get notes select title'
+call "supabase, an anonymous sign-in" "$(t supabase ada '{"is_anonymous":true}')" 'get notes select title'
+stop
+
+echo "-- your own service's token, beside the provider's: its issuer is one the server takes, and it names an audience"
+# shellcheck disable=SC2086
+fresh services 'auth0|ada' $AUTH0 --jwt-issuer urn:fenec:services
+who() { # who <what> <token>: what /_whoami takes the token for, or why not
+    printf '%-42s ' "$1"
+    curl -s "$url/_whoami" -H "Authorization: Bearer $2" | jq -c 'if .error then . else {kind, sub} end'
+}
+who "the service's token, no aud" "$(node "$here/idp.mjs" service-token "$idp" files-backend)"
+who "the service's token, aud the API's" "$(node "$here/idp.mjs" service-token "$idp" files-backend '{"aud":"https://api.example.test"}')"
+stop
+
+echo "-- rules that name a claim's value (policy-claims.txt); the flags above are what pin the application"
+policy="$here/policy-claims.txt"
+# shellcheck disable=SC2086
+fresh auth0-rules 'auth0|ada' $AUTH0
+call "" root 'put staff {user: "auth0|dana"}' >/dev/null
+call "auth0, holding read:notes" "$(t auth0 ada)" 'get notes select title'
+call "auth0, a member, no permission" "$(t auth0 ada '{"permissions":[]}')" 'get notes select title'
+call "auth0, another role claim" "$(t auth0 ada '{"permissions":[],"https://example.test/role":"guest"}')" 'get notes select title'
+call "dana, in staff" "$(t auth0 dana '{"permissions":[],"https://example.test/role":"guest"}')" 'get notes select title'
+stop
+# shellcheck disable=SC2086
+fresh cognito-rules ada $COGNITO --jwt-role-claim cognito:groups
+call "cognito, in the group editors" "$(t cognito ada)" 'get notes select title'
+call "cognito, in no group" "$(t cognito ada '{"cognito:groups":[]}')" 'get notes select title'
+stop
+# shellcheck disable=SC2086
+fresh supabase-rules ada $SUPABASE
 call "supabase, a person" "$(t supabase ada)" 'get notes select title'
 call "supabase, an anonymous sign-in" "$(t supabase ada '{"is_anonymous":true}')" 'get notes select title'
 stop
@@ -195,9 +263,9 @@ unset policy
 
 echo
 echo "== 4. a JWKS file with no key this server can use is refused at the start"
-# A P-384 key, for ES384: not one of the algorithms this server verifies.
+# A P-384 key, for ES384: not one of the curves this server verifies.
 printf '{"keys":[{"kty":"EC","crv":"P-384","kid":"ec-1","alg":"ES384","use":"sig","x":"Q873GS5VgaO8sPd7q3e0CLqJr3pjeijRJVNwydrSUPgBcf5Ykn_H60fVfPKBOt9D","y":"lcvLR6f1kd9OIf53hL0pGOwn5ayn655WIT9HNTuheW4jgCo8v7Xj461tr8QVSJwl"}]}' >"$dir/ec.json"
-"$server" --http 127.0.0.1:0 --jwt-keys "$dir/ec.json" --policy "$here/policy.txt" 2>&1 | sed "s#$dir/##" || true
+"$server" --http 127.0.0.1:0 --jwt-keys "$dir/ec.json" $AUTH0 --policy "$here/policy.txt" 2>&1 | sed "s#$dir/##" || true
 
 echo
 echo "== 5. turning a person away before their token expires"
@@ -261,8 +329,10 @@ secret=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n')
 printf '{"keys":[{"kty":"oct","kid":"legacy","alg":"HS256","k":"%s"}]}' "$secret" >"$dir/oct.json"
 sed 's/"k":"[^"]*"/"k":"..."/' "$dir/oct.json"
 echo
-legacy=$("$server" --jwt-keys "$dir/oct.json" --policy "$here/policy.txt" --mint-token '{"sub":"alice"}')
-start legacy --jwt-keys "$dir/oct.json"
+# shellcheck disable=SC2086
+legacy=$("$server" --jwt-keys "$dir/oct.json" $SUPABASE --policy "$here/policy.txt" --mint-token '{"sub":"alice"}')
+# shellcheck disable=SC2086
+start legacy --jwt-keys "$dir/oct.json" $SUPABASE
 setup
 call "" root 'put notes {owner: "alice", title: "alice note"}' >/dev/null
 call "a token signed with the secret" "$legacy" 'get notes select owner, title'

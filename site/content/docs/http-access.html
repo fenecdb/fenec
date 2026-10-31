@@ -467,12 +467,11 @@ keys; no restart is needed. The server reads a file, not a URL: a job that
 fetches the provider's keys into it is yours, and
 <a href="/docs/auth">Auth with your identity provider</a> has one, with what
 Clerk, Auth0, Supabase Auth, Cognito and Cloudflare Access each sign with and
-carry, and what the server does not take (ES256 keys, <code>iss</code> and
-<code>aud</code>, claim names with a colon or a URL). A provider's keys sign
-tokens for every application it hosts (Google's every Firebase project's, an
-Auth0 tenant's every API's, a Cloudflare Access team's every application's), so
-a rule pins the claim that names yours
-(<a href="/docs/auth#rows">Rules that name a claim's value</a>).</p>
+carry, and what the server does not take. A provider's keys sign tokens for
+every application it hosts (Google's every Firebase project's, an Auth0
+tenant's every API's, a Cloudflare Access team's every application's), so give
+the server the issuer and the audience of yours
+(<a href="#whom-a-token-is-for">Whom a token is for</a>, below).</p>
 
 <pre data-lang="bash"># the provider's public keys, as it publishes them
 curl -s https://example.auth0.com/.well-known/jwks.json &gt; jwks.json

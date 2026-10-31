@@ -7,9 +7,10 @@
 #   refresh-jwks.sh https://acme.us.auth0.com/.well-known/jwks.json /etc/fenec/jwks.json [own-keys.json]
 #
 # The new file is written beside the old one and renamed over it, so the server
-# never reads half of one, and only a file holding an RSA key replaces the one
-# in use: an error page, an empty body or a provider that went EC-only leaves
-# the keys that work where they are, and the job fails for whoever watches it.
+# never reads half of one, and only a file holding a key the server verifies
+# with (an RSA one, or an EC one on P-256) replaces the one in use: an error
+# page, an empty body or a provider that went EdDSA-only leaves the keys that
+# work where they are, and the job fails for whoever watches it.
 #
 # A third argument is a JWKS of keys of your own -- the public halves of the
 # keys your backend or Worker signs its short service tokens with -- which go
@@ -27,8 +28,8 @@ tmp=$(mktemp "$file.XXXXXX")
 trap 'rm -f "$tmp" "$tmp.merged"' EXIT
 curl -fsS --proto "${JWKS_PROTO:-=https}" --proto-redir "${JWKS_PROTO:-=https}" --max-redirs 3 \
     --max-filesize 1048576 --max-time 10 "$url" -o "$tmp"
-jq -e '[.keys[]? | select(.kty == "RSA")] | length > 0' "$tmp" >/dev/null ||
-    { echo "refresh-jwks: $url holds no RSA key; $file left as it was" >&2; exit 1; }
+jq -e '[.keys[]? | select(.kty == "RSA" or (.kty == "EC" and .crv == "P-256"))] | length > 0' "$tmp" >/dev/null ||
+    { echo "refresh-jwks: $url holds no RSA or P-256 key; $file left as it was" >&2; exit 1; }
 if [ -n "$own" ]; then
     # A file of your own keys with none in it is a mistake that would drop them
     # from the server's file, and a kid on both sides is one key claiming

@@ -459,19 +459,16 @@ const pause = (ms, signal) =&gt; new Promise((resolve) =&gt; {
 export async function follow({ fenec, adminToken, s3, bucket, prefix = '', name = 'blobs', wait = 10_000, signal, log = console.log }) {
   const headers = { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' };
   const keys = keysOf(prefix);
-  const move = (since) =&gt; fetch(`${fenec}/_changes/consumers/${name}`, { method: 'POST', headers, body: JSON.stringify({ since }) });
+  // PATCH moves the consumer; a POST only makes it.
+  const move = (since) =&gt; fetch(`${fenec}/_changes/consumers/${name}`, { method: 'PATCH', headers, body: JSON.stringify({ since }) });
   const commit = async (since) =&gt; {
     const res = await move(since);
     if (!res.ok) throw new Error(`commit of ${name} at ${since}: ${res.status}`);
   };
-  // Made once, where there is none. A POST to a consumer that exists moves it
-  // to the last write on disk, and every deletion since it was stopped is lost.
-  const listing = await fetch(`${fenec}/_changes/consumers`, { headers });
-  if (!listing.ok) throw new Error(`/_changes/consumers: ${listing.status}`);
-  if (!(await listing.json()).some((c) =&gt; c.name === name)) {
-    const made = await fetch(`${fenec}/_changes/consumers/${name}`, { method: 'POST', headers });
-    if (!made.ok) throw new Error(`/_changes/consumers/${name}: ${made.status}`);
-  }
+  // Made at every start: a POST makes the consumer (201) and leaves one that
+  // exists where it stands (200), so a restart carries on from the last commit.
+  const made = await fetch(`${fenec}/_changes/consumers/${name}`, { method: 'POST', headers });
+  if (!made.ok) throw new Error(`/_changes/consumers/${name}: ${made.status}`);
   // A server restarted, or not answering for a while, is waited for with a back-off;
   // after RETRIES answers missed the follower ends with an error, so that whatever
   // supervises it starts it again. It ends with a zero only at its own signal.
@@ -527,9 +524,10 @@ if (isMain(import.meta.url)) {
     and a store answers the second delete as the first. A consumer is the
     server's token alone: <code>/_changes</code> carries every row of every
     person, so a scoped token is refused (<a href="/docs/http-reference#changes">Change data capture</a>,
-    <a href="/docs/http-reference#consumers">Consumers</a>). A consumer is made
-    once: a <code>POST</code> to one that exists moves it to the last write on
-    disk, and what was deleted while it was stopped is lost.</li>
+    <a href="/docs/http-reference#consumers">Consumers</a>). A consumer is made at
+    every start: a <code>POST</code> makes it (201) and leaves one that exists
+    where it stands (200), so what was deleted while it was stopped is still
+    to come. Only a <code>PATCH</code> moves it.</li>
   <li><b>An upload URL outlives its row.</b> A row deleted while the URL has
     minutes to live, and a <code>PUT</code> with it, leaves an object nobody
     will delete: storage outside every quota the database holds (seen below).

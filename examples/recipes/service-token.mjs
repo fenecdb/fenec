@@ -33,15 +33,19 @@ import { createPrivateKey, createSign } from 'node:crypto';
 
 const b64 = (v) => Buffer.from(typeof v === 'string' ? v : JSON.stringify(v)).toString('base64url');
 
-/** `() => Promise<token>`: signed with `pem`, kept until a minute before it lapses. */
-export function serviceTokens({ pem, sub, kid = 'svc-1', ttl = 300, iss = SERVICES }) {
+/**
+ * `() => Promise<token>`: signed with `pem`, kept until a minute before it lapses.
+ * `aud` is for a server told `--jwt-audience`, which refuses a token naming none
+ * of its audiences; its `--jwt-issuer` must list `iss` too.
+ */
+export function serviceTokens({ pem, sub, kid = 'svc-1', ttl = 300, iss = SERVICES, aud }) {
   const key = createPrivateKey(pem);
   let kept = null;
   return async () => {
     const now = Math.floor(Date.now() / 1000);
     if (kept && kept.exp - 60 > now) return kept.token;
     const head = b64({ alg: 'RS256', typ: 'JWT', kid });
-    const body = b64({ iss, sub, iat: now, exp: now + ttl });
+    const body = b64({ iss, sub, ...(aud ? { aud } : {}), iat: now, exp: now + ttl });
     const sig = createSign('RSA-SHA256').update(`${head}.${body}`).sign(key).toString('base64url');
     kept = { token: `${head}.${body}.${sig}`, exp: now + ttl };
     return kept.token;

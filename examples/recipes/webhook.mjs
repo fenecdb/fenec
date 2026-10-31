@@ -52,14 +52,10 @@ export async function relay({
 }) {
   const headers = { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' };
   const server = (path, init) => fetch(`${fenec}${path}`, { headers, ...init });
-  // Made once, where there is none. A POST to a consumer that exists moves it
-  // to the last write on disk, and every change since it was stopped is lost.
-  const listing = await server('/_changes/consumers');
-  if (!listing.ok) throw new Error(`/_changes/consumers: ${listing.status}`);
-  if (!(await listing.json()).some((c) => c.name === name)) {
-    const made = await server(`/_changes/consumers/${name}`, { method: 'POST' });
-    if (!made.ok) throw new Error(`/_changes/consumers/${name}: ${made.status}`);
-  }
+  // Made at every start: a POST makes the consumer (201) and leaves one that
+  // exists where it stands (200), so a restart carries on from the last commit.
+  const made = await server(`/_changes/consumers/${name}`, { method: 'POST' });
+  if (!made.ok) throw new Error(`/_changes/consumers/${name}: ${made.status}`);
 
   async function deliver(change) {
     const sent = shape === 'ids' ? { seq: change.seq, collection: change.collection, op: change.op, id: change.id ?? change.doc?.id } : change;
@@ -127,7 +123,7 @@ export async function relay({
       }
     }
     // After every delivery of the page was answered, not before.
-    const committed = await server(`/_changes/consumers/${name}`, { method: 'POST', body: JSON.stringify({ since: next }) });
+    const committed = await server(`/_changes/consumers/${name}`, { method: 'PATCH', body: JSON.stringify({ since: next }) });
     if (!committed.ok) throw new Error(`commit of ${name} at ${next}: ${committed.status}`);
   }
 }

@@ -1,7 +1,8 @@
 // A stand-in for an identity provider, to try fenec-server's token checks
 // with nothing to sign up for. It does what a provider does and no more: it
 // holds an RSA key, publishes the public half as a JWKS (`jwks.json`), and
-// signs RS256 tokens that name their key in `kid`. The claims of each
+// signs RS256 tokens that name their key in `kid` (and, once asked to, ES256
+// with a P-256 key, as Supabase's EC signing keys do). The claims of each
 // provider's token (`shapes`) are the shapes its documentation describes,
 // with made-up values; the signature is this script's, so fenec-server
 // accepts them only from a JWKS file this script wrote.
@@ -10,8 +11,11 @@
 //   node idp.mjs add-key <dir> <kid>         a second key joins the JWKS and
 //                                            signs from now on (a rotation)
 //   node idp.mjs token <dir> <shape> <sub> [claims-json]
+//                                            (claims-json is laid over the shape's;
+//                                            a claim given as null is left out)
 //                                            clerk | auth0 | supabase | cognito
-//                                            | access | plain
+//                                            | cognito-id | firebase | access
+//                                            | plain
 //   node idp.mjs service-key <dir> [kid]    a key of your own service, kept
 //                                            apart from the provider's: its
 //                                            public half in service-jwks.json
@@ -22,8 +26,13 @@
 //                                            refresh-jwks.sh makes the file
 //   node idp.mjs service-token <dir> <sub> [claims-json]
 //                                            a short token your service signs
-//   node idp.mjs ec-token <sub>              an ES384 token, which a server
-//                                            that takes RS256 and HS256 refuses
+//   node idp.mjs add-ec-key <dir> <kid>      a P-256 key joins the JWKS beside
+//                                            the RSA ones, as a provider that
+//                                            signs ES256 publishes it
+//   node idp.mjs es256-token <dir> <kid> <sub>
+//                                            an ES256 token signed with that key
+//   node idp.mjs es384-token <sub>           an ES384 token, which a server
+//                                            refuses whatever its keys hold
 //   node idp.mjs serve <dir>                 the JWKS over HTTP at
 //                                            /.well-known/jwks.json, as a
 //                                            provider serves it; says where
@@ -47,6 +56,14 @@ export function addKey(dir, kid, keep = readJwks(dir).keys) {
   writeFileSync(join(dir, 'signing-kid'), kid);
   const jwk = { ...publicKey.export({ format: 'jwk' }), kid, alg: 'RS256', use: 'sig' };
   writeFileSync(join(dir, 'jwks.json'), JSON.stringify({ keys: [...keep, jwk] }, null, 2));
+}
+
+/** A P-256 key joins the JWKS (the RSA ones stay); `token` still signs with the newest RSA key. */
+export function addEcKey(dir, kid = 'ec-1') {
+  const { publicKey, privateKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  writeFileSync(join(dir, `${kid}.pem`), privateKey.export({ type: 'pkcs8', format: 'pem' }));
+  const jwk = { ...publicKey.export({ format: 'jwk' }), kid, alg: 'ES256', use: 'sig' };
+  writeFileSync(join(dir, 'jwks.json'), JSON.stringify({ keys: [...readJwks(dir).keys, jwk] }, null, 2));
 }
 
 function readJwks(dir) {
@@ -94,6 +111,16 @@ export function token(dir, claims, { ttl = 3600, kid = readFileSync(join(dir, 's
   return `${head}.${body}.${sig}`;
 }
 
+/** An ES256 token for `claims`, signed with the P-256 key `kid` (ECDSA over SHA-256, r and s as 64 bytes). */
+export function es256Token(dir, kid, claims, ttl = 3600) {
+  const key = createPrivateKey(readFileSync(join(dir, `${kid}.pem`)));
+  const now = Math.floor(Date.now() / 1000);
+  const head = b64({ alg: 'ES256', typ: 'JWT', kid });
+  const body = b64({ iat: now, nbf: now, exp: now + ttl, ...claims });
+  const sig = signRaw('sha256', Buffer.from(`${head}.${body}`), { key, dsaEncoding: 'ieee-p1363' });
+  return `${head}.${body}.${sig.toString('base64url')}`;
+}
+
 /** The claims of each provider's token, as its documentation lists them
  * (docs/auth lists the pages), with invented values. `sub` is the user's. */
 export const shapes = {
@@ -128,6 +155,12 @@ export const shapes = {
     client_id: '1example23456789', token_use: 'access', scope: 'openid', username: sub,
     'cognito:groups': ['editors'], role: 'member',
   }),
+  // Cognito's ID token: it names the app client in `aud` and has no `client_id`
+  // (the access token above has no `aud` and does).
+  'cognito-id': (sub) => ({
+    iss: 'https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_Example', sub, aud: '1example23456789',
+    token_use: 'id', 'cognito:username': sub, 'cognito:groups': ['editors'],
+  }),
   // A Firebase ID token: Google signs every project's with the same keys, and
   // `aud` is the project's id, `iss` the project's address.
   firebase: (sub) => ({
@@ -143,9 +176,9 @@ export const shapes = {
   plain: (sub) => ({ sub }),
 };
 
-/** An ES384 token signed by a key no JWKS here holds: what a provider that
- * signs with EC keys sends, which this server does not take. */
-export function ecToken(sub) {
+/** An ES384 token signed by a key no JWKS here holds: a curve this server
+ * does not verify, whatever its keys file holds. */
+export function es384Token(sub) {
   const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'P-384' });
   const now = Math.floor(Date.now() / 1000);
   const head = b64({ alg: 'ES384', typ: 'JWT', kid: 'ec-1' });
@@ -169,12 +202,16 @@ if (isMain(import.meta.url)) {
   else if (cmd === 'add-key') addKey(a, b);
   else if (cmd === 'token') {
     if (!shapes[b]) throw new Error(`shape: ${Object.keys(shapes).join(' | ')}`);
-    console.log(token(a, { ...shapes[b](c), ...(d ? JSON.parse(d) : {}) }));
-  } else if (cmd === 'ec-token') console.log(ecToken(a));
+    const claims = { ...shapes[b](c), ...(d ? JSON.parse(d) : {}) };
+    for (const name of Object.keys(claims)) if (claims[name] === null) delete claims[name]; // a null leaves the claim out
+    console.log(token(a, claims));
+  } else if (cmd === 'es384-token') console.log(es384Token(a));
+  else if (cmd === 'add-ec-key') addEcKey(a, b);
+  else if (cmd === 'es256-token') console.log(es256Token(a, b, { ...shapes.plain(c), ...(d ? JSON.parse(d) : {}) }));
   else if (cmd === 'serve') serve(a);
   else if (cmd === 'service-key') addServiceKey(a, b);
   else if (cmd === 'merge') merge(a, b);
   else if (cmd === 'jwk') console.log(JSON.stringify(jwkOf(a, b), null, 2));
   else if (cmd === 'service-token') console.log(serviceToken(a, b, c ? JSON.parse(c) : {}));
-  else throw new Error('usage: node idp.mjs init|add-key|token|ec-token|serve|service-key|jwk|merge|service-token ...');
+  else throw new Error('usage: node idp.mjs init|add-key|add-ec-key|token|es256-token|es384-token|serve|service-key|jwk|merge|service-token ...');
 }

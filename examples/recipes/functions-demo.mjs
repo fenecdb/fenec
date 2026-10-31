@@ -177,6 +177,12 @@ try {
     // A relay has made its consumer when the server lists it: a write before that is before its place.
     const consumerMade = (name) => until(`consumer ${name}`, async () =>
       (await (await fetch(`${url}/_changes/consumers`, { headers: { authorization: 'Bearer root' } })).json()).some((c) => c.name === name));
+    // A relay has committed what it delivered when its consumer's place is at the last `seq` done.
+    // Stopped before that, a delivery answered while the abort arrived goes out again at the next
+    // start, which is what the receiver's `seq` is for and what a run of this demo should not depend on.
+    const caughtUp = (name) => until(`consumer ${name} caught up`, async () =>
+      (await (await fetch(`${url}/_changes/consumers`, { headers: { authorization: 'Bearer root' } })).json())
+        .some((c) => c.name === name && c.since >= Math.max(...done)));
     let relayer = run();
     await consumerMade('webhook');
     await query(url, 'root', 'put orders {customer: "ada", total: 40}');
@@ -203,12 +209,14 @@ try {
     say(`   a signature of 64 accents: ${accents}`);
     await query(url, 'root', 'put orders {customer: "fa", total: 5, note: $1}', ['€'.repeat(70_000)]);
     await until('the large order', async () => done.size >= 2);
+    await caughtUp('webhook');
 
     say('-- the relay stopped; an order is written meanwhile; a new relay carries on from the place the server kept');
     await relayer.stop();
     await query(url, 'root', 'put orders {customer: "cy", total: 7}');
     relayer = run();
     await until('the third order', async () => done.size >= 3);
+    await caughtUp('webhook');
     await relayer.stop();
 
     say('-- the receiver rotates its secret before the relay has heard');
@@ -220,6 +228,7 @@ try {
     say('-- the relay is given both secrets for a while, and the same change goes out');
     relayer = run({ secrets: ['whsec-2', 'whsec-1'] });
     await until('the fourth order', async () => done.size >= 4);
+    await caughtUp('webhook');
     await relayer.stop();
 
     say('-- only ids, for a receiver that has no business with the rest');
@@ -227,6 +236,7 @@ try {
     await consumerMade('webhook-ids');
     await query(url, 'root', 'del orders where customer = "di"');
     await until('the ids', async () => done.size >= 5);
+    await caughtUp('webhook-ids');
     await relayer.stop();
 
     say('-- a receiver whose address has moved: a redirect is not followed');
