@@ -278,6 +278,21 @@ had -- both searches, the `HashMap<DocId, u32>` a `DocMap` keeps sparse ids
 in, the text index's `best_first` sort -- because in types of its own it was 11 KB of the
 browser module; this way it is 2.
 
+**`fuse` cannot tell a list that found something from one that found
+chance**, so a caller whose words match nothing but prefixes leaves them out.
+`prefix=12` makes every word of a query reach the three letters it begins
+with; for a question in a language the text is not in, that is a list of
+`tell` and `version`, and fused it voted as much as the meaning. In the docs
+site's search the right page stood 1st to 6th as the prose around it changed
+and 1st every time with the list left out. A weight was measured and refused
+(at a fifth of a vote the page stood 1st or 2nd, at 0.3 2nd to 5th, a number
+fitted to two questions, and `fuse` adds ranks so as to have none to tune);
+so was a longer `prefix_min`, which costs the typist (`stud` finds nothing at
+4, `compa` at 5). The caller asks instead whether a best hit of the words
+holds a word of the query whole or to a five-letter stem, which
+`highlight()` marks, and fuses only if so (`site/search-query.js`,
+`site/README.md`).
+
 ## highlight and facet
 
 **`highlight()` reads the text again; `facet` counts beside the rows.**

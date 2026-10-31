@@ -47,8 +47,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--once", action="store_true", help="relay what there is, then stop")
     a = p.parse_args(argv)
     db = Client(a.url, token=a.token)
-    if not any(c["name"] == a.consumer for c in db.consumers()):
-        db.consumer(a.consumer)
+    # Made where there is none; one that is there goes on from where it
+    # stands, so a relay stopped and started again misses nothing.
+    db.consumer(a.consumer)
     pause = 0.5
     batches = db.follow(a.consumer, limit=a.limit, wait=0 if a.once else 10.0)
     while True:
@@ -58,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
                 if not got.writes:
                     return 0
                 deliver(a.to, got.writes, 30.0)
-                db.consumer(a.consumer, got.next)
+                db.move_consumer(a.consumer, got.next)
                 continue
             writes = next(batches)
             while True:

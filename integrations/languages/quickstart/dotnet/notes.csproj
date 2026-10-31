@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- What `dotnet new console` writes on the Quickstart, with the FenecDb SDK
+       as this checkout holds it in place of `dotnet add package FenecDb`.
+       Run by ../../run-tests.sh. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RollForward>Major</RollForward>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../dotnet/FenecDb/FenecDb.csproj" />
+  </ItemGroup>
+</Project>

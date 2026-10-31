@@ -19,6 +19,7 @@ mod mcp;
 mod node_archive;
 mod ordered_claims;
 mod prepared;
+mod providers;
 mod reach;
 mod replication;
 mod require;

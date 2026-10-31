@@ -14,7 +14,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [tenants.md](tenants.md) -- scaling out by tenant, the router's directory, moves, failovers and leases, and replicas tried again
 - [regions.md](regions.md) -- regions and zones, a region's own directory, and the global entry
 - [read-replicas.md](read-replicas.md) -- a tenant's read replicas in other regions, the reads marked for them, and reading one's own writes across a failover
-- [access.md](access.md) -- scoped tokens, field lists, rules reading another collection, a token bound to its tenant, and empty tokens
+- [access.md](access.md) -- scoped tokens, field lists, rules reading another collection, a token bound to its tenant, whom a token is for, and empty tokens
 - [quotas.md](quotas.md) -- a tenant's quotas, how the sync meets them, and the wait every 503 names
 - [http.md](http.md) -- the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows and connections no thread is made for
 - [hnsw.md](hnsw.md) -- the graph as derived data, its records, its restore and open, its linking, and vectors written again
@@ -182,3 +182,4 @@ A proposal holds no invariant until it is built, and is listed apart:
 142. [Every way a server stops is the one shutdown](durability.md#the-one-shutdown) (added after the move, under *Durability*)
 143. [A release is installed from its own files, each checked before it is used](integrations.md#install-channels) (added after the move, under *Integrations and deploy*)
 144. [The desktop app is a window on a studio a `fenec-server` serves, one server per file](integrations.md#studio-desktop) (added after the move, under *Integrations and deploy*)
+145. [A token is taken only from the issuers, for the audiences and clients, a server was told](access.md#whom-a-token-is-for) (added after the move, under *Access*)

@@ -254,7 +254,11 @@ leading from an archive's end never lands among its changes
 
 **[`/_changes` reads the writes on disk, documents and all](docs/design/replication.md#change-data-capture)**
 (`Database::changes_in`): only what an fsync covered, never with writes
-missing (410); a scoped token is refused.
+missing (410); a scoped token is refused. A consumer is made by a `POST`,
+which never moves one that is there (200 at its place, 409 for a `since`
+ahead of it), and moved by a `PATCH` alone, which makes none
+(`cdc::make`, `cdc::commit`); on a tenant each is a write held against a
+move and the lease (`consumer_write`).
 
 **[A read can wait for a write on a replica](docs/design/replication.md#fenec-after)**
 (`Hub::reached`): served once the database holds that change or 504
@@ -387,6 +391,19 @@ reading one, or `new.` or `expired()` in one are refused at startup
 names.](docs/design/access.md#tenant-binding)** `route_tenant` asks it,
 and no route below `/t/<t>/` may skip it; every tenant's database installs
 the `Check` hook (`Tenants::check_scoped_writes`).
+
+**[A token is taken only from the issuers, for the audiences and clients,
+a server was told.](docs/design/access.md#whom-a-token-is-for)**
+`Demands::whom` asks `iss`, `aud` (a text or a list) and `azp` (else
+`client_id`) in `Access::check`, after the signature and before a token is
+kept, so every route meets it through `authenticate`; a refusal is 401
+naming the check, never the token's value, clears no wait, and its audit
+line names the check (`audit::refusal`). A server told none takes every
+token its keys sign (said at the start under `--jwt-keys`), and a `--jwt-*`
+flag without keys is refused. A policy names top-level claims alone, quoted
+where not a word (`claim_name`): a path into a nested object, or an
+unquoted name running into `-` or `:`, is refused at startup, never read; a
+role is the word after the last `for` or a quoted name (`role_of`).
 
 **[An empty token is no token.](docs/design/access.md#empty-tokens)**
 A variable set empty is unset (`env_secret`, fenec-shard's `env`); a token
