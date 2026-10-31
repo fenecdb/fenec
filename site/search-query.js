@@ -9,9 +9,14 @@
    are indexed with their prefixes, so a word being typed finds the words it
    begins -- `compa` finds compaction -- and an inflected word its stem, with
    no dictionary. The tokenizer folds İ, I, ı and i onto one letter, so a
-   query typed on a Turkish keyboard finds the English text. */
+   query typed on a Turkish keyboard finds the English text.
 
-import { EMBED_DIM } from './search-vectors.js';
+   The same prefixes make a word of a question reach every word that begins
+   with its first three letters: `telefonda` reaches `tell`, `veri` reaches
+   `version`. A question in another language has nothing else to match, and
+   that list of chance must not vote beside the meaning (`holdsWord`). */
+
+import { EMBED_DIM, normalQuery } from './search-vectors.js';
 
 const FIELDS =
   'title text, heading text @text(prefix=12), url text, body text @text(prefix=12), ' +
@@ -36,6 +41,24 @@ export const HEADING_WEIGHT = 3;
    found by one alone keeps its one score. */
 const DEPTH = 40;
 
+/* What lets the words vote beside the meaning. Of the first PROBE hits the
+   words found, one must mark a word of the question that is MIN_WORD letters
+   or more and is the same word or shares its first STEM letters. Five are
+   what an inflected word shares with its stem (`replikasyon` and `replica`);
+   three or four are chance (`telefonda` and `tell`, `veri` and `version`),
+   and two are no word to judge by (`ne` is Turkish, and a stray token in the
+   docs' code). Asked only of a question with a meaning to fuse, once, so none
+   of it is on the path of a keystroke; any depth from 1 to 40 gave the same
+   verdict over the 418 questions measured, and 5 costs the least. */
+const PROBE = 5;
+const STEM = 5;
+const MIN_WORD = 3;
+
+/* A script written without spaces is indexed in grams (`text::grams`), not
+   words, so a hit's span is never the question's word: such a question is
+   not judged, and its words vote as they always did. */
+const UNSPACED = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
+
 /* What a hit shows. A snippet reads its row's text again, which is most of
    a query's time over sections thousands of words long -- asked of 40 rows
    a side it took 4 to 8 ms in Node, where the ranking took 0.1 -- so the
@@ -56,25 +79,38 @@ const SNIPPET_WORDS = 26;
  * right page came first for 11 without it and for 6 with it beside the
  * two at full weight; the words alone, 7.
  *
+ * Fusion trusts both lists, so the words vote only when they found a word
+ * (`holdsWord`). A question with none of the docs' words -- Turkish, against
+ * English pages -- matches only prefixes, and that list voted as much as the
+ * meaning: the right page stood 3rd to 6th as the docs gained or lost a
+ * `tell`. Then the meaning ranks alone (`near`) and every hit is by meaning.
+ *
  * Every value goes in as a parameter: the query is the visitor's.
- * @returns {{hits: object[], facets: {value: string, count: number}[]}}
+ * @returns {{hits: object[], facets: {value: string, count: number}[], by: string}}
+ *   `by` says what ranked them: the words, the meaning, or both.
  */
 export function search(db, text, section = null, limit = 10, vector = null) {
   const q = text.trim();
-  if (!q) return { hits: [], facets: [] };
+  if (!q) return { hits: [], facets: [], by: 'words' };
   const where = section ? ' where section = $2' : '';
   const params = section ? [q, section] : [q];
   const v = `$${params.length + 1}`;
-  let body, ranked;
+  let body, ranked, alone = false;
   try {
     body = db.run(`get docs select id${where} match body $1 limit ${DEPTH}${section ? '' : ' facet section'}`, params);
-    ranked = vector
-      ? db.run(`get docs select id${where} match body $1 near embed ${v} fuse candidates ${DEPTH} limit ${DEPTH}`,
-        [...params, Float32Array.from(vector)]).rows
-      : null;
+    if (vector) {
+      // Judged over every section, not the group chosen: a question has the
+      // same words whichever chip is on.
+      const top = section ? db.run(`get docs select id match body $1 limit ${PROBE}`, [q]) : body;
+      alone = !holdsWord(db, q, top.rows);
+      ranked = db.run(alone
+        ? `get docs select id${where} near embed ${v} limit ${DEPTH}`
+        : `get docs select id${where} match body $1 near embed ${v} fuse candidates ${DEPTH} limit ${DEPTH}`,
+      [...params, Float32Array.from(vector)]).rows;
+    }
   } catch {
     // A query of nothing but punctuation holds no word to match.
-    return { hits: [], facets: [] };
+    return { hits: [], facets: [], by: 'words' };
   }
   // The counts are over every group, so the chips keep their numbers while
   // one of them narrows the list: under one, they are asked apart. `facet`
@@ -83,7 +119,7 @@ export function search(db, text, section = null, limit = 10, vector = null) {
   const counted = section ? db.run('get docs match body $1 limit 0 facet section', [q]) : body;
   const facets = counted.facets?.section ?? [];
 
-  const inBody = new Set(body.rows.map((r) => r.id));
+  const inBody = new Set(alone ? [] : body.rows.map((r) => r.id));
   const score = new Map();
   if (ranked) {
     for (const r of ranked) score.set(r.id, r._score);
@@ -129,7 +165,39 @@ export function search(db, text, section = null, limit = 10, vector = null) {
       byMeaning: Boolean(ranked) && !inBody.has(id),
     };
   });
-  return { hits, facets };
+  return { hits, facets, by: !ranked ? 'words' : alone ? 'meaning' : 'words and meaning' };
+}
+
+/* The text index folds İ, I, ı and i onto one letter, and so does this. */
+const fold = (s) => normalQuery(s).replaceAll('ı', 'i');
+const WORD = /[\p{L}\p{N}\p{M}]+/gu;
+const shared = (a, b) => {
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  return i;
+};
+
+/* Whether the words found anything to vote with: one of the first PROBE of
+   `rows`, the words' best, holds a word of `q` whole or to its stem (see
+   PROBE). The marks `highlight()` gives name the word of the text each hit
+   was found by -- a prefix hit marks the whole word it begins -- so a mark
+   is compared with the question's words as the index folds them. A row at a
+   time, since the best hit of a question with a word in it nearly always
+   holds it, and `highlight` reads the whole text of every row it is asked of
+   (0.1 ms and more, 1 to 2 for the longest sections). */
+function holdsWord(db, q, rows) {
+  if (UNSPACED.test(q)) return true;
+  const words = [...new Set(fold(q).match(WORD) ?? [])].filter((w) => w.length >= MIN_WORD);
+  if (!words.length) return false;
+  for (const { id } of rows.slice(0, PROBE)) {
+    const [r] = db.run('get docs select body, highlight(body) where id in [$2] match body $1 limit 1', [q, id]).rows;
+    const held = (r?.['highlight(body)'] ?? []).some(([from, to]) => {
+      const mark = fold(r.body.slice(from, to));
+      return words.some((w) => mark === w || shared(mark, w) >= STEM);
+    });
+    if (held) return true;
+  }
+  return false;
 }
 
 /* The first words of a text, as a snippet with nothing marked. */

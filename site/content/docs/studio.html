@@ -80,7 +80,7 @@ other's: a rule for a role it does not hold is not among them. It grants
 nothing; a token the server refuses gets the same 401 here as anywhere.</p>
 <pre data-lang="bash">curl -H "Authorization: Bearer $ALICE" http://127.0.0.1:8080/_whoami
 # {"node":"single","tenant":null,"read_only":false,"kind":"scoped","sub":"alice",
-#  "tenants":null,"unbound":false,"append_only":[],
+#  "roles":["analyst"],"tenants":null,"unbound":false,"append_only":[],
 #  "rules":[{"collection":"orders","grants":["read","insert","update","delete"],
 #            "fields":null,"read_fields":null,"rows":"owner = $jwt.sub"}]}
 </pre>

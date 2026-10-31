@@ -337,7 +337,10 @@ is refused even then, since its issuer meant to bind it; <code>--jwt-tenant-clai
 &lt;name&gt;</code> reads another claim than <code>tenant</code>. The node's
 own <code>--http-token</code> and <code>--admin-token</code> are not bound.
 The router forwards <code>Authorization</code> as it came and holds no keys,
-so the node is what enforces it, behind the router or reached directly.
+so the node is what enforces it, behind the router or reached directly --
+and the issuer and audience a token must name (<code>--jwt-issuer</code>,
+<code>--jwt-audience</code>, <a href="/docs/http-access#whom-a-token-is-for">Whom
+a token is for</a>) are the node's flags too.
 What a scoped token writes to a tenant is checked against its rules as on a
 single file (<a href="/docs/http-access#scoped-access">Scoped access</a>).</p>
 
