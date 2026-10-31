@@ -54,8 +54,8 @@ async function page() {
   return p;
 }
 
-async function signIn(p, token) {
-  await p.goto(`${server.url}/_studio/`);
+async function signIn(p, token, at = server.url) {
+  await p.goto(`${at}/_studio/`);
   await p.waitForSelector('#token');
   await p.type('#token', token);
   await p.click('.signin button[type=submit]');
@@ -194,6 +194,85 @@ test('with the server token: browse, sort, filter, edit, insert and delete', asy
 
   assert.deepEqual(p.problems, []);
   await p.close();
+});
+
+/**
+ * Where the rows are on the page: the grid's box, the status line's and each
+ * row's, and whether the counts' bar is drawn. A row exists in the DOM
+ * whatever box it is in, so what is held is the box's size and that the
+ * rows are in it.
+ */
+const layout = (p) =>
+  p.evaluate(() => {
+    const box = (e) => {
+      const b = e.getBoundingClientRect();
+      return { top: b.top, bottom: b.bottom, height: b.height };
+    };
+    return {
+      bar: getComputedStyle(document.querySelector('.main > .facets')).display,
+      host: box(document.querySelector('.main > .grid-host')),
+      status: box(document.querySelector('.main > .status')),
+      statusText: document.querySelector('.main > .status').textContent,
+      rows: [...document.querySelectorAll('.main .row:not(.pending):not([hidden])')].map(box),
+    };
+  });
+
+/** What `layout` says must hold wherever the counts' bar is, `bar` being its `display`. */
+function assertRowsInView(l, bar, n) {
+  assert.equal(l.bar, bar);
+  assert.ok(l.host.height > 100, `the grid is ${l.host.height} px high`);
+  assert.equal(l.rows.length, n);
+  for (const r of l.rows) {
+    assert.ok(r.height > 0 && r.top >= l.host.top && r.bottom <= l.host.bottom, `a row at ${r.top}..${r.bottom} is outside the grid at ${l.host.top}..${l.host.bottom}`);
+  }
+  assert.ok(l.status.top >= l.host.bottom - 1, 'the status line is under the grid');
+  assert.match(l.statusText, new RegExp(`^${n} rows`));
+}
+
+test('a collection with no @hash field has no counts bar, and its rows are in view all the same', async () => {
+  // The counts by value are of `@hash` fields: with none there is no bar
+  // (`hidden`), and the grid must not take its place in the layout.
+  const plain = await startServer();
+  try {
+    await query(plain.url, 'create collection notes (title text @text, year int @sorted)');
+    await query(plain.url, 'insert notes {title: $1, year: $2}', ['first note', 2024]);
+    await query(plain.url, 'insert notes {title: $1, year: $2}', ['second note', 2025]);
+    await query(plain.url, 'create collection shipped (kind text @hash, n int)');
+    await query(plain.url, 'insert shipped {kind: $1, n: $2}', ['air', 1]);
+    await query(plain.url, 'insert shipped {kind: $1, n: $2}', ['sea', 2]);
+
+    for (const [width, height] of [
+      [1280, 800],
+      [390, 844],
+    ]) {
+      const p = await page();
+      await p.setViewport({ width, height });
+      await signIn(p, TOKEN, plain.url);
+      // `notes` first, then the bar drawn for `shipped`, then hidden again.
+      for (const [name, field, first, bar] of [
+        ['notes', 'title', 'first note', 'none'],
+        ['shipped', 'kind', 'air', 'flex'],
+        ['notes', 'title', 'first note', 'none'],
+      ]) {
+        if (width <= 860) {
+          // The collections are in a drawer on a phone, to click once it has
+          // slid all the way in: a click as it moves lands nowhere.
+          await p.click('.side-toggle');
+          await p.waitForFunction(() => document.querySelector('.side-host').getBoundingClientRect().left >= 0);
+        }
+        await open(p, name);
+        // This collection's own first row in, which the bar was drawn or
+        // not before; a row of the one before is not it.
+        assert.equal(await cell(p, 0, field), first);
+        assertRowsInView(await layout(p), bar, 2);
+        assert.equal(await statusLine(p), '2 rows');
+      }
+      assert.deepEqual(p.problems, []);
+      await p.close();
+    }
+  } finally {
+    await plain.stop();
+  }
 });
 
 test('as one user: no other user\'s row in the grid, the counts or the facets', async () => {

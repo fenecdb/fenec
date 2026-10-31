@@ -4,7 +4,7 @@
 
 use fenec_core::value::Value;
 use fenec_http::lease::Lease;
-use fenec_http::tenants::Tenants;
+use fenec_http::tenants::{Replicated, Tenants};
 use fenec_http::{Config, Server};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -24,6 +24,7 @@ impl fenec_core::plugin::ScalarFn for Lapse {
 struct Node {
     port: u16,
     lease: Arc<Lease>,
+    tenants: Arc<Tenants>,
     dir: std::path::PathBuf,
 }
 
@@ -35,10 +36,29 @@ impl Drop for Node {
 
 impl Node {
     fn start(tag: &str) -> Node {
+        Node::started(tag, false)
+    }
+
+    /// A node keeping each tenant's change stream, as `--replication-token`
+    /// on a node does, every write on disk before it is answered.
+    fn with_changes(tag: &str) -> Node {
+        Node::started(tag, true)
+    }
+
+    fn started(tag: &str, changes: bool) -> Node {
         let dir =
             std::env::temp_dir().join(format!("fenec-lease-answers-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let tenants = Tenants::new(&dir).unwrap().with_lease();
+        let tenants = match changes {
+            true => tenants.with_replication(Replicated {
+                token: "repl".into(),
+                buffer: 1 << 20,
+                upstream: None,
+                sync_on_write: true,
+            }),
+            false => tenants,
+        };
         let lease = Arc::clone(tenants.lease().unwrap());
         let held = Arc::clone(&lease);
         let tenants = Arc::new(tenants.with_setup(move |db| {
@@ -48,6 +68,7 @@ impl Node {
         let mut node = Node {
             port: 0,
             lease,
+            tenants: Arc::clone(&tenants),
             dir,
         };
         node.grant();
@@ -55,6 +76,7 @@ impl Node {
         let cfg = Config {
             addr: "127.0.0.1:0".into(),
             admin_token: Some("adm".into()),
+            sync_on_write: changes,
             ..Config::default()
         };
         let server = Server::with_tenants(tenants, cfg);
@@ -218,4 +240,86 @@ fn a_read_after_an_admin_schema_on_one_connection_is_a_read() {
     assert_eq!(schema.status, 200, "{}", schema.body);
     let read = c.query("get notes select lapse() as l limit 1");
     assert_eq!(read.status, 200, "{}", read.body);
+}
+
+/// `/t/acme/_changes/consumers/<name>` on a connection of its own.
+fn consumer(port: u16, method: &str, name: &str, body: &str) -> Answer {
+    Conn::open(port).send(
+        method,
+        &format!("/t/acme/_changes/consumers/{name}"),
+        false,
+        body,
+    )
+}
+
+fn told_to_come_back(a: &Answer, what: &str) {
+    assert_eq!(a.status, 503, "{what}: {}", a.body);
+    assert!(
+        a.headers
+            .iter()
+            .any(|h| h.to_ascii_lowercase().starts_with("retry-after:")),
+        "{what}: {:?}",
+        a.headers
+    );
+}
+
+/// What a consumer's writes leave behind: each consumer and its place.
+fn consumers(port: u16) -> String {
+    let list = Conn::open(port).send("GET", "/t/acme/_changes/consumers", false, "");
+    assert_eq!(list.status, 200, "{}", list.body);
+    list.body
+}
+
+/// A consumer's make, move and let-go are the tenant's writes, held
+/// against a move's freeze as every write is: while the tenant is frozen
+/// each is told to come back (503), and none lands. Run past the gate, one
+/// sent during a move landed on the source after its export and was lost
+/// at the flip -- a make lost so was made again later at the last write on
+/// disk, past every write in between.
+#[test]
+fn a_consumer_write_is_told_to_come_back_while_its_tenant_is_moved() {
+    let n = Node::with_changes("consumer-frozen");
+    let mut c = Conn::open(n.port);
+    assert_eq!(c.query("create collection notes (title text)").status, 200);
+    assert_eq!(consumer(n.port, "POST", "sink", "").status, 201);
+    let before = consumers(n.port);
+    n.tenants.freeze("acme").unwrap();
+    for (method, name, body) in [
+        ("POST", "sink", ""),
+        ("POST", "other", ""),
+        ("PATCH", "sink", "{\"since\": 0}"),
+        ("DELETE", "sink", ""),
+    ] {
+        told_to_come_back(
+            &consumer(n.port, method, name, body),
+            &format!("{method} {name}"),
+        );
+    }
+    // A read is a read, frozen or not.
+    assert_eq!(consumers(n.port), before);
+    n.tenants.thaw("acme").unwrap();
+    assert_eq!(consumers(n.port), before, "nothing landed while frozen");
+    assert_eq!(consumer(n.port, "POST", "other", "").status, 201);
+}
+
+/// Under a lapsed lease a consumer's write is told to come back (503), as
+/// every write of the tenant's is: the node may no longer be the tenant's.
+/// A make of a consumer that is there writes nothing, and was answered 200
+/// by such a node; a move past nothing writes nothing either.
+#[test]
+fn a_consumer_write_under_a_lapsed_lease_is_told_to_come_back() {
+    let n = Node::with_changes("consumer-lapsed");
+    let mut c = Conn::open(n.port);
+    assert_eq!(c.query("create collection notes (title text)").status, 200);
+    let made = consumer(n.port, "POST", "sink", "");
+    assert_eq!(made.status, 201, "{}", made.body);
+    let before = consumers(n.port);
+    assert!(n.lease.grant(0, "e1", None).is_ok());
+    for (method, body) in [("POST", ""), ("PATCH", "{\"since\": 1}"), ("DELETE", "")] {
+        told_to_come_back(&consumer(n.port, method, "sink", body), method);
+    }
+    n.grant();
+    assert_eq!(consumers(n.port), before, "nothing landed under the lapse");
+    let moved = consumer(n.port, "PATCH", "sink", "{\"since\": 0}");
+    assert_eq!(moved.status, 200, "{}", moved.body);
 }

@@ -398,8 +398,8 @@ every page it put 13 ms between a transfer and its line at the median.
 ## Gaps this example hit
 
 Each with the statement that showed it and the smallest feature that would
-close it. All six are closed now (`ledger-gaps`); what the ledger uses of
-them is said after each.
+close it. All seven are closed now (the first six by `ledger-gaps`); what
+the ledger uses of them is said after each.
 
 1. **A `/batch` of reads takes the write lock.** `handle_batch` takes
    `held::write` whatever the statements, so the reconciliation's four
@@ -411,8 +411,8 @@ them is said after each.
    wait for the snapshot.
 2. **A consumer's commit wakes its own reads.** `GET
    /t/acme/_changes?consumer=journal-sink&wait=1000` answered at once, with
-   no lines and `Fenec-Next` past its place, after every
-   `POST /_changes/consumers/journal-sink`: the commit is a write to
+   no lines and `Fenec-Next` past its place, after every commit to
+   `/_changes/consumers/journal-sink`: the commit is a write to
    `_consumers`, which the stream leaves out but counts. A sink that
    committed every answer committed in a loop, 30 000 fsynced writes in a
    few idle minutes. The sink reads by its own cursor (`since=`) and commits
@@ -446,6 +446,16 @@ them is said after each.
    a type error, so each block's entry ids travel as two more parameters.
    Smallest: `+` over two texts, or `concat(...)`. *Closed:* the ids are
    `$5 + ":dr"` and `$5 + ":cr"`.
+7. **Making the consumer at each start moved it.** The sink's `open()`
+   sends `POST /_changes/consumers/journal-sink` with `{"since": 0}`, meant
+   to make the consumer at the first write if it is new; but the `POST` was
+   the commit too, so every start put the consumer back at the first write
+   and the whole journal was handed over again -- which the deduplication
+   hid, and which kept the lost-file test from ever reaching its backfill.
+   Smallest: a `POST` that leaves a consumer that is there where it stands,
+   and a move of its own. *Closed:* a `POST` makes a consumer (201) or
+   answers where one stands (200), a `PATCH` moves it; the sink commits by
+   `PATCH`, and its restart is handed only what it had not committed.
 
 `/batch` with a key goes through `@fenecdb/web/client`'s `db.batch(...,
 { idempotencyKey })` (`src/store.ts`), whose `FenecError` carries the

@@ -10,7 +10,7 @@ description: Vector search in FenecQL: near finds the documents whose vector is 
 holds one embedding a document, and <code>near</code> finds the documents whose
 vector is closest to the one you pass.</p>
 
-<p>Run in <a href="quickstart.html#in-the-shell">the shell</a>, answers and all; the timings are from one run.</p>
+<p>Run in <a href="shell.html#quickstart">the shell</a>, answers and all; the timings are from one run.</p>
 
 <pre data-lang="text">fenec&gt; create collection places (name text, year int @sorted, embed vector&lt;3&gt; @hnsw(cosine));
 collection `places` created
