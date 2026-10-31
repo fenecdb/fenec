@@ -122,10 +122,11 @@ usage: fenec-server [options]
       --jwt-secret-file <path>  the secret from a file
       --jwt-keys <path>     instead of a secret, the keys of a JWKS file
                             (its `keys` list): `oct` keys take HS256 tokens,
-                            `RSA` keys an identity provider's RS256 ones, a
-                            token's `kid` names its key. Read again as the
-                            file changes, which is how keys rotate. Also read
-                            from FENEC_JWT_KEYS
+                            `RSA` keys an identity provider's RS256 ones and
+                            `EC` keys on P-256 its ES256 ones, a token's
+                            `kid` names its key. Read again as the file
+                            changes, which is how keys rotate. Also read from
+                            FENEC_JWT_KEYS
       --jwt-require-exp <on|off>  refuse a token with no `exp` claim, which
                             would be good for ever  default: on
                             (--mint-token gives one an hour)

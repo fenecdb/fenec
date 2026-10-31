@@ -12,6 +12,7 @@ mod changes;
 mod claim_values;
 mod claims;
 mod empty_tokens;
+mod es256;
 mod fields;
 mod idempotency;
 mod lease_answers;

@@ -3,8 +3,8 @@
 //!
 //! A server's `--http-token` is all or nothing. With `--jwt-secret` it also
 //! takes HS256 JSON Web Tokens -- with `--jwt-keys`, those a JWKS file's
-//! keys verify, HS256 and RS256 (below) -- and a policy file says what each
-//! may do,
+//! keys verify, HS256, RS256 and ES256 (below) -- and a policy file says
+//! what each may do,
 //! collection by collection, down to the rows -- the way PostgreSQL's row
 //! level security lets a browser talk to the database directly:
 //!
@@ -158,8 +158,9 @@
 //! tell every user the ids everyone else writes (see `sse`).
 //!
 //! **Keys.** A JWKS file holds the keys, `{"keys": [...]}` as an identity
-//! provider publishes it: `oct` keys verify HS256 and `RSA` keys RS256, so
-//! a token an identity provider signs is taken with its public keys alone.
+//! provider publishes it: `oct` keys verify HS256, `RSA` keys RS256 and
+//! `EC` keys on P-256 ES256, so a token an identity provider signs is taken
+//! with its public keys alone.
 //! A key's kind decides the algorithm it verifies, never the token: an
 //! RS256 key's modulus is public, and taken for an HS256 secret it would
 //! sign anything. A token naming a `kid` is checked against that key alone;
@@ -179,7 +180,7 @@
 //! nothing of them, as before. A refusal is 401 naming the check, never the
 //! token's value.
 
-use crate::crypto::{b64url_decode, b64url_encode, ct_eq, hmac_sha256, RsaKey};
+use crate::crypto::{b64url_decode, b64url_encode, ct_eq, hmac_sha256, P256Key, RsaKey};
 use fenec_core::prelude::*;
 use fenec_core::query::{eval, truthy, CmpOp, EvalCtx, Pick, RowAccess};
 use std::cell::RefCell;
@@ -228,8 +229,8 @@ pub struct Access {
     append_only: Arc<[String]>,
     /// Tokens already verified, by their text: a client sends the same one
     /// for as long as it lives, and an RS256 verification takes 38 us (166
-    /// in 32-bit limbs), an HS256 token's with its parses 2.9, a token
-    /// found here 0.5.
+    /// in 32-bit limbs), an ES256 one 145, an HS256 token's with its parses
+    /// 2.9, a token found here 0.5 (`make jwt-bench`).
     /// Emptied when the keys change, since a key taken out must take its
     /// tokens with it; `exp` and `nbf` are asked on every request.
     verified: [Mutex<HashMap<Box<str>, Claims>>; SHARDS],
@@ -381,14 +382,16 @@ enum KeyKind {
     Hmac(Vec<u8>),
     /// RS256.
     Rsa(RsaKey),
+    /// ES256.
+    Ec(P256Key),
 }
 
 const SHORT: &str = "a JWT secret shorter than 32 bytes can be guessed: HS256 needs 256 bits of it";
 
 /// The keys of a JWKS file: `{"keys": [...]}`, or the list alone. A key of
-/// another kind (`EC`, `OKP`) or for encryption (`"use": "enc"`) is passed
-/// over, as a verifier that does not know it would; a file with no key this
-/// server can use is refused.
+/// another kind (`OKP`), an `EC` key on another curve than P-256, or one for
+/// encryption (`"use": "enc"`) is passed over, as a verifier that does not
+/// know it would; a file with no key this server can use is refused.
 fn read_jwks(text: &str) -> std::result::Result<Vec<Jwk>, String> {
     let t = text.trim();
     let list = if t.starts_with('[') {
@@ -430,6 +433,8 @@ fn read_jwks(text: &str) -> std::result::Result<Vec<Jwk>, String> {
         }
         let kid = text("kid").map(str::to_string);
         let alg = text("alg");
+        // An `EC` key on P-384 or P-521 is ES384's or ES512's, passed over.
+        let p256 = text("crv") == Some("P-256");
         let kind = match text("kty") {
             Some("oct") if alg.is_none_or(|a| a == "HS256") => {
                 let k = bytes("k")?;
@@ -442,12 +447,16 @@ fn read_jwks(text: &str) -> std::result::Result<Vec<Jwk>, String> {
                 RsaKey::new(&bytes("n")?, &bytes("e")?)
                     .ok_or("an RSA key of 2048 bits at the least and an odd exponent from 3")?,
             ),
+            Some("EC") if p256 && alg.is_none_or(|a| a == "ES256") => KeyKind::Ec(
+                P256Key::new(&bytes("x")?, &bytes("y")?)
+                    .ok_or("an EC key's `x` and `y` must be a point of P-256, 32 bytes each")?,
+            ),
             _ => continue,
         };
         keys.push(Jwk { kid, kind });
     }
     if keys.is_empty() {
-        return Err("no HS256 or RS256 key in the JWKS file".into());
+        return Err("no HS256, RS256 or ES256 key in the JWKS file".into());
     }
     Ok(keys)
 }
@@ -734,9 +743,11 @@ impl Access {
             .iter()
             .find_map(|k| match &k.kind {
                 KeyKind::Hmac(s) => Some((k.kid.as_deref(), s)),
-                KeyKind::Rsa(_) => None,
+                KeyKind::Rsa(_) | KeyKind::Ec(_) => None,
             })
-            .ok_or("no HS256 key to sign with: an RS256 key's private half is its owner's")?;
+            .ok_or(
+                "no HS256 key to sign with: an RS256 or ES256 key's private half is its owner's",
+            )?;
         let mut head = String::from(r#"{"alg":"HS256","typ":"JWT""#);
         if let Some(kid) = kid {
             head.push_str(r#","kid":"#);
@@ -749,8 +760,9 @@ impl Access {
         Ok(format!("{head}.{body}.{}", b64url_encode(&sig)))
     }
 
-    /// The scope of a token, checked: HS256 or RS256, signed with one of the
-    /// keys, not expired and already valid, at `now` seconds since the epoch.
+    /// The scope of a token, checked: HS256, RS256 or ES256, signed with one
+    /// of the keys, not expired and already valid, at `now` seconds since
+    /// the epoch.
     pub fn scope(&self, token: &str, now: u64) -> std::result::Result<Scope, &'static str> {
         let claims = self.verify(token, now)?;
         let claim = |name: &str| claims.iter().find(|(k, _)| k == name).map(|(_, v)| v);
@@ -892,7 +904,11 @@ impl Access {
     }
 
     /// The claims of a token one of `keys` signed.
-    fn check(&self, token: &str, keys: &[Jwk]) -> std::result::Result<Claims, &'static str> {
+    fn check(
+        &self,
+        token: &str,
+        keys: &Arc<Vec<Jwk>>,
+    ) -> std::result::Result<Claims, &'static str> {
         let mut parts = token.split('.');
         let (Some(head), Some(body), Some(sig), None) =
             (parts.next(), parts.next(), parts.next(), parts.next())
@@ -918,10 +934,9 @@ impl Access {
             Some((_, Value::Text(a))) => Some(a.as_str()),
             _ => None,
         };
-        let rsa = match field("alg") {
-            Some("HS256") => false,
-            Some("RS256") => true,
-            _ => return Err("only HS256 and RS256 tokens are accepted"),
+        let alg = match field("alg") {
+            Some(a @ ("HS256" | "RS256" | "ES256")) => a,
+            _ => return Err("only HS256, RS256 and ES256 tokens are accepted"),
         };
         let kid = field("kid");
         let signed = format!("{head}.{body}");
@@ -931,9 +946,10 @@ impl Access {
             .iter()
             .filter(|k| kid.is_none() || k.kid.as_deref() == kid)
             .inspect(|_| named = true)
-            .any(|k| match (&k.kind, rsa) {
-                (KeyKind::Hmac(s), false) => ct_eq(&given, &hmac_sha256(s, signed.as_bytes())),
-                (KeyKind::Rsa(r), true) => r.verify_sha256(signed.as_bytes(), &given),
+            .any(|k| match (&k.kind, alg) {
+                (KeyKind::Hmac(s), "HS256") => ct_eq(&given, &hmac_sha256(s, signed.as_bytes())),
+                (KeyKind::Rsa(r), "RS256") => r.verify_sha256(signed.as_bytes(), &given),
+                (KeyKind::Ec(e), "ES256") => e.verify_sha256(signed.as_bytes(), &given),
                 _ => false,
             });
         if !good {
@@ -949,13 +965,29 @@ impl Access {
         // asked against. After the signature, so a token no key signed is
         // told nothing of what this server takes.
         self.demands.whom(&claims)?;
+        #[cfg(test)]
+        held::at(token);
         let mut kept = self.verified[shard(token)]
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if kept.len() >= KEPT {
-            kept.clear();
+        // Kept only if `keys` are still the keys. A reload writes the new
+        // keys and then empties every shard, so a token checked against
+        // the old ones and kept after its shard was emptied outlived the
+        // key it was signed with -- until its `exp`, its shard filling or
+        // the next change of keys (a review kept 3-5 of a removed key's
+        // tokens in 10 trials of 10). Under the shard's lock, keys still
+        // current mean a reload has yet to empty this shard, and will.
+        // `keys` holds the old list alive, so no new list shares its
+        // address. This request is answered under the keys it was checked
+        // against; the next one is held to the new keys.
+        let current = self.keys.read().unwrap_or_else(|e| e.into_inner());
+        if Arc::ptr_eq(keys, &current) {
+            drop(current);
+            if kept.len() >= KEPT {
+                kept.clear();
+            }
+            kept.insert(token.into(), claims.clone());
         }
-        kept.insert(token.into(), claims.clone());
         Ok(claims)
     }
 }
@@ -2801,6 +2833,70 @@ impl Plugin for CheckPlugin {
     }
 }
 
+/// A check held between its signature and keeping its token, for the
+/// test of a reload landing there: a token is held by its text, so no
+/// other test's checks meet the gate.
+#[cfg(test)]
+mod held {
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::Duration;
+
+    #[derive(Default)]
+    pub struct Gate {
+        /// Whether the check has arrived, and whether it may go on.
+        state: Mutex<(bool, bool)>,
+        changed: Condvar,
+    }
+
+    static HELD: Mutex<Vec<(String, Arc<Gate>)>> = Mutex::new(Vec::new());
+
+    /// Checks of `token` stop at the gate until it is released.
+    pub fn hold(token: &str) -> Arc<Gate> {
+        let gate = Arc::new(Gate::default());
+        HELD.lock()
+            .unwrap()
+            .push((token.to_string(), Arc::clone(&gate)));
+        gate
+    }
+
+    pub fn at(token: &str) {
+        let gate = HELD
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(t, _)| t == token)
+            .map(|(_, g)| Arc::clone(g));
+        if let Some(gate) = gate {
+            gate.state.lock().unwrap().0 = true;
+            gate.changed.notify_all();
+            gate.wait(|s| s.1);
+        }
+    }
+
+    impl Gate {
+        /// Waits for what must happen, bounded only so a broken test fails
+        /// rather than hangs.
+        fn wait(&self, until: impl Fn(&(bool, bool)) -> bool) {
+            let state = self.state.lock().unwrap();
+            let (state, timeout) = self
+                .changed
+                .wait_timeout_while(state, Duration::from_secs(60), |s| !until(s))
+                .unwrap();
+            drop(state);
+            assert!(!timeout.timed_out(), "the held check never moved");
+        }
+
+        pub fn arrived(&self) {
+            self.wait(|s| s.0);
+        }
+
+        pub fn release(&self) {
+            self.state.lock().unwrap().1 = true;
+            self.changed.notify_all();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2857,7 +2953,7 @@ mod tests {
         );
         assert_eq!(
             a.verify(&none, 1_000).unwrap_err(),
-            "only HS256 and RS256 tokens are accepted"
+            "only HS256, RS256 and ES256 tokens are accepted"
         );
         let early = a.mint(r#"{"sub":"alice","nbf":5000}"#).unwrap();
         assert!(a.verify(&early, 1_000).is_err());
@@ -2906,9 +3002,9 @@ mod tests {
         );
     }
 
-    /// A JWKS as an identity provider publishes it -- an EC key this server
-    /// passes over, an RSA key -- and tokens node:crypto signed with the
-    /// RSA key's private half.
+    /// A JWKS as an identity provider publishes it -- an EC key on P-256
+    /// (tests/es256.rs has its tokens), an RSA key -- and tokens
+    /// node:crypto signed with the RSA key's private half.
     #[test]
     fn an_identity_providers_keys_verify_its_tokens() {
         let mut lines = include_str!("jwks_vectors.txt").lines();
@@ -2975,6 +3071,51 @@ mod tests {
         ] {
             assert!(read_jwks(bad).is_err(), "{bad}");
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A reload landing between a check's signature and its keeping the
+    /// token: the token was kept after the reload emptied its shard, and a
+    /// key taken out went on verifying it from there.
+    #[test]
+    fn a_token_checked_across_a_reload_is_not_kept_past_it() {
+        let dir = std::env::temp_dir().join(format!("fenec-jwks-race-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("keys.json");
+        let oct = |kid: &str, byte: u8| {
+            let k = b64url_encode(&[byte; 32]);
+            format!(r#"{{"keys":[{{"kty":"oct","kid":"{kid}","k":"{k}"}}]}}"#)
+        };
+        std::fs::write(&path, oct("old", 1)).unwrap();
+        let a = Arc::new(Access::from_jwks(&path, "").unwrap());
+        let token = a.mint(r#"{"sub":"alice"}"#).unwrap();
+        let now = unix_now();
+
+        let gate = held::hold(&token);
+        let checking = {
+            let (a, token) = (Arc::clone(&a), token.clone());
+            std::thread::spawn(move || a.scope(&token, now).map(|_| ()))
+        };
+        // Its signature checked against the old key, the check waits to
+        // keep the token; the old key goes meanwhile.
+        gate.arrived();
+        std::fs::write(&path, oct("new", 2)).unwrap();
+        let later = SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert_eq!(a.keys(now + 1)[0].kid.as_deref(), Some("new"));
+        gate.release();
+        // Answered under the keys it was checked against, and kept by
+        // none: the next use meets the new keys.
+        assert!(checking.join().unwrap().is_ok());
+        assert_eq!(
+            a.scope(&token, now + 1).err(),
+            Some("no key has the token's kid")
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
