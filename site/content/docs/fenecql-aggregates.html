@@ -11,7 +11,7 @@ description: Aggregates in FenecQL: count, sum, avg, min, max, first and last, g
 the select list to fold the rows a query finds into one, and add
 <code>group</code> for one row per distinct set of keys.</p>
 
-<p>Run in <a href="quickstart.html#in-the-shell">the shell</a>, answers and all; the timings are from one run.</p>
+<p>Run in <a href="shell.html#quickstart">the shell</a>, answers and all; the timings are from one run.</p>
 
 <pre data-lang="text">fenec&gt; create collection sales (region text, qty int, price int, at timestamp);
 collection `sales` created
@@ -77,7 +77,7 @@ get events select props.plan, sum(props.v) group props.plan
   <li><b>Groups can be ordered and paged</b> by any column of the list.
     Without <code>group</code>, <code>order</code>, <code>limit</code> and
     <code>offset</code> pick the rows the one row folds: <code>get deliveries
-    where courier = $1 order at desc limit 50 select count(*), avg(km)</code>
+    select count(*), avg(km) where courier = $1 order at desc limit 50</code>
     is the latest 50.</li>
   <li><b>A <code>lookup</code> hangs off the groups</b>, keyed by a column
     of the list, and a <a href="fenecql-lookup.html#lookup-folds">lookup level's list may
@@ -153,8 +153,8 @@ was written as — <code>sum(total)</code>, <code>count(distinct user)</code>,
     would have nothing to do with; so there <code>order</code>,
     <code>limit</code> and <code>offset</code> pick the rows it folds, as
     they pick a <code>get</code>'s page — an <code>@sorted</code> field's
-    index walked to it — and the one row folds those: <code>order at desc
-    limit 50 select avg(km)</code> is the mean of the latest 50, what SQL
+    index walked to it — and the one row folds those: <code>select avg(km)
+    order at desc limit 50</code> is the mean of the latest 50, what SQL
     writes as a subquery. Its keys are the rows' values; a column of the
     list among them is refused.</li>
   <li><b>A <code>lookup</code> after the list</b> hangs off its rows — the

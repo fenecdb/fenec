@@ -1,0 +1,15 @@
+# What `cargo new notes` and `cargo add ureq@2 --features json` and `cargo add
+# serde_json` write on the Quickstart. Outside the workspace: the crates take
+# no outside package, and this is what an application of its own does.
+# Run by ../../run-tests.sh.
+[package]
+name = "notes"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+ureq = { version = "2", features = ["json"] }
+serde_json = "1"
+
+[workspace]

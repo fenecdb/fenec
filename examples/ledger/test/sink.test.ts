@@ -38,9 +38,12 @@ test('every entry reaches the sink once, through a crash between its sync and it
   const running = (async () => {
     while (!stop) {
       if (!crashed && sink.written > 400) {
-        // The sink wrote and synced a page, then died before it moved the
-        // consumer: started again, it is handed the same writes.
-        await sink.step({ crashBefore: 'commit' });
+        // The sink wrote and synced a page holding entries, then died before
+        // it moved the consumer: started again, it is handed the same writes.
+        // Its `open()` makes the consumer again, which stays at the last
+        // commit: it went back to the first write when a make moved it.
+        let read = 0;
+        while (read === 0) read = await sink.step({ crashBefore: 'commit' });
         sink.close();
         sink = new Sink(opts);
         await sink.open();

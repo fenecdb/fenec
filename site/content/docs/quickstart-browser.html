@@ -1,0 +1,197 @@
+<!--
+title: Quickstart: in the browser — fenecdb
+description: Run fenecdb in a page with no server: a Vite project, one npm package and a script that opens a database, writes two rows, queries and searches them, then keeps the database in IndexedDB between visits.
+-->
+
+<h1>Quickstart: in the browser</h1>
+<p class="kicker">A database in the page. <code>@fenecdb/web</code> is the engine as
+WebAssembly and a dependency-free client, so a script opens a database, writes
+rows and queries them with no server. A few lines and a Vite project, and about
+five minutes.</p>
+
+<p>You need Node and npm. Nothing here leaves your browser, and the <a
+href="../playground.html">Playground</a> is the same engine in this tab if you
+would rather type than install.</p>
+
+<ol class="steps-doc">
+  <li>
+    <p>Make a project and install the package.</p>
+<pre data-lang="bash">npm create vite@latest my-app -- --template vanilla --no-immediate
+cd my-app
+npm install @fenecdb/web</pre>
+    <p>With <code>--template</code> and <code>--no-immediate</code> Vite asks
+    nothing and starts nothing: it makes the folder and stops, and the install
+    brings Vite along with the package.</p>
+  </li>
+  <li>
+    <p>Replace <code>src/main.js</code> with this. It opens a database, makes a
+    collection, writes two rows and shows what two queries return: the rows from
+    2020 on, newest first, and a search for a word spelled wrong.</p>
+<pre data-lang="js" data-label="src/main.js">import { Fenec } from '@fenecdb/web';
+import wasm from '@fenecdb/web/fenec.wasm?url';
+
+const db = await Fenec.open(wasm);
+
+db.run('create collection notes (title text @text, year int @sorted)');
+db.run('put notes {title: $1, year: $2}', ['Dunes', 2021]);
+db.run('put notes {title: $1, year: $2}', ['Night at the oasis', 2024]);
+
+const { rows } = db.run('get notes where year >= $1 order year desc', [2020]);
+const hits = db.rows('get notes select title match title $1 fuzzy', ['oasys']);
+
+const out = document.createElement('pre');
+out.textContent = JSON.stringify(rows) + '\n' + JSON.stringify(hits);
+document.body.append(out);</pre>
+  </li>
+  <li>
+    <p>Start the dev server.</p>
+<pre data-lang="bash">npm run dev</pre>
+<pre data-lang="text" data-label="prints">&gt; my-app@0.0.0 dev
+&gt; vite
+
+  VITE v8.3.5  ready in 1161 ms
+
+  ➜  Local:   http://localhost:5173/
+  ➜  Network: use --host to expose</pre>
+  </li>
+  <li>
+    <p>Open <code>http://localhost:5173</code>. The page shows both answers, as
+    JSON.</p>
+<pre data-lang="text" data-label="the page">[{"id":2,"title":"Night at the oasis","year":2024},{"id":1,"title":"Dunes","year":2021}]
+[{"title":"Night at the oasis","_score":0.62239116}]</pre>
+  </li>
+</ol>
+
+<ul>
+  <li><b>The module is a URL.</b> <code>Fenec.open</code> takes the address of
+    <code>fenec.wasm</code>, which Vite gives for a file imported with
+    <code>?url</code>; <code>npm run build</code> copies it into
+    <code>dist/assets</code> and the page asks for it there. No Vite
+    configuration is needed.</li>
+  <li><b><code>db.run</code> is synchronous:</b> it returns the rows
+    and not a promise, since a statement is one call into the module.
+    <code>db.rows</code> is <code>run</code> with the rows alone.</li>
+  <li><b>The query builder</b> writes the same statements, each value a
+    parameter: <code>await db.from('notes').where('year', '&gt;=',
+    2020).order('year', 'desc').rows()</code> returns the first answer's
+    rows (<a href="javascript.html#the-query-builder">The query builder</a>).</li>
+</ul>
+
+<h2 id="keep">Keep it between visits</h2>
+
+<p>The database lives in the tab's memory: a reload starts it empty, and the
+script above makes the collection again. <code>persist</code> stores it in
+IndexedDB, the image once and then only the writes since, and
+<code>restore</code> reads it back. This version writes the rows on the first
+visit alone, and says which visit it is.</p>
+
+<pre data-lang="js" data-label="src/main.js">import { Fenec, persist, restore } from '@fenecdb/web';
+import wasm from '@fenecdb/web/fenec.wasm?url';
+
+const db = await Fenec.open(wasm);
+
+const kept = await restore(db);   // what an earlier visit stored, if one did
+if (!kept) {
+  db.run('create collection notes (title text @text, year int @sorted)');
+  db.run('put notes {title: $1, year: $2}', ['Dunes', 2021]);
+  db.run('put notes {title: $1, year: $2}', ['Night at the oasis', 2024]);
+  await persist(db);              // into IndexedDB
+}
+
+const { rows } = db.run('get notes where year >= $1 order year desc', [2020]);
+const hits = db.rows('get notes select title match title $1 fuzzy', ['oasys']);
+
+const out = document.createElement('pre');
+out.textContent = (kept ? 'restored from IndexedDB' : 'first visit') + '\n'
+  + JSON.stringify(rows) + '\n' + JSON.stringify(hits);
+document.body.append(out);</pre>
+
+<p>Save it and the page reloads on its own and says <code>first visit</code>.
+Reload it once more, and the rows come from IndexedDB.</p>
+
+<pre data-lang="text" data-label="the first visit">first visit
+[{"id":2,"title":"Night at the oasis","year":2024},{"id":1,"title":"Dunes","year":2021}]
+[{"title":"Night at the oasis","_score":0.62239116}]</pre>
+<pre data-lang="text" data-label="a reload">restored from IndexedDB
+[{"id":2,"title":"Night at the oasis","year":2024},{"id":1,"title":"Dunes","year":2021}]
+[{"title":"Night at the oasis","_score":0.62239116}]</pre>
+
+<p>A page that writes later calls <code>persist(db)</code> after the write. To
+start again, clear the site's data in your browser's developer tools.</p>
+
+<details class="deep"><summary>No bundler, no npm, and Node</summary>
+<p>Another bundler does what Vite does: import <code>@fenecdb/web</code> and
+hand <code>Fenec.open</code> the module's URL, however that bundler spells a
+file's address. A page whose queries run on a server imports
+<code>@fenecdb/web/client</code> and loads no module at all (<a
+href="javascript.html#packages">Which package</a>).</p>
+
+<p>With no bundler, any static file server shows the same page: serve
+<code>node_modules</code> as it is and hand <code>Fenec.open</code> the module's
+path. Save this as <code>index.html</code> beside <code>node_modules</code>, run
+<code>python3 -m http.server 8000</code> (or <code>npx serve</code>) and open
+<code>http://localhost:8000</code>; it shows the first visit's two lines.</p>
+
+<pre data-lang="html" data-label="index.html">&lt;!doctype html&gt;
+&lt;meta charset="utf-8"&gt;
+&lt;pre id="out"&gt;loading…&lt;/pre&gt;
+&lt;script type="module"&gt;
+import { Fenec } from './node_modules/@fenecdb/web/fenec.js';
+
+const db = await Fenec.open('./node_modules/@fenecdb/web/fenec.wasm');
+
+db.run('create collection notes (title text @text, year int @sorted)');
+db.run('put notes {title: $1, year: $2}', ['Dunes', 2021]);
+db.run('put notes {title: $1, year: $2}', ['Night at the oasis', 2024]);
+
+const { rows } = db.run('get notes where year &gt;= $1 order year desc', [2020]);
+const hits = db.rows('get notes select title match title $1 fuzzy', ['oasys']);
+
+document.querySelector('#out').textContent =
+  JSON.stringify(rows) + '\n' + JSON.stringify(hits);
+&lt;/script&gt;</pre>
+
+<div class="note trap">
+  <p><b>It does not open over <code>file://</code>.</b> A page opened from disk
+  stays on <code>loading…</code>: the browser refuses a module
+  <code>import</code> from a page with no HTTP origin. Any static server
+  works: <code>python3 -m http.server</code>, <code>npx serve</code>,
+  nginx.</p>
+</div>
+
+<p>No npm: the same files, the module and the <code>collate/</code> data beside
+it, are <code>fenec-web-v{{version}}.tar.gz</code> on the <a
+href="https://github.com/fenecdb/fenecdb/releases/tag/v{{version}}">release</a>.</p>
+
+<p>In Node, where <code>fetch</code> cannot resolve a relative path, hand
+<code>Fenec.open</code> the bytes:</p>
+
+<pre data-lang="js" data-label="query.mjs">import { readFile } from 'node:fs/promises';
+import { Fenec } from '@fenecdb/web';
+
+const wasm = await readFile(new URL(import.meta.resolve('@fenecdb/web/fenec.wasm')));
+const db = await Fenec.open(wasm);
+
+db.run('create collection notes (title text @text, year int @sorted)');
+db.run('put notes {title: $1, year: $2}', ['Dunes', 2021]);
+db.run('put notes {title: $1, year: $2}', ['Night at the oasis', 2024]);
+
+console.log(db.run('get notes where year &gt;= $1 order year desc', [2020]).rows);</pre>
+<pre data-lang="text" data-label="node query.mjs prints">[
+  { id: 2, title: 'Night at the oasis', year: 2024 },
+  { id: 1, title: 'Dunes', year: 2021 }
+]</pre>
+</details>
+
+<h2 id="next">Next</h2>
+
+<ul class="cards">
+  <li><a href="javascript.html">JavaScript and TypeScript</a>
+    <p>The query builder, live queries as an app's state, a database kept in a file of the page, a schema declared in code, and which package a page needs.</p></li>
+  <li><a href="sync.html">Sync</a>
+    <p>A replica in the page that reads without the network and writes on its own, with a server keeping every page's writes.</p></li>
+  <li><a href="quickstart.html">Quickstart: the server</a>
+    <p>The same collection on <code>fenec-server</code>, reached over HTTP from any language, with a page that runs no module at all.</p></li>
+  <li><a href="fenecql.html">FenecQL</a>
+    <p>The language: a tour from the first write to a lookup and a total.</p></li>
+</ul>
