@@ -6,5 +6,6 @@
 
 mod e2e;
 mod join;
+mod named;
 mod sql;
 mod text;

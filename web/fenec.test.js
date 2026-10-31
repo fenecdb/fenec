@@ -588,6 +588,31 @@ test('a write that misses its require puts its run back, in the module', { skip:
   assert.throws(() => db.from('accounts').where('name', 'a').toDelete({ require: -1 }), /whole number from 0/);
 });
 
+test('named statements are a server\'s: the module refuses a definition and a call in words of its own', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection t (a int)');
+  const theirs = /named statements are a server's; this module is built without them/;
+  for (const text of [
+    'create statement s() as get t select a',
+    'create or replace statement s($a int) as begin get t select a where a = $a; end',
+    'call s',
+    'call s {a: 1} as {sub: "x"}',
+    'CALL s(1, b => 2)',
+  ]) {
+    assert.throws(() => db.run(text), theirs, text);
+  }
+  // Refused as it is read, a write before it in one text never runs.
+  assert.throws(() => db.run('put t {a: 1}; call s'), theirs);
+  assert.equal(db.run('get t count').rows[0].count, 0);
+  // A name after `$` is a definition's alone, here as on a server.
+  assert.throws(() => db.run('get t where a = $a'), /`\$a` names a named statement's parameter/);
+  // The rest reads, and answers for a database that holds none.
+  assert.throws(() => db.run('drop statement s'), /named statements are not built yet/);
+  assert.deepEqual(db.run('statements').rows, []);
+  assert.throws(() => db.run('describe statement s'), /statement `s`/);
+});
+
 test('a claim picks the oldest ready rows and answers them, in the module', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
   const { Fenec } = await import('./fenec.js');
   const db = await Fenec.open(wasm);

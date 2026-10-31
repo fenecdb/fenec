@@ -42,6 +42,11 @@
 //! set | del ... [order <key> [desc], ...] [limit N] [returning * | a, b]
 //!                                        -- the rows a get would page to, answered as written
 //! collections | describe <name> | compact [<name>]
+//! create [or replace] statement <name>($p <type> [= <literal>], ...) [claims (<c> <type> [from "<claim>"], ...)]
+//!        [public] [scans] [comment '<text>'] [check <expr>] as <statement> | as begin <statement>; ... end
+//!                                        -- a named statement: `$p` and `$jwt.<c>` in its body, parsed, not yet run
+//! drop statement [if exists] <name> | statements | describe statement <name>
+//! call <name> [{p: v, ...} | $1] [as {c: v, ...} | as $2]   -- and SQL's CALL <name>(v, ..., p => v)
 //! ```
 
 use crate::join::{From, Join, Table};
@@ -135,7 +140,7 @@ const TAKEN: [&str; 27] = [
 /// The words a statement begins with, and SQL's that `Parser::statement`
 /// answers: one a `get` stops at is the next statement's, any other an
 /// alias or a mistake.
-const COMMANDS: [&str; 20] = [
+const COMMANDS: [&str; 22] = [
     "get",
     "select",
     "put",
@@ -156,7 +161,21 @@ const COMMANDS: [&str; 20] = [
     "start",
     "commit",
     "rollback",
+    "call",
+    "statements",
 ];
+
+/// What a definition or a call is refused with where this build has no
+/// named statements (fenec-ql's `statements` feature): the browser module.
+#[cfg(not(feature = "statements"))]
+const UNBUILT: &str = "named statements are a server's; this module is built without them";
+
+/// What SQL's routine, `create function` or `create procedure`, is refused
+/// with: run as its caller unless told, it would change who may do what
+/// read as a named statement, which runs with its own text's authority.
+const ROUTINE: &str = "a routine here is a named statement, `create statement <name>($a int) as \
+                       <statement>`, called with `call <name> {a: 1}`: it runs with its own \
+                       text's authority, where SQL's function runs as its caller unless told";
 
 /// What PostgreSQL's `->>` is answered with, and `json_extract()` by the
 /// engine in its words.
@@ -216,6 +235,17 @@ pub struct Parser {
     /// SQL's `exists (select ... where o.customer_id = c.id)` names the
     /// row around it by.
     outer: Around,
+    /// Inside a named statement's definition, its `check` and its body:
+    /// the names its `$from` and `$jwt.sub` are numbered by. None
+    /// anywhere else, where a name after `$` is refused.
+    def: Option<Box<Names>>,
+}
+
+/// What a definition's `$from` and `$jwt.sub` are numbered by: its
+/// parameters first, in the signature's order, then its claims in theirs.
+struct Names {
+    params: Vec<String>,
+    claims: Vec<String>,
 }
 
 pub fn parse(src: &str) -> Result<Vec<Statement>> {
@@ -265,6 +295,7 @@ fn statements(toks: Vec<Token>, exact: bool) -> Result<Vec<Statement>> {
         exact,
         cut: false,
         outer: Around::At(usize::MAX),
+        def: None,
     };
     let mut out = Vec::new();
     while !p.ended() {
@@ -434,6 +465,7 @@ pub fn reading(src: &str) -> Reading {
         exact: false,
         cut: false,
         outer: Around::At(usize::MAX),
+        def: None,
     };
     // In characters, as tokens are placed: each statement read whole, by
     // where it starts, and the one just read, which what follows decides,
@@ -537,6 +569,27 @@ fn fixed(e: &Expr) -> bool {
     matches!(e, Expr::Lit(_) | Expr::Param(_))
 }
 
+/// Whether a statement begins with `w` ([`COMMANDS`]).
+fn is_command(w: &str) -> bool {
+    COMMANDS.iter().any(|c| w.eq_ignore_ascii_case(c))
+}
+
+/// Why a call's argument is no value, if it is not: it reads no row, so it
+/// names no field and holds no query.
+#[cfg(feature = "statements")]
+fn not_a_value(e: &Expr) -> Option<String> {
+    let mut fields = Vec::new();
+    e.referenced_fields(&mut fields);
+    if let Some(f) = fields.first() {
+        return Some(format!(
+            "an argument is a value -- a literal, a parameter, an expression of them -- and \
+             `{f}` names a field: a text in quotes"
+        ));
+    }
+    e.has_subquery()
+        .then(|| "an argument is a value, and reads no collection".to_string())
+}
+
 /// Whether a text `~` is handed reads as a regular expression: anchored
 /// (`^a`, `a$`) or holding `.*` or `.+`, which a text searched for as
 /// written seldom does. Narrow on purpose: `[draft]` and `a.b` are text
@@ -618,6 +671,7 @@ pub fn parse_select_list(src: &str) -> Result<SelectList> {
         exact: false,
         cut: false,
         outer: Around::At(usize::MAX),
+        def: None,
     };
     let list = p.select_list()?;
     if !p.ended() {
@@ -637,6 +691,7 @@ pub fn parse_group_list(src: &str) -> Result<Vec<Expr>> {
         exact: false,
         cut: false,
         outer: Around::At(usize::MAX),
+        def: None,
     };
     let list = p.group_list()?;
     if !p.ended() {
@@ -656,6 +711,7 @@ pub fn parse_facet_list(src: &str) -> Result<Vec<Facet>> {
         exact: false,
         cut: false,
         outer: Around::At(usize::MAX),
+        def: None,
     };
     let list = p.facet_list()?;
     if !p.ended() {
@@ -858,8 +914,24 @@ impl Parser {
                 self.next();
                 Ok(Statement::ListCollections)
             }
+            "statements" => {
+                self.next();
+                Ok(Statement::ListStatements)
+            }
+            "call" => self.call_statement(),
             "describe" => {
                 self.next();
+                // `describe statement <name>`: a name after `statement`,
+                // and no word a statement begins with -- `describe
+                // statement` alone stays the collection named `statement`'s
+                // description, a statement after it as ever.
+                let named = self.peek_kw("statement")
+                    && matches!(self.toks.get(self.i + 1).map(|t| &t.tok),
+                        Some(Tok::Ident(w) | Tok::Str(w)) if !is_command(w));
+                if named {
+                    self.next();
+                    return Ok(Statement::DescribeStatement(self.statement_name()?));
+                }
                 Ok(Statement::Describe(self.ident()?))
             }
             "compact" => {
@@ -935,6 +1007,26 @@ impl Parser {
 
     fn create(&mut self) -> Result<Statement> {
         self.expect_kw("create")?;
+        if self.peek_kw("statement") {
+            return self.create_statement(false);
+        }
+        if self.peek_kw("or") {
+            self.next();
+            self.expect_kw("replace")?;
+            if self.peek_kw("statement") {
+                return self.create_statement(true);
+            }
+            if self.peek_kw("function") || self.peek_kw("procedure") {
+                return self.err(ROUTINE);
+            }
+            return Err(self.taught(
+                "`create or replace` defines a named statement: `create or replace statement \
+                 <name>(...) as ...`",
+            ));
+        }
+        if self.peek_kw("function") || self.peek_kw("procedure") {
+            return self.err(ROUTINE);
+        }
         if self.peek_kw("index") {
             return self.create_index(false);
         }
@@ -1831,6 +1923,20 @@ impl Parser {
 
     fn drop(&mut self) -> Result<Statement> {
         self.expect_kw("drop")?;
+        if self.eat_kw("statement") {
+            let mut if_exists = false;
+            if self.eat_kw("if") {
+                self.expect_kw("exists")?;
+                if_exists = true;
+            }
+            return Ok(Statement::DropStatement {
+                name: self.statement_name()?,
+                if_exists,
+            });
+        }
+        if self.peek_kw("function") || self.peek_kw("procedure") {
+            return self.err("a named statement is dropped with `drop statement <name>`");
+        }
         // `drop index [if exists] on posts (owner, created)`: an index over
         // several fields, named by its fields.
         if self.eat_kw("index") {
@@ -1941,6 +2047,11 @@ impl Parser {
             // `put events $1`: the documents are the parameter's, an object
             // or a list of them, so a page of any size is one text.
             docs_param = Some(*i);
+            self.next();
+        } else if let Tok::Named(n) = self.peek() {
+            // A definition's body refuses it, by its tree.
+            let n = n.clone();
+            docs_param = Some(self.named(&n)?);
             self.next();
         } else if matches!(self.peek(), Tok::LBracket) {
             self.next();
@@ -2236,6 +2347,17 @@ impl Parser {
         sql |= self.eat_kw("from");
         let at = self.i;
         let collection = self.ident()?;
+        // SQL's `select transfer(...)`, a routine's value in a row, and
+        // `select * from transfer(...)`, a table it makes: a collection's
+        // name takes no arguments, and a named statement runs with `call`.
+        // Refused at the name, which is not consumed.
+        if matches!(self.peek(), Tok::LParen) {
+            self.i = at;
+            return self.err(format!(
+                "`{collection}(...)` names no collection: a query reads `from` a collection, and \
+                 a named statement runs with `call {collection}(...)`"
+            ));
+        }
         // SQL's `from orders o join customers c on ...`, or an alias alone.
         let from = match sql {
             true => self.tables_after(&collection)?,
@@ -2655,7 +2777,9 @@ impl Parser {
                     && !TAKEN
                         .iter()
                         .chain(&COMMANDS)
-                        .any(|k| w.eq_ignore_ascii_case(k)) =>
+                        .any(|k| w.eq_ignore_ascii_case(k))
+                    // In a body, `end` closes it.
+                    && !(self.def.is_some() && w.eq_ignore_ascii_case("end")) =>
             {
                 let a = w.clone();
                 self.next();
@@ -3321,6 +3445,471 @@ impl Parser {
         }
         let picks = pick.picks() || pick.returning.is_some();
         Ok((filter, require, picks.then(|| Box::new(pick))))
+    }
+
+    // ---------------------------------------------------- named statements
+
+    /// A named statement's name, next: one `call_<name>` fits a model's
+    /// tool name with, and no word a statement begins with.
+    fn statement_name(&mut self) -> Result<String> {
+        let at = self.i;
+        let name = self.ident()?;
+        if !fenec_core::named::valid_name(&name) || is_command(&name) {
+            self.i = at;
+            return self.err(fenec_core::named::name_refused(&name));
+        }
+        Ok(name)
+    }
+
+    /// The parameter, or the claim, `$<n>` names: its place among the
+    /// definition's parameters, or past them among its claims. Refused
+    /// outside a definition, where parameters are numbered.
+    fn named(&self, n: &str) -> Result<usize> {
+        let Some(d) = &self.def else {
+            return self.err(format!(
+                "`${n}` names a named statement's parameter; a statement sent alone numbers \
+                 them, `$1`"
+            ));
+        };
+        if n == "jwt" {
+            return self.err("`$jwt` is the caller's token: a body reads a claim it declares, `$jwt.sub`");
+        }
+        if let Some(claim) = n.strip_prefix("jwt.") {
+            if let Some((top, _)) = claim.split_once('.') {
+                return self.err(format!(
+                    "`${n}`: a claim is read whole, `$jwt.{top}`, and no path into it"
+                ));
+            }
+            return match d.claims.iter().position(|c| c == claim) {
+                Some(k) => Ok(d.params.len() + k),
+                None => self.err(format!(
+                    "`${n}` names no claim the statement declares: `claims ({claim} text)`"
+                )),
+            };
+        }
+        if n.contains('.') {
+            return self.err(format!("`${n}`: a parameter is read whole, and no path into it"));
+        }
+        match d.params.iter().position(|p| p == n) {
+            Some(i) => Ok(i),
+            None => self.err(format!("`${n}` names no parameter the statement declares")),
+        }
+    }
+
+    /// `create [or replace] statement ...`, at `statement`: the signature,
+    /// then `as` and the body, which is held to what a body may hold
+    /// ([`Definition::refused`]). The definition is the text's: no schema
+    /// is read here, and nothing runs it yet.
+    #[cfg(feature = "statements")]
+    #[inline(never)]
+    fn create_statement(&mut self, replace: bool) -> Result<Statement> {
+        use fenec_core::named::*;
+        if self.def.is_some() {
+            return self.err(
+                "a body defines no statement: a schema change is the server token's, and a \
+                 statement holding one would hand it to every caller",
+            );
+        }
+        self.next();
+        let at = self.i;
+        let name = self.statement_name()?;
+        if !matches!(self.peek(), Tok::LParen) {
+            return Err(self.taught(
+                "a statement's parameters follow its name in parentheses, `()` for none: \
+                 `create statement purge() ...`",
+            ));
+        }
+        self.next();
+        let mut params: Vec<Param> = Vec::new();
+        while !matches!(self.peek(), Tok::RParen) {
+            if params.len() == MAX_PARAMS {
+                return self.err(format!("a statement declares at most {MAX_PARAMS} parameters"));
+            }
+            let at = self.i;
+            let p = self.param()?;
+            if params.iter().any(|q| q.name == p.name) {
+                self.i = at;
+                return self.err(format!("`${}` is declared twice", p.name));
+            }
+            params.push(p);
+            if !matches!(self.peek(), Tok::Comma) {
+                break;
+            }
+            self.next();
+        }
+        self.expect(Tok::RParen)?;
+        let (mut claims, mut public, mut scans) = (None, false, false);
+        let (mut comment, mut check) = (None, None);
+        let twice = |p: &Parser, what: &str| p.err(format!("`{what}` is written once"));
+        loop {
+            if self.peek_kw("claims") {
+                if claims.is_some() {
+                    return twice(self, "claims");
+                }
+                if check.is_some() {
+                    return self.err("`claims` goes before `check`, which reads them");
+                }
+                self.next();
+                claims = Some(self.claims()?);
+            } else if self.peek_kw("public") {
+                if public {
+                    return twice(self, "public");
+                }
+                self.next();
+                public = true;
+            } else if self.peek_kw("scans") {
+                if scans {
+                    return twice(self, "scans");
+                }
+                self.next();
+                scans = true;
+            } else if self.peek_kw("comment") {
+                if comment.is_some() {
+                    return twice(self, "comment");
+                }
+                self.next();
+                comment = Some(self.quoted_text(
+                    "`comment` takes what the statement does, in quotes: `comment 'Moves an \
+                     amount between two accounts'`",
+                )?);
+            } else if self.peek_kw("check") {
+                if check.is_some() {
+                    return twice(self, "check");
+                }
+                self.next();
+                self.def = Some(Box::new(Names {
+                    params: params.iter().map(|p| p.name.clone()).collect(),
+                    claims: claims.iter().flatten().map(|c: &Claim| c.name.clone()).collect(),
+                }));
+                let at = self.i;
+                let e = self.expr();
+                self.def = None;
+                let e = e?;
+                if let Some(why) = check_refused(&e) {
+                    self.i = at;
+                    return self.err(why);
+                }
+                check = Some(e);
+            } else {
+                break;
+            }
+        }
+        let claims = claims.unwrap_or_default();
+        if !self.eat_kw("as") {
+            return Err(self.taught(
+                "a statement's body follows `as`: `as get ...`, or `as begin <statement>; ... \
+                 end`",
+            ));
+        }
+        self.def = Some(Box::new(Names {
+            params: params.iter().map(|p| p.name.clone()).collect(),
+            claims: claims.iter().map(|c| c.name.clone()).collect(),
+        }));
+        let body = self.body();
+        self.def = None;
+        let (body, starts, block) = body?;
+        let def = Definition {
+            name,
+            replace,
+            params,
+            claims,
+            public,
+            scans,
+            comment,
+            check,
+            body,
+            block,
+        };
+        if let Some((which, why)) = def.refused() {
+            // A body the text's end cut short may yet read: a `where`, a
+            // list, a claim on the next line.
+            self.cut |= self.at_eof();
+            self.i = which.and_then(|k| starts.get(k).copied()).unwrap_or(at);
+            return self.err(why);
+        }
+        Ok(Statement::CreateStatement(Box::new(def)))
+    }
+
+    #[cfg(not(feature = "statements"))]
+    fn create_statement(&mut self, _replace: bool) -> Result<Statement> {
+        self.err(UNBUILT)
+    }
+
+    /// `$name type [= <literal>]`.
+    #[cfg(feature = "statements")]
+    fn param(&mut self) -> Result<fenec_core::named::Param> {
+        let name = match self.peek() {
+            Tok::Named(n) if n == "jwt" || n.starts_with("jwt.") => {
+                return self.err(
+                    "`$jwt` is the caller's token: a claim is declared in `claims (sub text)`",
+                )
+            }
+            Tok::Named(n) if fenec_core::named::valid_name(n) => n.clone(),
+            Tok::Named(n) => {
+                let n = n.clone();
+                return self.err(format!(
+                    "`${n}` is no parameter's name: ASCII letters, digits and `_`, at most {} \
+                     bytes",
+                    fenec_core::named::MAX_NAME
+                ));
+            }
+            Tok::Ident(n) => {
+                let n = n.clone();
+                return self.err(format!("a parameter is named with its `$`: `${n} <type>`"));
+            }
+            _ => {
+                return Err(self.taught(
+                    "a parameter is `$<name> <type>`, read in the body as `$<name>` or by its \
+                     place, `$1`",
+                ))
+            }
+        };
+        self.next();
+        let ty = self.data_type()?;
+        let mut default = None;
+        if matches!(self.peek(), Tok::Eq) {
+            self.next();
+            let (mark, at) = (self.depth, self.i);
+            let e = self.operand();
+            self.depth = mark;
+            default = match e? {
+                Expr::Lit(v) => Some(v),
+                _ => {
+                    self.i = at;
+                    return self.err("a parameter's default is a literal: `$n int = 10`");
+                }
+            };
+        }
+        Ok(fenec_core::named::Param { name, ty, default })
+    }
+
+    /// `(<name> <type> [from "<claim>"], ...)` after `claims`: the token's
+    /// claims the body reads as `$jwt.<name>`.
+    #[cfg(feature = "statements")]
+    fn claims(&mut self) -> Result<Vec<fenec_core::named::Claim>> {
+        use fenec_core::named::{valid_name, Claim, MAX_CLAIMS};
+        self.expect(Tok::LParen)?;
+        if matches!(self.peek(), Tok::RParen) {
+            return self.err("`claims` declares the claims the body reads: `claims (sub text)`");
+        }
+        let mut out: Vec<Claim> = Vec::new();
+        loop {
+            if out.len() == MAX_CLAIMS {
+                return self.err(format!("a statement declares at most {MAX_CLAIMS} claims"));
+            }
+            let at = self.i;
+            let name = self.ident()?;
+            if !valid_name(&name) {
+                self.i = at;
+                return self.err(format!(
+                    "`{name}` is no claim's name here: give it one, `groups [text] from \
+                     \"{name}\"`"
+                ));
+            }
+            let ty = self.data_type()?;
+            let mut from = None;
+            if self.eat_kw("from") {
+                from = Some(self.quoted_text(
+                    "`from` names the token's claim in quotes: `from \"cognito:groups\"`",
+                )?);
+            }
+            let claim = Claim {
+                from: from.filter(|f| *f != name),
+                name,
+                ty,
+            };
+            if let Some(c) = out
+                .iter()
+                .find(|c| c.name == claim.name || c.claim() == claim.claim())
+            {
+                self.i = at;
+                return self.err(format!("the claim `{}` is declared twice", c.claim()));
+            }
+            out.push(claim);
+            if !matches!(self.peek(), Tok::Comma) {
+                break;
+            }
+            self.next();
+        }
+        self.expect(Tok::RParen)?;
+        Ok(out)
+    }
+
+    /// A text in quotes, not empty, next; refused with `why` otherwise --
+    /// at the text's end as cut short, which a next line moves.
+    #[cfg(feature = "statements")]
+    fn quoted_text(&mut self, why: &str) -> Result<String> {
+        match self.peek() {
+            Tok::Single(t) | Tok::Str(t) if !t.is_empty() => {
+                let t = t.clone();
+                self.next();
+                Ok(t)
+            }
+            _ => Err(self.taught(why)),
+        }
+    }
+
+    /// After `as`: one statement, or `begin`, statements cut by `;`, and
+    /// `end` -- with where each began, and whether it was `begin ... end`.
+    /// At the text's end before `end`, refused as cut short, which the
+    /// shell reads as "go on": no bracket of the lexer's holds it open.
+    #[cfg(feature = "statements")]
+    #[allow(clippy::type_complexity)]
+    fn body(&mut self) -> Result<(Vec<Statement>, Vec<usize>, bool)> {
+        if !self.eat_kw("begin") {
+            let at = self.i;
+            return Ok((vec![self.statement()?], vec![at], false));
+        }
+        let (mut out, mut starts) = (Vec::new(), Vec::new());
+        loop {
+            self.semis();
+            if self.eat_kw("end") {
+                return Ok((out, starts, true));
+            }
+            if self.at_eof() {
+                return Err(self.taught("a body begun with `begin` ends with `end`"));
+            }
+            if out.len() == fenec_core::named::MAX_BODY {
+                return self.err(format!(
+                    "a body holds at most {} statements",
+                    fenec_core::named::MAX_BODY
+                ));
+            }
+            starts.push(self.i);
+            out.push(self.statement()?);
+            if !matches!(self.peek(), Tok::Semi) && !self.peek_kw("end") {
+                return Err(self.taught("a body's statements are cut by `;`, and `end` closes it"));
+            }
+        }
+    }
+
+    /// `call <name> [{...} | $n] [as {...} | as $n]`, and SQL's `CALL
+    /// <name>(<arguments>)`: the arguments are values, matched to the
+    /// signature by the engine, since the parser reads no schema.
+    #[cfg(feature = "statements")]
+    #[inline(never)]
+    fn call_statement(&mut self) -> Result<Statement> {
+        use fenec_core::named::{Args, Call};
+        self.next();
+        let name = self.statement_name()?;
+        // `call transfer` at a line's end: its document may come on the
+        // next.
+        self.cut |= self.at_eof();
+        let args = match self.peek() {
+            Tok::LBrace => Args::Named(self.call_document()?),
+            Tok::Param(i) => {
+                let i = *i;
+                self.next();
+                Args::Param(i)
+            }
+            Tok::Named(n) => {
+                let n = n.clone();
+                let i = self.named(&n)?;
+                self.next();
+                Args::Param(i)
+            }
+            Tok::LParen => self.sql_arguments()?,
+            _ => Args::None,
+        };
+        let claims = match self.eat_kw("as") {
+            false => None,
+            true => Some(match self.peek() {
+                Tok::LBrace => Args::Named(self.call_document()?),
+                Tok::Param(i) => {
+                    let i = *i;
+                    self.next();
+                    Args::Param(i)
+                }
+                _ => {
+                    return Err(self.taught(
+                        "`as` takes the claims a call is made with: `as {sub: 'alice'}`, or a \
+                         parameter holding them, `as $2`",
+                    ))
+                }
+            }),
+        };
+        Ok(Statement::Call(Box::new(Call { name, args, claims })))
+    }
+
+    #[cfg(not(feature = "statements"))]
+    fn call_statement(&mut self) -> Result<Statement> {
+        self.err(UNBUILT)
+    }
+
+    /// `{from: 1, to: $2}`: a call's arguments, or its claims, by name --
+    /// each a value, none twice.
+    #[cfg(feature = "statements")]
+    fn call_document(&mut self) -> Result<Vec<(String, Expr)>> {
+        let at = self.i;
+        let pairs = self.object()?;
+        for (k, (name, e)) in pairs.iter().enumerate() {
+            let why = if name.contains('.') {
+                format!("`{name}`: an argument is named by its parameter, and no path")
+            } else if pairs[..k].iter().any(|(n, _)| n == name) {
+                format!("`{name}` is given twice")
+            } else if let Some(why) = not_a_value(e) {
+                why
+            } else {
+                continue;
+            };
+            self.i = at;
+            return self.err(why);
+        }
+        Ok(pairs)
+    }
+
+    /// SQL's `(1, 2, amount => 300)` after `CALL <name>`: by place, then
+    /// any by name, as PostgreSQL's -- all by name the call `{...}` makes,
+    /// none the call with no arguments.
+    #[cfg(feature = "statements")]
+    fn sql_arguments(&mut self) -> Result<fenec_core::named::Args> {
+        use fenec_core::named::Args;
+        self.expect(Tok::LParen)?;
+        let (mut placed, mut named) = (Vec::new(), Vec::<(String, Expr)>::new());
+        while !matches!(self.peek(), Tok::RParen) {
+            let at = self.i;
+            let by_name = matches!(self.peek(), Tok::Ident(_))
+                && matches!(self.toks.get(self.i + 1).map(|t| &t.tok), Some(Tok::Eq))
+                && matches!(self.toks.get(self.i + 2).map(|t| &t.tok), Some(Tok::Gt));
+            let key = match by_name {
+                true => {
+                    let k = self.ident()?;
+                    self.i += 2;
+                    Some(k)
+                }
+                false => None,
+            };
+            let e = self.expr()?;
+            if let Some(why) = not_a_value(&e) {
+                self.i = at;
+                return self.err(why);
+            }
+            match key {
+                Some(k) if named.iter().any(|(n, _)| *n == k) => {
+                    self.i = at;
+                    return self.err(format!("`{k}` is given twice"));
+                }
+                Some(k) => named.push((k, e)),
+                None if !named.is_empty() => {
+                    self.i = at;
+                    return self.err(
+                        "an argument by place goes before those by name: `CALL transfer(1, 2, \
+                         amount => 300)`",
+                    );
+                }
+                None => placed.push(e),
+            }
+            if !matches!(self.peek(), Tok::Comma) {
+                break;
+            }
+            self.next();
+        }
+        self.expect(Tok::RParen)?;
+        Ok(match (placed.is_empty(), named.is_empty()) {
+            (true, true) => Args::None,
+            (true, false) => Args::Named(named),
+            _ => Args::Placed(placed, named),
+        })
     }
 
     // -------------------------------------------------------- expression grammar
@@ -4093,6 +4682,23 @@ impl Parser {
                 Ok(Expr::Lit(Value::Float(f)))
             }
             Tok::Param(i) => {
+                // In a definition, `$1` is its first parameter, and no
+                // claim is read by its place.
+                if let Some(d) = &self.def {
+                    if i >= d.params.len() {
+                        return self.err(format!(
+                            "`${}`: the statement declares {} parameters, read by name or by \
+                             place, and its claims by name, `$jwt.<claim>`",
+                            i + 1,
+                            d.params.len()
+                        ));
+                    }
+                }
+                self.next();
+                Ok(Expr::Param(i))
+            }
+            Tok::Named(n) => {
+                let i = self.named(&n)?;
                 self.next();
                 Ok(Expr::Param(i))
             }
@@ -4317,6 +4923,18 @@ mod tests {
         "create unique index users_email on users using btree (email)",
         "create index on docs using hnsw (emb vector_cosine_ops) with (m = 16)",
         "select id from docs where k = 1 order by emb <=> $1 limit 5",
+        // Named statements: a body over lines reads as one definition, an
+        // unended `begin` reading on to its `end`.
+        "create statement transfer($from int, $to int, $amount int) claims (sub text) comment 'Moves an amount' check $amount > 0 and $from != $to as begin get accounts select id where id = $from and owner = $jwt.sub limit 1 require 1; set accounts {balance: balance - $amount} where id = $from and balance >= $amount require 1; set accounts {balance: balance + $amount} where id = $to require 1; insert entries {from: $from, to: $to, amount: $amount, by: $jwt.sub, at: now()} returning id, at end",
+        "create or replace statement claim($queue text) claims (sub text, groups [text] from \"cognito:groups\") as set jobs {owner: $jwt.sub, run_at: now() + 30000, attempts: attempts + 1} where queue = $queue and run_at <= now() order run_at limit 1 returning id, payload",
+        "create statement purge($n int = 10) public scans as del sessions where seen < now() - 86400000",
+        "drop statement if exists transfer",
+        "statements",
+        "describe statement transfer",
+        "call transfer {from: 1, to: 2, amount: 300} as {sub: 'alice'}",
+        "call transfer $1 as $2",
+        "CALL transfer(1, 2, amount => 300)",
+        "call purge",
     ];
 
     /// The words of a text, cut where the white space between them is.
@@ -4493,6 +5111,7 @@ mod tests {
             exact: false,
             cut: false,
             outer: Around::At(usize::MAX),
+            def: None,
         };
         let mut out = Vec::new();
         while !p.at_eof() {

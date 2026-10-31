@@ -3046,6 +3046,24 @@ pub enum Statement {
     ListCollections,
     Describe(String),
     Compact(Option<String>),
+    /// `create [or replace] statement <name>(...) ... as <body>`: a named
+    /// statement's definition ([`crate::named`]). Boxed, as each variant
+    /// past a select's size would grow every `Statement`.
+    CreateStatement(Box<crate::named::Definition>),
+    /// `drop statement [if exists] <name>`.
+    DropStatement {
+        name: String,
+        if_exists: bool,
+    },
+    /// `statements`: the named statements, as `collections` lists the
+    /// collections.
+    ListStatements,
+    /// `describe statement <name>`; `describe statement` alone is the
+    /// collection named `statement`'s description, as it always was.
+    DescribeStatement(String),
+    /// `call <name> ...` and SQL's `CALL <name>(...)`. Boxed, as
+    /// `CreateStatement` is.
+    Call(Box<crate::named::Call>),
 }
 
 /// What `alter collection` changes. A document is a run of values in field
@@ -3149,12 +3167,18 @@ impl Statement {
             } => set.iter().any(|(_, e)| e.reads_vectors()) || opt(filter) || picked(pick),
             Statement::Delete { filter, pick, .. } => opt(filter) || picked(pick),
             Statement::Select(s) | Statement::Explain(s) => s.reads_vectors(),
+            Statement::Call(c) => c.args.exprs().any(Expr::reads_vectors),
             _ => false,
         }
     }
 
     /// Statements that need no write access. The server runs these under a
     /// shared (read) lock; the others take the exclusive write lock.
+    ///
+    /// A `call` is never one, whatever its body: a definition read before
+    /// the lock may be replaced before it is taken, and a body judged a
+    /// read that writes under the read lock is a write with readers beside
+    /// it (`docs/design/named-statements.md`).
     pub fn is_read_only(&self) -> bool {
         matches!(
             self,
@@ -3162,6 +3186,17 @@ impl Statement {
                 | Statement::Explain(_)
                 | Statement::ListCollections
                 | Statement::Describe(_)
+                | Statement::ListStatements
+                | Statement::DescribeStatement(_)
+        )
+    }
+
+    /// Whether it defines, drops or calls a named statement: what nothing
+    /// runs yet ([`crate::named::NOT_BUILT`]).
+    pub fn is_named(&self) -> bool {
+        matches!(
+            self,
+            Statement::CreateStatement(_) | Statement::DropStatement { .. } | Statement::Call(_)
         )
     }
 
@@ -3241,6 +3276,12 @@ impl Statement {
                 set, filter, pick, ..
             } => pairs(set).max(opt(filter)).max(picked(pick)),
             Statement::Delete { filter, pick, .. } => opt(filter).max(picked(pick)),
+            // A definition's parameters are its calls', numbered in its
+            // body: the text that defines it is handed none.
+            Statement::Call(c) => c
+                .args
+                .max_param()
+                .max(c.claims.as_ref().map_or(0, |a| a.max_param())),
             _ => 0,
         }
     }

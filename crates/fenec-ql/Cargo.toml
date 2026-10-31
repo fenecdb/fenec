@@ -20,7 +20,13 @@ fenec-core = { workspace = true, default-features = false }
 fenec-core = { workspace = true, features = ["full"] }
 
 [features]
-default = []
+default = ["statements"]
+# Named statements' definitions and calls -- `create statement`, `call` and
+# SQL's `CALL` -- read into their trees. Without it they are refused in words
+# of their own, and the rest of the language reads as ever: the browser
+# module, which the workspace's dependency leaves it out of. Not in fenec-core's
+# `full`, so naming `full` does not bring it back into the module.
+statements = []
 
 [[test]]
 name = "all"

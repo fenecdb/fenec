@@ -16,6 +16,7 @@ mod fields;
 mod idempotency;
 mod lease_answers;
 mod mcp;
+mod named;
 mod node_archive;
 mod prepared;
 mod reach;

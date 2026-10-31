@@ -15,6 +15,12 @@ pub enum Tok {
     Float(f64),
     /// `$1` -> Param(0)
     Param(usize),
+    /// `$from`, `$jwt.sub`: a named statement's parameter, or a claim it
+    /// declares, by name -- ASCII letters, digits, `_` and a dot between
+    /// two names -- which its definition's parser numbers
+    /// (`Parser::named`) and refuses outside one. `$` and anything but a
+    /// digit was refused before, so no text that lexed reads otherwise.
+    Named(String),
     /// Numbers alone between brackets, read as the parser reads such a
     /// list: into `f32`s, a vector ([`tokenize_vectors`]).
     Vector(Vec<f32>),
@@ -65,6 +71,7 @@ impl Tok {
                 text
             }
             Tok::Param(i) => format!("${}", i + 1),
+            Tok::Named(n) => format!("`${n}`"),
             Tok::Vector(v) => format!("a vector of {}", v.len()),
             Tok::LBrace => "`{`".into(),
             Tok::RBrace => "`}`".into(),
@@ -114,6 +121,7 @@ fn subtracts(last: Option<&Token>) -> bool {
                 | Tok::Int(_)
                 | Tok::Float(_)
                 | Tok::Param(_)
+                | Tok::Named(_)
                 | Tok::Vector(_)
                 | Tok::RParen
                 | Tok::RBracket
@@ -497,6 +505,23 @@ fn lex_with(src: &str, vectors: bool) -> Result<Vec<Token>> {
                     Tok::Gt
                 }
             }
+            // `$from`, `$jwt.sub`: in ASCII alone, as a named statement's
+            // names are, a dot between two names.
+            '$' if b.get(i + 1).is_some_and(u8::is_ascii_alphabetic) => {
+                i += 1;
+                let s = i;
+                let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+                loop {
+                    while b.get(i).is_some_and(|&c| word(c)) {
+                        i += 1;
+                    }
+                    match (b.get(i), b.get(i + 1)) {
+                        (Some(b'.'), Some(&c)) if c.is_ascii_alphabetic() || c == b'_' => i += 1,
+                        _ => break,
+                    }
+                }
+                Tok::Named(src.get(s..i).unwrap_or_default().to_string())
+            }
             '$' => {
                 i += 1;
                 let s = i;
@@ -721,6 +746,28 @@ mod tests {
         assert_eq!(toks("n -- 1"), [n(), Tok::Eof]);
     }
 
+    /// `$` and a letter is a name, a path of names among them; `$` and a
+    /// digit a number, as it was; `$` and anything else refused, as it was.
+    #[test]
+    fn a_named_parameter_is_one_token() {
+        let toks =
+            |s: &str| -> Vec<Tok> { tokenize(s).unwrap().into_iter().map(|t| t.tok).collect() };
+        let named = |n: &str| Tok::Named(n.into());
+        assert_eq!(toks("$from"), [named("from"), Tok::Eof]);
+        assert_eq!(
+            toks("$jwt.sub=$a_1"),
+            [named("jwt.sub"), Tok::Eq, named("a_1"), Tok::Eof]
+        );
+        // A path of names is one; a dot before no name is the lexer's
+        // refusal, as after a field's name.
+        assert_eq!(toks("$a.b.c_2")[..1], [named("a.b.c_2")]);
+        assert!(tokenize("$a.5").is_err() && tokenize("a.5").is_err());
+        assert_eq!(toks("$a-1")[..3], [named("a"), Tok::Minus, Tok::Int(1)]);
+        assert_eq!(toks("$1")[..1], [Tok::Param(0)]);
+        assert!(tokenize("$_a").is_err() && tokenize("$").is_err() && tokenize("$ a").is_err());
+        assert_eq!(tokenize("$ş").unwrap_err(), tokenize("$_").unwrap_err());
+    }
+
     #[test]
     fn numbers_and_params() {
         let t = tokenize("[-0.5, 1e-3, 42] $2").unwrap();
@@ -867,6 +914,22 @@ mod tests {
                     } else {
                         Tok::Gt
                     }
+                }
+                // A named statement's `$from`, since named statements.
+                '$' if b.get(i + 1).is_some_and(char::is_ascii_alphabetic) => {
+                    i += 1;
+                    let s = i;
+                    let word = |c: &char| c.is_ascii_alphanumeric() || *c == '_';
+                    loop {
+                        while b.get(i).is_some_and(word) {
+                            i += 1;
+                        }
+                        match (b.get(i), b.get(i + 1)) {
+                            (Some('.'), Some(c)) if c.is_ascii_alphabetic() || *c == '_' => i += 1,
+                            _ => break,
+                        }
+                    }
+                    Tok::Named(b[s..i].iter().collect())
                 }
                 '$' => {
                     i += 1;
