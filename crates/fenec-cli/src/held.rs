@@ -55,14 +55,15 @@ pub fn take(path: &str, way: Way) -> Result<FileLock, String> {
         // A directory the user may only read, a read-only file system,
         // another user's lock file: a read there opened before the lock
         // was taken, and opens still without it.
-        Err(Refused::Io(e)) => Err(match way {
-            Way::Shell => format!(
-                "could not take {path}.lock: {e}\n  `fenec --read-only {path}` reads it without a lock"
+        // The lock file named as it is, past a link to the file.
+        Err(Refused::Io(e)) => Err(match (way, lock::lock_path(path).display()) {
+            (Way::Shell, lock) => format!(
+                "could not take {lock}: {e}\n  `fenec --read-only {path}` reads it without a lock"
             ),
-            Way::Mcp => {
-                format!("could not take {path}.lock: {e}\n  --read-only reads it without a lock")
+            (Way::Mcp, lock) => {
+                format!("could not take {lock}: {e}\n  --read-only reads it without a lock")
             }
-            _ => format!("could not take {path}.lock: {e}"),
+            (_, lock) => format!("could not take {lock}: {e}"),
         }),
     }
 }

@@ -114,8 +114,18 @@ struct Server {
 
 impl Server {
     fn start(bin: &Path, file: &str) -> Server {
+        Server::spawn(bin, &["--file", file])
+    }
+
+    /// A `--dir` node over `dir`, its admin token `adm`.
+    fn node(bin: &Path, dir: &str) -> Server {
+        Server::spawn(bin, &["--dir", dir, "--admin-token", "adm"])
+    }
+
+    fn spawn(bin: &Path, args: &[&str]) -> Server {
         let mut child = Command::new(bin)
-            .args(["--file", file, "--http", "127.0.0.1:0", "--sync", "always"])
+            .args(args)
+            .args(["--http", "127.0.0.1:0", "--sync", "always"])
             .arg("--exit-on-stdin-close")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -156,24 +166,41 @@ impl Server {
 
     /// `POST /query`, the answer's body.
     fn query(&self, q: &str) -> String {
+        self.run("/query", q).1
+    }
+
+    /// `POST <path>` of a statement: the status and the body.
+    fn run(&self, path: &str, q: &str) -> (u16, String) {
         let body = format!(
             "{{\"query\":\"{}\"}}",
             q.replace('\\', "\\\\").replace('"', "\\\"")
         );
+        self.ask("POST", path, &body, None)
+    }
+
+    /// A request: the status and the body.
+    fn ask(&self, method: &str, path: &str, body: &str, token: Option<&str>) -> (u16, String) {
         let mut s = TcpStream::connect(&self.addr).unwrap();
+        let auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
         write!(
             s,
-            "POST /query HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
-             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "{method} {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
+             {auth}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             self.addr,
             body.len()
         )
         .unwrap();
         let mut answer = String::new();
         s.read_to_string(&mut answer).unwrap();
-        answer
+        let status = answer
+            .split_whitespace()
+            .nth(1)
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(0);
+        let body = answer
             .split_once("\r\n\r\n")
-            .map_or(answer.clone(), |(_, b)| b.to_string())
+            .map_or(answer.clone(), |(_, b)| b.to_string());
+        (status, body)
     }
 
     /// Its stdin ended, the exit code once it is down.
@@ -253,6 +280,90 @@ fn a_shell_beside_a_server_is_refused_and_the_file_stays_whole() {
     let again = Server::start(&bin, &p);
     assert!(again.query("get notes count").contains('4'));
     assert_eq!(again.stop(), 0);
+}
+
+/// A `--dir` node's tenant file, as #414's reviewer found it: the node took
+/// no lock, so `fenec T/acme.fenec -c 'put ...'` beside it wrote, and the
+/// node's next writes left the file unreadable (`corrupt: unknown record
+/// kind 120`). Each open tenant holds its file's lock now, released with its
+/// database: the shell is refused while the node has the tenant open --
+/// through a link to the file too -- and the node is refused the tenant, an
+/// open and a delete, while a shell has it; each goes on once the other let
+/// go, the file whole.
+#[test]
+#[cfg(unix)]
+fn a_tenant_s_file_is_held_by_its_node_and_refused_to_it() {
+    let Some(bin) = server_bin() else {
+        eprintln!("passed over: no fenec-server beside {BIN}");
+        return;
+    };
+    let d = Dir::new("node");
+    let tenants = d.file("T");
+    std::fs::create_dir_all(&tenants).unwrap();
+    let p = format!("{tenants}/acme.fenec");
+    let node = Server::node(&bin, &tenants);
+    let (status, body) = node.ask("PUT", "/_admin/tenants/acme", "", Some("adm"));
+    assert_eq!(status, 201, "{body}");
+    let (status, body) = node.run("/t/acme/query", "create collection notes (body text)");
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = node.run("/t/acme/query", r#"put notes {id: 1, body: "node"}"#);
+    assert_eq!(status, 200, "{body}");
+
+    let pid = format!("(fenec-server, pid {})", node.child.id());
+    let put = format!(r#"put notes {{id: 2, body: "{}"}}"#, "x".repeat(300));
+    refused(&fenec(&[&p, "-c", &put]), &p, &pid, "-c");
+    let link = d.file("acme-link.fenec");
+    std::os::unix::fs::symlink(&p, &link).unwrap();
+    refused(&fenec(&[&link, "-c", &put]), &link, &pid, "through a link");
+    for id in [3, 4] {
+        let (status, body) = node.run("/t/acme/query", &format!("put notes {{id: {id}}}"));
+        assert_eq!(status, 200, "{body}");
+    }
+    assert_eq!(node.stop(), 0);
+
+    // The other way round: a shell has the file, and a node started over
+    // the directory is refused the tenant -- named -- but serves the rest.
+    let mut shell = Command::new(BIN)
+        .arg(&p)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = shell.stdin.take().unwrap();
+    let mut stdout = BufReader::new(shell.stdout.take().unwrap());
+    writeln!(stdin, ".tables").unwrap();
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    assert_eq!(line.trim(), "notes");
+    let node = Server::node(&bin, &tenants);
+    let held = format!("(fenec, pid {})", shell.id());
+    let (status, body) = node.run("/t/acme/query", "get notes");
+    assert_eq!(status, 500, "{body}");
+    assert!(
+        body.contains("open in another process") && body.contains(&held),
+        "{body}"
+    );
+    let (status, body) = node.ask("DELETE", "/_admin/tenants/acme", "", Some("adm"));
+    assert_eq!(status, 500, "{body}");
+    assert!(body.contains(&held), "{body}");
+    assert!(Path::new(&p).exists(), "deleted from under the shell");
+    let (status, body) = node.ask("PUT", "/_admin/tenants/beta", "", Some("adm"));
+    assert_eq!(status, 201, "{body}");
+
+    // The shell writes and quits: the node opens the tenant, every row in.
+    writeln!(stdin, "{put};").unwrap();
+    drop(stdin);
+    let out = shell.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let (status, body) = node.run("/t/acme/query", "get notes select id order id");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, r#"[{"id":1},{"id":2},{"id":3},{"id":4}]"#);
+    assert_eq!(node.stop(), 0);
+    assert_eq!(
+        ids(&fenec(&[&p, "-c", "get notes select id order id"])),
+        [1, 2, 3, 4]
+    );
 }
 
 /// Two shells over one file: the second is refused while the first has it
@@ -420,4 +531,65 @@ fn a_file_whose_lock_cannot_be_made_is_read_with_read_only() {
     );
     assert_eq!(ro.status.code(), Some(0), "{}", text(&ro.stderr));
     assert!(text(&ro.stdout).contains("notes"));
+}
+
+/// `fenec restore` renamed its file over whatever had the name, a
+/// database written since included, and exited 0; a backup into a file did
+/// the same. Each refuses a file there already now (exit 2, the file left
+/// as it was) unless `--force` says to replace it.
+#[cfg(feature = "backup")]
+#[test]
+fn a_restore_or_a_backup_never_writes_over_a_database_unasked() {
+    let d = Dir::new("restore");
+    let archive = d.file("archive");
+    let mut db = fenec_core::prelude::Database::new();
+    for q in [
+        "create collection notes (body text)",
+        r#"put notes {body: "archived"}"#,
+    ] {
+        db.execute(&fenec_ql::parse_one(q).unwrap()).unwrap();
+    }
+    fenec_http::archive::Archive::with_key(&archive, None)
+        .unwrap()
+        .add_image(db.change_seq(), &db.snapshot())
+        .unwrap();
+    let out = d.file("out.fenec");
+    let restored = fenec(&["restore", &archive, &out]);
+    assert_eq!(
+        restored.status.code(),
+        Some(0),
+        "{}",
+        text(&restored.stderr)
+    );
+    let wrote = fenec(&[&out, "-c", r#"put notes {body: "written since"}"#]);
+    assert!(wrote.status.success(), "{}", text(&wrote.stderr));
+    let before = std::fs::read(&out).unwrap();
+
+    let again = fenec(&["restore", &archive, &out]);
+    let why = text(&again.stderr);
+    assert_eq!(again.status.code(), Some(2), "{why}");
+    assert!(
+        why.contains("is there already") && why.contains("--force"),
+        "{why}"
+    );
+    assert_eq!(std::fs::read(&out).unwrap(), before, "the file was written");
+    // A backup into the name: refused before the primary is asked, which
+    // here is no one.
+    let backup = fenec(&["backup", "http://127.0.0.1:9", &out, "--token", "t"]);
+    let why = text(&backup.stderr);
+    assert_eq!(backup.status.code(), Some(2), "{why}");
+    assert!(why.contains("is there already"), "{why}");
+    assert_eq!(std::fs::read(&out).unwrap(), before);
+
+    // Forced, the restore replaces it: the archive's row alone.
+    let forced = fenec(&["restore", &archive, &out, "--force"]);
+    assert_eq!(forced.status.code(), Some(0), "{}", text(&forced.stderr));
+    let rows = text(&fenec(&[&out, "-c", "get notes select body"]).stdout);
+    assert!(
+        rows.contains("archived") && !rows.contains("written since"),
+        "{rows}"
+    );
+    // `--force` belongs to those two alone.
+    let verify = fenec(&["verify", &archive, "--force"]);
+    assert_eq!(verify.status.code(), Some(2), "{}", text(&verify.stderr));
 }

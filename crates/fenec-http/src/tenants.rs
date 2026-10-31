@@ -164,6 +164,38 @@ fn write_follows(dir: &Path, name: &str, text: &str) -> std::io::Result<()> {
         .and_then(|_| dir_synced(&path))
 }
 
+/// A tenant's `<file>.lock` (`fenec_abi::lock`), taken before its file is
+/// opened or put in its place, as `fenec-server --file`, the shell and an
+/// app take a file's: refused while another process -- a shell, an app,
+/// another node over the directory -- has the file open, naming it. Held
+/// in this process, it is a database of the tenant not let go of yet,
+/// which a second over the file would corrupt as surely: waited for up to
+/// [`RELEASE_WAIT`], as a close, a delete or a follow lets the tenant go
+/// with what ran beside it still ending -- a follower's thread, a linking
+/// slice, the graph keeper's append -- then refused.
+fn hold_tenant(name: &str, path: &Path) -> std::result::Result<fenec_abi::lock::FileLock, Refused> {
+    fenec_abi::lock::hold_within(path, RELEASE_WAIT).map_err(|e| match e {
+        fenec_abi::lock::Refused::Held => {
+            let holder = fenec_abi::lock::holder(path);
+            let held = match &holder {
+                Some(h) if h.pid == Some(std::process::id()) => {
+                    "open in this process already, a database of it not let go of yet".into()
+                }
+                Some(h) if h.is_known() => format!("open in another process ({h})"),
+                _ => "open in another process".into(),
+            };
+            Refused(
+                500,
+                format!("tenant `{name}`'s file is {held}: two writers over one file corrupt it"),
+            )
+        }
+        fenec_abi::lock::Refused::Io(e) => Refused(
+            500,
+            format!("could not take tenant `{name}`'s lock file: {e}"),
+        ),
+    })
+}
+
 /// [`fenec_core::fs::sync_dir`] as an I/O error.
 fn dir_synced(path: &Path) -> std::io::Result<()> {
     fenec_core::fs::sync_dir(path).map_err(|e| std::io::Error::other(e.to_string()))
@@ -1106,15 +1138,22 @@ impl Tenants {
         let failed = |e: fenec_core::error::Error| {
             Refused(500, format!("could not open tenant `{name}`: {e}"))
         };
+        // `<file>.lock` before the open, held by the database's sink and let
+        // go with the database, whoever drops it last. Taken by nothing, a
+        // shell over `acme.fenec` beside the node appended its write where
+        // the node appended its next, and the file opened no more.
+        let lock = hold_tenant(name, path)?;
         let (mut db, feed) = match &self.repl {
             None => {
-                let db = fenec_core::fs::open_serving(path, self.mapped, Box::new(Ok));
+                let wrap = fenec_abi::lock::holding(lock);
+                let db = fenec_core::fs::open_serving(path, self.mapped, Box::new(wrap));
                 (db.map_err(failed)?, None)
             }
             Some(r) => {
                 let file = path.to_string_lossy().into_owned();
-                let (db, feed) = crate::replication::open_serving(&file, r.buffer, self.mapped)
-                    .map_err(failed)?;
+                let (db, feed) =
+                    crate::replication::open_serving_holding(&file, r.buffer, self.mapped, lock)
+                        .map_err(failed)?;
                 (db, Some(feed))
             }
         };
@@ -1569,6 +1608,10 @@ impl Tenants {
             if matches!(held, Held::Open(_)) || path.exists() {
                 return Err(Refused(409, format!("tenant `{name}` already exists")));
             }
+            // Its lock across the rename: a file put in place under a
+            // shell or an app that has the name open would be written by
+            // both.
+            let _held = hold_tenant(name, &path)?;
             // A tenant installed here is its primary: a record left by a
             // replica of the same name deleted before would have it follow.
             let _ = std::fs::remove_file(self.follows_path(name));
@@ -1662,6 +1705,11 @@ impl Tenants {
         if !path.exists() {
             return Err(Refused(404, format!("no tenant `{name}` on this node")));
         }
+        // Not removed from under another process that has it open -- a
+        // shell, an app -- which would write on into a file gone. The lock
+        // file stays: removed, a process that opened it before the removal
+        // and locked it after would hold a lock no later opener sees.
+        let _held = hold_tenant(name, &path)?;
         std::fs::remove_file(&path)
             .map_err(|e| Refused(500, format!("could not remove tenant `{name}`: {e}")))?;
         // Once the file is gone: a delete that failed is no departure --

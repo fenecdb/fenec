@@ -106,11 +106,15 @@ These are deliberate, and README explains each one:
   (`fenec archive --key-file`) kept elsewhere.
 - **Two processes opening the same file corrupts it.** There is a single writer,
   which is why everything that writes a file runs as a thread of one
-  `fenec-server`. `fenec-server --file`, `fenec mcp --file` and the native
-  library each take `<file>.lock` (an `fcntl` record lock, `fenec_abi::lock`)
-  and refuse a file another holds. Nothing else does: the `fenec` shell,
-  `fenec import`, embedded Rust's `fs::open` and the tenants of a `--dir`
-  node take no lock, so one process over each is the operator's to keep.
+  `fenec-server`. `fenec-server --file`, each tenant a `--dir` node has open,
+  `fenec-shard`'s directory, the native library and every `fenec` way that
+  writes a file (the shell, `mcp --file`, `import`, a backup or restore into
+  a file) take `<file>.lock` (an `fcntl` record lock, `fenec_abi::lock`) and
+  refuse a file another holds; a symbolic link to the file takes its lock.
+  Embedded Rust's `fs::open` takes none, a hard link is a name with a lock of
+  its own, and a record lock does not cross a Docker Desktop bind mount or a
+  network file system that keeps no locks: one process over each is the
+  operator's to keep.
 - **A batch holds the database.** From its first write to its end every other
   writer waits on it, and readers on a batch that is still being written.
   A batch of reads alone holds the read lock: writers wait for it as for
