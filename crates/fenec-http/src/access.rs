@@ -227,6 +227,9 @@ pub struct Access {
     /// The JWKS file the keys are read again from as it changes.
     source: Option<Source>,
     rules: Vec<Rule>,
+    /// Whether a rule reads another collection: a token's rules are then
+    /// bound for a `not` as well ([`hold`]).
+    reaching: bool,
     /// The collections no scoped token updates or deletes in (`append-only`
     /// lines), `*` for every one.
     append_only: Arc<[String]>,
@@ -637,6 +640,7 @@ impl Access {
         Ok(Access {
             keys: RwLock::new(Arc::new(keys)),
             source,
+            reaching: rules.iter().any(|r| !r.reads.is_empty()),
             rules,
             append_only: append_only.into(),
             verified: Default::default(),
@@ -766,6 +770,10 @@ impl Access {
             _ => false,
         };
         let mut rules = Vec::new();
+        // Each rule bound for a place under an odd number of `not`s as
+        // well, where a rule reads another collection: what a `not ... in`
+        // over its collection is held to ([`hold`]).
+        let mut negated = Vec::new();
         'rules: for r in &self.rules {
             if r.role.as_deref().is_some_and(|role| !has_role(role)) {
                 continue;
@@ -797,10 +805,13 @@ impl Access {
                 text: r.text.clone(),
                 reaches: !r.reads.is_empty(),
             });
+            if self.reaching {
+                negated.push(r.filter.as_ref().map(|f| bind_held(f, &values, false)));
+            }
         }
         let reaching = rules.iter().any(|r| r.reaches);
         if reaching {
-            Scope::held(&mut rules);
+            Scope::held(&mut rules, negated);
         }
         // Anything but a text or a list of texts names no tenant: a number
         // or an object compared as text could be made to match. Only a
@@ -1190,6 +1201,20 @@ fn claims_held(e: &Expr, cond: bool, claims: &[String]) -> std::result::Result<(
             }
             operand(a)?;
             operand(b)
+        }
+        // SQL's `like` and `ilike` (and `not like`, a `not` over one) are
+        // calls in the tree, but a claim as the pattern or the escape is
+        // compared in no order: a text matches it or not, and a claim of
+        // another kind is a type error, which refuses the read. Refused, a
+        // policy matching a home directory (`path like $jwt.home`) no
+        // longer started, naming a call it never wrote.
+        Expr::Call(name, args)
+            if matches!(name.as_str(), "like" | "ilike")
+                && args.len() > 1
+                && args[0].max_param() == 0 =>
+        {
+            claims_held(&args[0], false, claims)?;
+            args[1..].iter().try_for_each(operand)
         }
         Expr::Call(name, args) if args.iter().any(|a| a.max_param() > 0) => {
             let a = args
@@ -1656,11 +1681,15 @@ fn bind(e: &Expr, values: &[Value]) -> Expr {
 
 /// [`bind`] of `e` standing under an even number of `not`s (`pass`) or an
 /// odd one: an ordered comparison with a claim is held to the claim's kind
-/// ([`kind_held`]) as `cmp and held` under the first, and as `cmp or not
-/// held` under the second, which the `not` above turns into `not cmp and
-/// held` -- so a value of another kind passes neither the comparison nor
-/// its negation. ANDed in under a `not` alone, the guard became an `or`
-/// there, and `not (score > $jwt.max)` admitted every text and list.
+/// ([`kind_held`]) as `cmp and held` under the first, and as `cmp or (not
+/// held and other is not null)` under the second, which the `not` above
+/// turns into `not cmp and (held or other is null)` -- so a value of another
+/// kind passes neither the comparison nor its negation, and a row with no
+/// value passes the negation as it passes `not cmp` alone. ANDed in under a
+/// `not` alone, the guard became an `or` there, and `not (score >
+/// $jwt.max)` admitted every text and list; negated whole, it held out the
+/// rows with no `level` that `not (level > $jwt.c)` admitted on main, and
+/// the server token's `not (level > 5)` admits.
 /// An inner `get`'s filter stands where its `in` does: under `not ... in`,
 /// a row of another kind is in its list and so held out.
 fn bind_held(e: &Expr, values: &[Value], pass: bool) -> Expr {
@@ -1676,7 +1705,7 @@ fn bind_held(e: &Expr, values: &[Value], pass: bool) -> Expr {
             let cmp = Expr::Cmp(*op, b(x), b(y));
             match kind_held(*op, x, y, values, pass) {
                 Some(held) if pass => Expr::And(Box::new(cmp), Box::new(held)),
-                Some(held) => Expr::Or(Box::new(cmp), Box::new(Expr::Not(Box::new(held)))),
+                Some(unheld) => Expr::Or(Box::new(cmp), Box::new(unheld)),
                 None => cmp,
             }
         }
@@ -1711,10 +1740,10 @@ fn bind_held(e: &Expr, values: &[Value], pass: bool) -> Expr {
     }
 }
 
-/// The lower edge of a text claim that reads as a time, itself a time
-/// `time::parse` reads -- the first day of year 0 -- so that a time field
-/// orders against such a claim (`at <= $jwt.until`,
-/// `"2026-07-01T00:00:00Z"`) by time, and a text field as text from there.
+/// The lower edge of a text claim that reads as a time for a time, itself
+/// a time `time::parse` reads -- the first day of year 0 -- so that a time
+/// field orders against such a claim (`at <= $jwt.until`,
+/// `"2026-07-01T00:00:00Z"`) by time.
 const EARLIEST: &str = "0000-01-01";
 
 /// What holds the other side of `x op y` to the kind of the claim on one
@@ -1729,17 +1758,26 @@ const EARLIEST: &str = "0000-01-01";
 /// a number, `<= true` (and `>= false`) for a bool, `>= ""` and `<` the
 /// byte `0xFF` for a text: above every text, whose UTF-8 never holds that
 /// byte, and below every kind ranked above texts, bytes ranking with them
-/// (a vector literal, the next kind, is refused beside a json field). A
-/// text claim that reads as a time is a time's kind as well, as
-/// `cmp_value` compares a time with a text by reading it, so its lower
-/// edge is [`EARLIEST`]: a time field orders against it by time, a text
-/// field as text from there. Where the comparison stands under an even
-/// number of `not`s (`held`) the edge on the side it leaves open is
-/// enough; under an odd one it is negated, and needs both. A typed field's
-/// edges are true or false of every row, which `@sorted`'s range takes as
-/// no bound or none (`fenec_core::sorted::by_kind`), so the range stays
-/// exact. `=`, `!=` and `in` never take one kind for another (`cmp_value`
-/// is not `Equal` across kinds) and ask nothing more.
+/// (a vector literal, the next kind, is refused beside a json field).
+///
+/// A text claim that reads as a time is a time's kind as well, as
+/// `cmp_value` compares a time with a text by reading it: its lower edge
+/// is `>= ""` for a text and [`EARLIEST`] for a time, `other >= "" or
+/// other >= "0000-01-01"`. A time and an int order alike against every
+/// value but such a text, so no edge ANDed in says both: `>= "0000-01-01"`
+/// alone held a text field's `""`, `"-1"` and `"0.9"` out of `day <=
+/// "2026-01-01"`. The engine folds the `or` to the side the field's
+/// declared type reads (`fenec_core::engine`'s `fold_kinds`), so an
+/// ordered index still says it as a key.
+///
+/// Under an even number of `not`s (`held`) the edge on the side the
+/// comparison leaves open is enough, and this is it; under an odd one
+/// this is `not (both edges) and other is not null`, for the comparison
+/// to be ORed with ([`bind_held`]). A typed field's edges are true or false
+/// of every row, which `@sorted`'s range and an index over several fields
+/// take as no bound or none (`fenec_core::sorted::by_kind`), so the range
+/// stays exact. `=`, `!=` and `in` never take one kind for another
+/// (`cmp_value` is not `Equal` across kinds) and ask nothing more.
 fn kind_held(op: CmpOp, x: &Expr, y: &Expr, values: &[Value], held: bool) -> Option<Expr> {
     // `other op claim`, or `claim op other` turned around: `below` where
     // the other side is asked to be below the claim.
@@ -1754,28 +1792,38 @@ fn kind_held(op: CmpOp, x: &Expr, y: &Expr, values: &[Value], held: bool) -> Opt
     let blank = || Value::Text(String::new());
     let (lo, hi) = match claim {
         Value::Int(_) | Value::Float(_) => ((CmpOp::Gt, Value::Bool(true)), (CmpOp::Lt, blank())),
-        Value::Text(t) => {
-            let lo = match fenec_core::time::parse(t) {
-                Ok(_) => Value::Text(EARLIEST.into()),
-                Err(_) => blank(),
-            };
-            ((CmpOp::Ge, lo), (CmpOp::Lt, Value::Bytes(vec![0xFF])))
-        }
+        Value::Text(_) => ((CmpOp::Ge, blank()), (CmpOp::Lt, Value::Bytes(vec![0xFF]))),
         Value::Bool(_) => (
             (CmpOp::Ge, Value::Bool(false)),
             (CmpOp::Le, Value::Bool(true)),
         ),
         _ => return None,
     };
-    let edge = |(op, v): (CmpOp, Value)| {
-        Expr::Cmp(op, Box::new(bind(other, values)), Box::new(Expr::Lit(v)))
+    let bound = || Box::new(bind(other, values));
+    let edge = |(op, v): (CmpOp, Value)| Expr::Cmp(op, bound(), Box::new(Expr::Lit(v)));
+    let low = || {
+        let first = edge(lo.clone());
+        match claim {
+            Value::Text(t) if fenec_core::time::parse(t).is_ok() => {
+                let time = edge((CmpOp::Ge, Value::Text(EARLIEST.into())));
+                Expr::Or(Box::new(first), Box::new(time))
+            }
+            _ => first,
+        }
     };
     match (held, below, claim) {
-        (false, ..) => Some(Expr::And(Box::new(edge(lo)), Box::new(edge(hi)))),
+        (false, ..) => {
+            let both = Expr::And(Box::new(low()), Box::new(edge(hi)));
+            let present = Expr::Not(Box::new(Expr::IsNull(bound())));
+            Some(Expr::And(
+                Box::new(Expr::Not(Box::new(both))),
+                Box::new(present),
+            ))
+        }
         // Nothing ranks below a bool but `null`, which orders against
         // nothing.
         (true, true, Value::Bool(_)) => None,
-        (true, true, _) => Some(edge(lo)),
+        (true, true, _) => Some(low()),
         (true, false, _) => Some(edge(hi)),
     }
 }
@@ -1833,22 +1881,31 @@ fn granted(rules: &[Bound], collection: &str, op: u8) -> Option<Option<Expr>> {
     }
 }
 
-/// Each inner `get` in `e` held to the read rules of `rules` on the
+/// Each inner `get` in `e` held to the read rules of `pos` on the
 /// collection it reads, and the inner `get`s those bring held in turn
-/// ([`Scope::held`]).
-fn hold(rules: &[Bound], e: &mut Expr) {
-    let _ = e.each_subquery_mut(&mut |x| {
-        if let Expr::InSelect(_, sel) = x {
+/// ([`Scope::held`]) -- or of `neg`, the same rules bound for a place under
+/// an odd number of `not`s ([`bind_held`]), where the `get` stands so
+/// (`pass` false): a `not ... in`'s list. Its rules' ordered comparisons
+/// with a claim hold a row of another kind out of the list as a condition
+/// standing alone, and the list held out fewer rows: `author not in (get
+/// bans select author)` under `bans read where severity >= $jwt.min` read
+/// a post by an author banned with a `"high"` severity, which main held
+/// out. Bound for the `not`, the list keeps such a row.
+fn hold(pos: &[Bound], neg: &[Bound], e: &mut Expr, pass: bool) {
+    match e {
+        Expr::Not(x) => hold(pos, neg, x, !pass),
+        Expr::InSelect(_, sel) => {
+            let rules = if pass { pos } else { neg };
             sel.filter = match granted(rules, &sel.collection, READ) {
                 None => Some(Expr::Lit(Value::Bool(false))),
                 Some(read) => and(sel.filter.take(), read),
             };
             if let Some(f) = &mut sel.filter {
-                hold(rules, f);
+                hold(pos, neg, f, pass);
             }
         }
-        Ok(())
-    });
+        e => e.each_child_mut(&mut |c| hold(pos, neg, c, pass)),
+    }
 }
 
 /// Each inner `get` in `e` answered against `db` as the `in` list it is,
@@ -2192,12 +2249,20 @@ impl Scope {
     /// gives a policy's subquery none of a table no policy grants: refused
     /// as missing, as the token's own `get` of it is, it would fail every
     /// read of `positions` over a collection the token is not to know of.
-    /// Done once a token, from the rules as bound to its claims.
-    fn held(rules: &mut [Bound]) {
+    /// Done once a token, from the rules as bound to its claims, and as
+    /// bound for an odd number of `not`s (`negated`, beside each), which a
+    /// `get` under `not ... in` is held to ([`hold`]).
+    fn held(rules: &mut [Bound], negated: Vec<Option<Expr>>) {
         let read: Vec<Bound> = rules.to_vec();
+        let mut unread = read.clone();
+        for (r, n) in unread.iter_mut().zip(negated) {
+            if n.is_some() {
+                r.filter = n;
+            }
+        }
         for r in rules.iter_mut().filter(|r| r.reaches) {
             if let Some(f) = &mut r.filter {
-                hold(&read, f);
+                hold(&read, &unread, f, true);
             }
             // A transition picks by what its row before can answer, its
             // inner `get`s held as the filter's are.
@@ -3756,9 +3821,9 @@ mod tests {
 
     /// An ordered comparison with a claim holds the other side to the
     /// claim's kind: under an even number of `not`s on the side the
-    /// comparison leaves open, under an odd one -- `cmp or not held` -- by
-    /// both edges. A text that reads as a time takes a time's lower edge;
-    /// `=` asks nothing more.
+    /// comparison leaves open, under an odd one -- `cmp or (not held and
+    /// other is not null)` -- by both edges. A text that reads as a time
+    /// takes a text's lower edge or a time's; `=` asks nothing more.
     #[test]
     fn an_ordered_claim_is_held_to_its_kind() {
         let a = access(
@@ -3791,7 +3856,10 @@ mod tests {
         );
         assert_eq!(
             held(filter("\"2026-07-01T00:00:00Z\"", "files")),
-            Some(edge(CmpOp::Ge, Value::Text(EARLIEST.into())))
+            Some(Expr::Or(
+                Box::new(edge(CmpOp::Ge, blank())),
+                Box::new(edge(CmpOp::Ge, Value::Text(EARLIEST.into())))
+            ))
         );
         assert_eq!(held(filter("true", "files")), None);
         let name = |op, v| Expr::Cmp(op, Box::new(Expr::Field("name".into())), lit(v));
@@ -3818,9 +3886,18 @@ mod tests {
             Box::new(Expr::Field("level".into())),
             lit(Value::Int(5)),
         );
+        let present = Expr::Not(Box::new(Expr::IsNull(Box::new(Expr::Field(
+            "level".into(),
+        )))));
         assert_eq!(
             *inner,
-            Expr::Or(Box::new(cmp), Box::new(Expr::Not(Box::new(both))))
+            Expr::Or(
+                Box::new(cmp),
+                Box::new(Expr::And(
+                    Box::new(Expr::Not(Box::new(both))),
+                    Box::new(present)
+                ))
+            )
         );
     }
 
@@ -3841,6 +3918,10 @@ mod tests {
             "files read where (level <= $jwt.c) is null",
             "files read where case when level <= $jwt.c then 1 else 0 end = 1",
             "files read where id in (get other select x where y = lower($jwt.c))",
+            // `like`'s pattern is exempt as the claim it is, not a call
+            // over one; the text matched is no claim.
+            "files read where path like lower($jwt.home)",
+            "files read where $jwt.home like path",
         ] {
             assert!(Access::new(SECRET, bad).is_err(), "{bad}");
         }
@@ -3850,6 +3931,10 @@ mod tests {
             "files read where id in (get other select x where not (y > $jwt.c))",
             "files read where room in [$jwt.rooms, 'lobby'] and $jwt.rooms has room",
             "files read where level <= length(name)",
+            "files read where path like $jwt.home",
+            "files read where email ilike $jwt.domain",
+            "files read where path not like $jwt.home escape $jwt.esc",
+            "files read where id in (get other select x where name like $jwt.p)",
         ] {
             assert!(Access::new(SECRET, good).is_ok(), "{good}");
         }
@@ -4052,7 +4137,14 @@ mod tests {
             let e = Access::new(SECRET, bad).err().unwrap_or_default();
             assert!(e.contains(&format!("quote it: `{quoted}`")), "{bad}: {e}");
         }
-        assert!(Access::new(SECRET, "notes read where n = $jwt.n - 1").is_ok());
+        // Spaced, the dash is a minus after the claim `n` -- read so, and
+        // refused as a claim in arithmetic is (`claims_held`), not as a
+        // claim to quote.
+        let e = Access::new(SECRET, "notes read where n = $jwt.n - 1")
+            .err()
+            .unwrap_or_default();
+        assert!(e.contains("`$jwt.n` in arithmetic"), "{e}");
+        assert!(Access::new(SECRET, "notes read where n - 1 = $jwt.n").is_ok());
         assert!(Access::new(SECRET, r#"notes read where x = $jwt."x-hasura-user-id""#).is_ok());
     }
 

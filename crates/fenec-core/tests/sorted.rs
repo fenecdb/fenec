@@ -192,6 +192,13 @@ fn filters() -> Vec<String> {
             "where s >= \"k\" and s < 5",
             "where s < \"zzz\" and s >= true",
             "where not (n > true)",
+            // The edge below a text that reads as a time, `x >= "" or x >=
+            // "0000-01-01"`, folded to the side the field's type reads.
+            "where t <= \"2026-06-01\" and (t >= \"\" or t >= \"0000-01-01\")",
+            "where s <= \"2026-06-01\" and (s >= \"\" or s >= \"0000-01-01\")",
+            "where n <= \"2026-06-01\" and (n >= \"\" or n >= \"0000-01-01\")",
+            "where not (s > \"m\" or not ((s >= \"\" or s >= \"0000-01-01\") and s < \"zz\"))",
+            "where t >= \"2026-01-01\" or (t >= \"\" or t >= \"2026-06-01\")",
             // Filters no index narrows: an ordered walk tests them row by
             // row, and gives up on one that matches too little to fill the
             // page within its budget.

@@ -520,3 +520,284 @@ fn a_deny_list_names_its_claim_where_its_not_in_is() {
         r#"[{"body":"hello"}]"#
     );
 }
+
+/// An index over several fields plans a scoped read as it plans the server
+/// token's with the claims written in: the guard's `level > true` beside
+/// `level <= $jwt.c` is true of every int, no bound, where it was left to
+/// be tested row by row and a count read every row of its span.
+#[test]
+fn a_guarded_read_over_an_index_of_several_fields_plans_as_the_server_tokens() {
+    let docs: Vec<String> = (0..3000)
+        .map(|i| format!("{{team: \"t{}\", level: {i}}}", i % 3))
+        .collect();
+    let put = format!("put files [{}]", docs.join(","));
+    let n = start(
+        "files read where team = $jwt.team and level <= $jwt.c\n",
+        &[
+            "create collection files (team text, level int)",
+            "create index on files (team, level) @sorted",
+            &put,
+        ],
+    );
+    let t = n.token(r#"{"team":"t1","c":2000}"#);
+    for (scoped, root) in [
+        (
+            "get files count",
+            "get files where team = \"t1\" and level <= 2000 count",
+        ),
+        (
+            "get files order level desc limit 5",
+            "get files where team = \"t1\" and level <= 2000 order level desc limit 5",
+        ),
+    ] {
+        let (_, plan) = n.query(&t, &format!("explain {scoped}"));
+        let (_, want) = n.query(ROOT, &format!("explain {root}"));
+        assert!(want.contains("the index on (team, level)"), "{want}");
+        assert_eq!(plan, want, "{scoped}");
+        assert_eq!(n.query(&t, scoped).1, n.query(ROOT, root).1, "{scoped}");
+    }
+    // A claim of another kind: no span, and no row.
+    let top = n.token(r#"{"team":"t1","c":"top"}"#);
+    assert_eq!(n.query(&top, "get files count").1, r#"[{"count":0}]"#);
+    let (_, plan) = n.query(&top, "explain get files count");
+    assert!(plan.contains("the index on (team, level)"), "{plan}");
+}
+
+/// SQL's `like`, `ilike` and `not like` over a claim compare nothing in
+/// order: the claim as the pattern, or the escape, starts as any bare
+/// claim does, and matches as the pattern written out.
+#[test]
+fn a_claim_as_a_like_pattern_starts_and_matches() {
+    let n = start(
+        "files  read where path like $jwt.home\n\
+         people read where email ilike $jwt.domain\n\
+         others read where path not like $jwt.home escape $jwt.esc\n",
+        &[
+            "create collection files (path text)",
+            "put files [{path: \"/home/a/x\"}, {path: \"/home/b/y\"}]",
+            "create collection people (email text)",
+            "put people [{email: \"A@Corp.com\"}, {email: \"b@else.org\"}]",
+            "create collection others (path text)",
+            "put others [{path: \"/home/a_x\"}, {path: \"/home/abx\"}]",
+        ],
+    );
+    assert_eq!(
+        n.rows(r#"{"home":"/home/a/%"}"#, "get files select path"),
+        r#"[{"path":"/home/a/x"}]"#
+    );
+    assert_eq!(
+        n.rows(r#"{"domain":"%@corp.com"}"#, "get people select email"),
+        r#"[{"email":"A@Corp.com"}]"#
+    );
+    assert_eq!(
+        n.rows(
+            r#"{"home":"/home/a!_x","esc":"!"}"#,
+            "get others select path"
+        ),
+        r#"[{"path":"/home/abx"}]"#
+    );
+}
+
+/// A text claim that reads as a time holds a text field as text: `day <=
+/// "2026-01-01"` answers the rows the server token's does, `""`, `"!x"`
+/// and `"-1"` among them, which a time's lower edge, `"0000-01-01"`, held
+/// out over every field. A time field orders against it by time, a json
+/// field's texts as texts and its numbers not at all, and an ordered index
+/// plans it as the server token's read.
+#[test]
+fn a_claim_that_reads_as_a_time_holds_a_text_field_as_text() {
+    let days =
+        "[{day: \"\"}, {day: \"!x\"}, {day: \"-1\"}, {day: \"1999\"}, {day: \"2026-06-01\"}]";
+    // Days past the claim, for the range to be the index's to count.
+    let later: Vec<String> = (0..400)
+        .map(|i| format!("{{day: \"2030-{i:04}\"}}"))
+        .collect();
+    let later = format!("put sdays [{}]", later.join(","));
+    let n = start(
+        "days   read where day <= $jwt.until\n\
+         sdays  read where day <= $jwt.until\n\
+         vers   read where ver <= $jwt.max\n\
+         nvers  read where not (ver > $jwt.max)\n\
+         stamps read where at <= $jwt.until\n\
+         meta   read where m.day <= $jwt.until\n",
+        &[
+            "create collection days (day text)",
+            &format!("put days {days}"),
+            "create collection sdays (day text @sorted)",
+            &format!("put sdays {days}"),
+            &later,
+            "create collection vers (ver text)",
+            "put vers [{ver: \"0.9\"}, {ver: \"1-0-0\"}, {ver: \"2-0-0\"}]",
+            "create collection nvers (ver text, n int)",
+            "put nvers [{ver: \"0.9\"}, {ver: \"1-0-0\"}, {ver: \"2-0-0\"}, {n: 1}]",
+            "create collection stamps (at timestamp @sorted)",
+            "put stamps [{at: 0}, {at: \"2026-01-01T00:00:00Z\"}, {at: \"2027-01-01T00:00:00Z\"}]",
+            "create collection meta (m json)",
+            "put meta [{m: {day: \"\"}}, {m: {day: \"-1\"}}, {m: {day: 5}}, {m: {day: true}}, \
+             {m: {day: \"2026-06-01\"}}]",
+        ],
+    );
+    let until = r#"{"until":"2026-01-01"}"#;
+    for (c, field) in [("days", "day"), ("sdays", "day")] {
+        let scoped = n.rows(until, &format!("get {c} select {field} order id"));
+        let (_, root) = n.query(
+            ROOT,
+            &format!("get {c} select {field} where {field} <= \"2026-01-01\" order id"),
+        );
+        assert_eq!(scoped, root, "{c}");
+        assert!(scoped.contains(r#"{"day":""}"#), "{scoped}");
+    }
+    let (_, plan) = n.query(&n.token(until), "explain get sdays count");
+    let (_, want) = n.query(ROOT, "explain get sdays where day <= \"2026-01-01\" count");
+    assert!(want.contains("which is the answer"), "{want}");
+    assert_eq!(plan, want);
+    let max = r#"{"max":"1-1-1"}"#;
+    assert_eq!(
+        n.rows(max, "get vers select ver order id"),
+        r#"[{"ver":"0.9"},{"ver":"1-0-0"}]"#
+    );
+    assert_eq!(
+        n.rows(max, "get nvers select ver order id"),
+        r#"[{"ver":"0.9"},{"ver":"1-0-0"},{"ver":null}]"#
+    );
+    assert_eq!(n.rows(until, "get stamps count"), r#"[{"count":2}]"#);
+    let (_, plan) = n.query(&n.token(until), "explain get stamps count");
+    assert!(plan.contains("the ordered index on at"), "{plan}");
+    assert_eq!(
+        n.rows(until, "get meta select m order id"),
+        r#"[{"m":{"day":""}},{"m":{"day":"-1"}}]"#
+    );
+}
+
+/// Under a `not`, a row with no value answers as the rule written out:
+/// `not (level > $jwt.c)` admits the rows with no `level`, as main did and
+/// the server token's `not (level > 5)` does, while a value of another
+/// kind passes neither the comparison nor its negation.
+#[test]
+fn a_row_with_no_value_answers_a_negated_rule_as_the_rule_written_out() {
+    let n = start(
+        "files read where not (level > $jwt.c)\n\
+         paths read where not (meta.level > $jwt.c)\n",
+        &[
+            "create collection files (name text, level int)",
+            "put files [{name: \"a\", level: 1}, {name: \"b\", level: 9}, {name: \"c\"}]",
+            "create collection paths (meta json)",
+            "put paths [{meta: {level: 1}}, {meta: {level: \"x\"}}, {meta: {level: true}}, \
+             {meta: {}}, {meta: {level: null}}]",
+        ],
+    );
+    let scoped = n.rows(r#"{"c":5}"#, "get files select name order id");
+    let (_, root) = n.query(ROOT, "get files select name where not (level > 5) order id");
+    assert_eq!(scoped, root);
+    assert_eq!(scoped, r#"[{"name":"a"},{"name":"c"}]"#);
+    assert_eq!(
+        n.rows(r#"{"c":5}"#, "get paths select meta order id"),
+        r#"[{"meta":{"level":1}},{"meta":{}},{"meta":{"level":null}}]"#
+    );
+    assert_eq!(
+        n.rows(r#"{"c":"top"}"#, "get files select name order id"),
+        r#"[{"name":"c"}]"#
+    );
+}
+
+/// A deny list over a collection whose read rule orders by a claim holds
+/// out what main held out: the rule is ANDed into the `not ... in`'s list
+/// bound for the `not`, so a ban of another kind than the claim stays in
+/// the list, where bound for a place standing alone it left it.
+#[test]
+fn a_deny_list_over_an_ordered_rule_holds_out_what_main_did() {
+    let n = start(
+        "posts read where author not in (get bans select author)\n\
+         shown read where author in (get bans select author)\n\
+         bans  read where severity >= $jwt.min\n",
+        &[
+            "create collection posts (author text, body text)",
+            "put posts [{author: \"spam\", body: \"buy\"}, {author: \"ok\", body: \"hello\"}, \
+             {author: \"low\", body: \"meh\"}, {author: \"bad\", body: \"no\"}]",
+            "create collection shown (author text, body text)",
+            "put shown [{author: \"spam\", body: \"buy\"}, {author: \"ok\", body: \"hello\"}, \
+             {author: \"low\", body: \"meh\"}, {author: \"bad\", body: \"no\"}]",
+            "create collection bans (author text, severity json)",
+            "put bans [{author: \"spam\", severity: \"high\"}, {author: \"low\", severity: 3}, \
+             {author: \"bad\", severity: 7}]",
+        ],
+    );
+    let min = r#"{"min":5}"#;
+    assert_eq!(
+        n.rows(min, "get posts select body order id"),
+        r#"[{"body":"hello"},{"body":"meh"}]"#
+    );
+    // The same rule under an `in` holds the ban of another kind out of the
+    // list, and its post out of the answer.
+    assert_eq!(
+        n.rows(min, "get shown select body order id"),
+        r#"[{"body":"no"}]"#
+    );
+}
+
+/// Forms that hold no row of another kind: a claim against a claim,
+/// `between` and `not between`, the claim on the left under a `not`, a
+/// path whose value's kind is a row's, a bool field, De Morgan, and two
+/// `not in`s deep.
+#[test]
+fn forms_that_admit_no_row_of_another_kind() {
+    let n = start(
+        "cc     read where $jwt.a < $jwt.b\n\
+         ncc    read where not ($jwt.a < $jwt.b)\n\
+         btw    read where level between $jwt.lo and $jwt.hi\n\
+         nbtw   read where level not between $jwt.lo and $jwt.hi\n\
+         left   read where not ($jwt.c < level)\n\
+         paths  read where meta.level <= $jwt.c\n\
+         flags  read where not (on > $jwt.c)\n\
+         dm     read where not (level > $jwt.c and name < $jwt.d)\n\
+         deep   read where x not in (get mid select x where y not in (get leaf select y where level > $jwt.c))\n\
+         mid    read\n\
+         leaf   read\n",
+        &[
+            "create collection cc (x int)",
+            "put cc [{x: 1}]",
+            "create collection ncc (x int)",
+            "put ncc [{x: 1}]",
+            "create collection btw (level int)",
+            "put btw [{level: 1}, {level: 5}]",
+            "create collection nbtw (level int)",
+            "put nbtw [{level: 1}, {level: 5}]",
+            "create collection left (level int)",
+            "put left [{level: 1}, {level: 9}]",
+            "create collection paths (meta json)",
+            "put paths [{meta: {level: 1}}, {meta: {level: \"x\"}}, {meta: {level: true}}, \
+             {meta: {level: [1]}}, {meta: {}}]",
+            "create collection flags (on bool)",
+            "put flags [{on: true}, {on: false}]",
+            "create collection dm (level int, name text)",
+            "put dm [{level: 1, name: \"a\"}, {level: 9, name: \"z\"}]",
+            "create collection deep (x int)",
+            "put deep [{x: 1}, {x: 2}]",
+            "create collection mid (x int, y int)",
+            "put mid [{x: 1, y: 10}, {x: 2, y: 20}]",
+            "create collection leaf (y int, level json)",
+            "put leaf [{y: 10, level: 9}, {y: 20, level: \"x\"}]",
+        ],
+    );
+    let count = |claims: &str, c: &str| n.rows(claims, &format!("get {c} count"));
+    assert_eq!(count(r#"{"a":5,"b":"top"}"#, "cc"), r#"[{"count":0}]"#);
+    assert_eq!(count(r#"{"a":"x","b":5}"#, "ncc"), r#"[{"count":0}]"#);
+    assert_eq!(count(r#"{"a":1,"b":5}"#, "cc"), r#"[{"count":1}]"#);
+    assert_eq!(count(r#"{"lo":"a","hi":"z"}"#, "btw"), r#"[{"count":0}]"#);
+    assert_eq!(count(r#"{"lo":"a","hi":"z"}"#, "nbtw"), r#"[{"count":0}]"#);
+    assert_eq!(count(r#"{"lo":2,"hi":9}"#, "nbtw"), r#"[{"count":1}]"#);
+    assert_eq!(count(r#"{"c":"top"}"#, "left"), r#"[{"count":0}]"#);
+    assert_eq!(count(r#"{"c":5}"#, "left"), r#"[{"count":1}]"#);
+    let p = "get paths select meta order id";
+    assert_eq!(n.rows(r#"{"c":5}"#, p), r#"[{"meta":{"level":1}}]"#);
+    assert_eq!(n.rows(r#"{"c":"z"}"#, p), r#"[{"meta":{"level":"x"}}]"#);
+    assert_eq!(n.rows(r#"{"c":true}"#, p), r#"[{"meta":{"level":true}}]"#);
+    assert_eq!(count(r#"{"c":5}"#, "flags"), r#"[{"count":0}]"#);
+    assert_eq!(count(r#"{"c":"top","d":5}"#, "dm"), r#"[{"count":0}]"#);
+    // The leaf's rows over 5 held to numbers: y 10. The mid rows whose y
+    // is not 10: x 2. The deep rows whose x is not 2: x 1.
+    assert_eq!(
+        n.rows(r#"{"c":5}"#, "get deep select x order id"),
+        r#"[{"x":1}]"#
+    );
+}

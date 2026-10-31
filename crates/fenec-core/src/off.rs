@@ -434,6 +434,9 @@ impl CompositeIndex {
     pub fn literal(&self, part: usize, v: &Value) -> Option<Vec<u8>> {
         match *self {}
     }
+    pub fn part_type(&self, part: usize) -> Option<DataType> {
+        match *self {}
+    }
     pub fn narrow(
         &self,
         r: &mut crate::composite::PartRange,

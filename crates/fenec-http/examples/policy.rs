@@ -52,7 +52,9 @@
 //! page of twenty off its top -- under the server's token, the bound
 //! written, and under a token whose rule orders by a claim (`files read
 //! where level <= $jwt.clearance`), in process and in turns: the guard
-//! holding the field to the claim's kind must leave the range exact.
+//! holding the field to the claim's kind must leave the range exact. Then
+//! the same over an index of two fields, `(team, level) @sorted`, under
+//! `team = $jwt.team and level <= $jwt.clearance`.
 
 use fenec_core::prelude::*;
 use fenec_http::access::{self, Access, CheckPlugin, Who};
@@ -963,34 +965,56 @@ fn main() {
 
 /// `ranges`: a count and a page over an ordered index's range under the
 /// server's token, the bound written, and a token whose rule orders by a
-/// claim, a tenth of the rows each, in process and in turns.
+/// claim, a tenth of the rows each, in process and in turns -- over an
+/// index of one field, then of two, a fourth of the rows each a team's.
 fn ranges(sizes: &[usize], rounds: usize) {
-    for &n in sizes {
+    for (index, team) in [("level int @sorted", ""), ("level int", "t1")] {
+        for &n in sizes {
+            ranges_over(n, index, team, rounds);
+        }
+    }
+}
+
+fn ranges_over(n: usize, index: &str, team: &str, rounds: usize) {
+    {
         let mut db = Database::new();
-        let made = "create collection files (name text, level int @sorted)";
-        db.execute(&fenec_ql::parse_one(made).unwrap()).unwrap();
+        let made = format!("create collection files (name text, team text, {index})");
+        db.execute(&fenec_ql::parse_one(&made).unwrap()).unwrap();
+        if !team.is_empty() {
+            let two = "create index on files (team, level) @sorted";
+            db.execute(&fenec_ql::parse_one(two).unwrap()).unwrap();
+        }
         for from in (0..n).step_by(10_000) {
             let docs: Vec<String> = (from..(from + 10_000).min(n))
-                .map(|i| format!("{{name: \"n{i}\", level: {i}}}"))
+                .map(|i| format!("{{name: \"n{i}\", team: \"t{}\", level: {i}}}", i % 4))
                 .collect();
             let put = format!("put files [{}]", docs.join(", "));
             db.execute(&fenec_ql::parse_one(&put).unwrap()).unwrap();
         }
         let clearance = n / 10;
-        let a = Access::new(SECRET, "files read where level <= $jwt.clearance").unwrap();
+        let (rule, written) = match team {
+            "" => ("files read where level <= $jwt.clearance", String::new()),
+            t => (
+                "files read where team = $jwt.team and level <= $jwt.clearance",
+                format!("team = \"{t}\" and "),
+            ),
+        };
+        let a = Access::new(SECRET, rule).unwrap();
         let token = a
-            .mint(&format!(r#"{{"sub":"c1","clearance":{clearance}}}"#))
+            .mint(&format!(
+                r#"{{"sub":"c1","team":"{team}","clearance":{clearance}}}"#
+            ))
             .unwrap();
         let scoped = Who::Scoped(Arc::new(a.scope(&token, 1).unwrap()));
         for (what, root, claim) in [
             (
                 "a count",
-                format!("get files where level <= {clearance} count"),
+                format!("get files where {written}level <= {clearance} count"),
                 "get files count".to_string(),
             ),
             (
                 "a page of 20 off its top",
-                format!("get files where level <= {clearance} order level desc limit 20"),
+                format!("get files where {written}level <= {clearance} order level desc limit 20"),
                 "get files order level desc limit 20".to_string(),
             ),
         ] {
@@ -1023,9 +1047,18 @@ fn ranges(sizes: &[usize], rounds: usize) {
                 }
             }
             println!(
-                "\n{what} over a range of {} of {n} rows, in process, the median of {rounds} \
-                 turns of {}:",
-                clearance + 1,
+                "\n{what} over a range of {} of {n} rows ({}), in process, the median of \
+                 {rounds} turns of {}:",
+                if team.is_empty() {
+                    clearance + 1
+                } else {
+                    clearance / 4 + 1
+                },
+                if team.is_empty() {
+                    "level @sorted"
+                } else {
+                    "(team, level) @sorted"
+                },
                 TURN / 10
             );
             let base = pct(&mut times[0], 0.5);
