@@ -79,6 +79,32 @@ test('a word being typed finds the words it begins', () => {
   assert.equal(first('compa'), 'docs/server#compaction');
 });
 
+test('a word half typed, mistyped or written as the docs write it finds its page', () => {
+  // The words alone, as the dialog asks one or two words. The page a reader
+  // means is on the first screen of three; the prefixes the index holds make
+  // every one of these a match (`replic` shares `repli` with `replication`,
+  // `compacton` shares `compact` with `compaction`).
+  for (const [q, page] of [
+    ['replic', /^docs\/replication/], ['compac', /^docs\/server#compaction$/], ['idempot', /^docs\/http#idempotency$/],
+    ['highl', /^docs\/fenecql-search#highlights$/], ['quicks', /^docs\/quickstart/], ['subscr', /^docs\/(javascript#subscribe|http-reference#subscriptions)$/],
+    ['vecto', /^docs\/fenecql-vector/], ['embedd', /^docs\/embedding/], ['aggreg', /^docs\/fenecql-aggregates/],
+    ['colla', /^docs\/fenecql-schema#collation$/], ['grafa', /^docs\/(grafana|monitoring)/], ['stud', /^docs\/studio/],
+    ['mobi', /^docs\/mobile/], ['looku', /^docs\/fenecql-lookup/], ['failov', /^docs\/(sharding-failover|replication)/],
+    ['compacton', /^docs\/server#compaction$/], ['replicaton', /^docs\/replication/], ['idempotncy', /^docs\/http#idempotency$/],
+    ['failovr', /^docs\/(sharding-failover|replication)/], ['quickstrat', /^docs\/quickstart/],
+    ['highlite', /^docs\/fenecql-search#highlights$/], ['colation', /^docs\/fenecql-schema#collation$/],
+    ['aggregats', /^docs\/fenecql-aggregates/],
+    ['--auto-compact', /^docs\/server#(compaction|flags)$/], ['prefix_min', /^docs\/(fenecql-indexes#indexes|javascript#schema)$/],
+    ['Idempotency-Key', /^docs\/http#idempotency$/], ['nocase', /^docs\/fenecql-schema#nocase$/],
+    ['upsert', /^docs\/(fenecql-writing|sql)/], ['rerank', /^docs\/fenecql-search/],
+    // Turkish for replication, five letters of it the same.
+    ['replikasyon', /^docs\/replication/],
+  ]) {
+    const at = search(db, q).hits.findIndex((h) => page.test(h.url)) + 1;
+    assert.ok(at >= 1 && at <= 3, `${q}: the page at ${at}, within 3 wanted`);
+  }
+});
+
 test('Turkish and other scripts: İ and ı fold, and a run of Han is searched', () => {
   // A Turkish keyboard capitalises i as İ and writes ı for a dotless i.
   assert.equal(first('COMPACTİON'), 'docs/server#compaction');
@@ -147,17 +173,76 @@ test('a question the words miss finds its page by its meaning', () => {
   // Each: the words leave the page off the ten shown, the meaning puts it there.
   for (const [q, url, within] of [
     ['keep data on a phone', 'docs/mobile', 1],
-    // 4th over the 408 sections embedded on 2026-10-14: "saklamak" is
-    // keeping, and the archive's object storage and sealing and the
-    // half-precision vectors speak of keeping data too. 3rd while 128 of
-    // them had no vector.
-    ['telefonda veri saklamak', 'docs/mobile', 4],
-    ['dosyanın büyümesini durdurmak', 'docs/server#compaction', 3],
+    // Neither Turkish question holds a word of the docs. The words found
+    // only prefixes (`telefonda` reaches `tell`, `veri` `version`, `durdurmak`
+    // `durable`) and do not vote beside the meaning (`holdsWord`), so a page
+    // stands where the vectors alone put it, and no prose of the docs moves
+    // it. They once did vote, and the bounds rested on that chance: mobile
+    // was 3rd, then 4th, as docs gained or lost a `tell`; compaction was 2nd
+    // by `durable`, and is 7th by its meaning, behind sections on memory,
+    // limits and containers. Each bound is the committed vectors' rank and
+    // one more, for the deploy: it embeds afresh the sections whose text
+    // changed since the cache was committed (21 today), of which CI holds the
+    // vector of an earlier text.
+    ['telefonda veri saklamak', 'docs/mobile', 2], // 1st
+    ['dosyanın büyümesini durdurmak', 'docs/server#compaction', 8], // 7th
   ]) {
     const [words, meaning] = standing(q, url);
     assert.ok(words === 0, `${q}: the words alone found ${url} at ${words}`);
     assert.ok(meaning >= 1 && meaning <= within, `${q}: ${url} at ${meaning} by meaning, within ${within} wanted`);
   }
+});
+
+test('the words vote beside the meaning only when a hit holds a word of the question', () => {
+  // Who ranks, not the order: any vector will do for it.
+  const v = fixtureVector('keep data on a phone');
+  for (const [q, by] of [
+    ['keep data on a phone', 'words and meaning'],
+    ['how do I stop my file from growing', 'words and meaning'],
+    // Five letters of `replica`, which is what an inflected word shares.
+    ['replikasyon nasıl çalışır', 'words and meaning'],
+    ['postgres tablomu nasıl aktarırım', 'words and meaning'],
+    // Three or four letters shared with `tell`, `telemetry`, `version`.
+    ['telefonda veri saklamak', 'meaning'],
+    ['verileri telefonda nasıl saklarım', 'meaning'],
+    // `ne` is no word that counts, though the docs hold a `ne`.
+    ['dosya sürekli büyüyor ne yapmalıyım', 'meaning'],
+    ['как хранить данные на телефоне', 'meaning'],
+    // A run of Han is indexed in grams: not judged, and voting as it did.
+    ['手机上如何存储数据', 'words and meaning'],
+  ]) {
+    assert.equal(search(dbv, q, null, 10, v).by, by, q);
+    // The group chosen does not change who ranks.
+    assert.equal(search(dbv, q, 'Clients', 10, v).by, by, `${q} under Clients`);
+  }
+  assert.equal(search(dbv, 'compact').by, 'words');
+  assert.equal(search(dbv, '').by, 'words');
+});
+
+test('a question with no word of the docs is ranked by its meaning alone, whatever the docs spell', async () => {
+  const q = 'telefonda veri saklamak';
+  const v = fixtureVector(q);
+  const found = search(dbv, q, null, 10, v);
+  assert.equal(found.by, 'meaning');
+  const meaning = dbv.run('get docs select id near embed $1 limit 10', [Float32Array.from(v)]).rows.map((r) => r.id);
+  assert.deepEqual(found.hits.map((h) => h.id), meaning);
+  for (const h of found.hits) {
+    assert.ok(h.byMeaning);
+    assert.deepEqual(h.snippet.marks, []);
+  }
+  // What a docs change adds without meaning to: words that share three or
+  // four letters with the question's. The pages stand where they stood.
+  const copy = await Fenec.open(module);
+  copy.load(imageOf('FENEC_SEARCH_VECTORS', 'search-vectors'));
+  const rows = copy.run('get docs select id, body limit 10000').rows;
+  for (const r of rows.filter((_, i) => i % 3 === 0)) {
+    copy.run('set docs {body: $1} where id = $2', [`${r.body} tell tells telling telephone version verify verified very`, r.id]);
+  }
+  assert.equal(search(copy, q, null, 10, v).by, 'meaning');
+  assert.deepEqual(search(copy, q, null, 10, v).hits.map((h) => h.url), found.hits.map((h) => h.url));
+  // A word of the question itself, whole, and the words vote again.
+  copy.run('set docs {body: $1} where id = $2', [`${rows[0].body} veri`, rows[0].id]);
+  assert.equal(search(copy, q, null, 10, v).by, 'words and meaning');
 });
 
 /** Whether a section is in the vector image with its vector. */
