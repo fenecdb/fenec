@@ -41,7 +41,8 @@ rows are announced together.</p>
 
 <pre data-lang="bash">fenec-server --file orders.fenec --http 127.0.0.1:8080 --cdc
 
-# a consumer the server keeps the cursor of, made once
+# a consumer the server keeps the cursor of: made if it is not there,
+# left where it stands if it is, so a service can do this at every start
 curl -X POST http://127.0.0.1:8080/_changes/consumers/billing
 </pre>
 

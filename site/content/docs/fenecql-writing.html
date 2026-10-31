@@ -10,7 +10,7 @@ description: Writing with FenecQL: put, insert, set and del, upserts with if abs
 <code>put</code> and <code>insert</code> add documents, <code>set</code> changes
 the rows a <code>where</code> keeps, and <code>del</code> removes them.</p>
 
-<p>Run in <a href="quickstart.html#in-the-shell">the shell</a>, answers and all; the timings are from one run.</p>
+<p>Run in <a href="shell.html#quickstart">the shell</a>, answers and all; the timings are from one run.</p>
 
 <pre data-lang="text">fenec&gt; create collection stock (sku text @unique, qty int);
 collection `stock` created
@@ -32,6 +32,8 @@ tea  12
 (1 rows, 194.00µs)
 fenec&gt; set stock {qty: qty - 3} where sku = "jam" and qty &gt;= 3 require 1;
 error: unmet: `set stock` wrote 0 rows, and requires 1
+fenec&gt; set stock {qty: qty - 3} where sku = "jam" and qty &gt;= 3 require 1 else 'not enough jam';
+error: unmet: not enough jam (`set stock` wrote 0 rows, and requires 1)
 fenec&gt; del stock where qty &lt; 3 returning sku;
 sku
 ---
@@ -49,10 +51,10 @@ tea  12
 over such a row and says it wrote none, and <code>else set</code> changes it
 instead, an upsert in one statement. A <code>set</code> can read the row it
 writes, <code>require N</code> makes the count a condition and refuses the
-statement, and the batch it is in, when it is not met, and
-<code>returning</code> answers the rows written or removed. The sections
-below take each in turn, and the last ones put several statements in one
-batch.</p>
+statement, and the batch it is in, when it is not met (<code>else
+'…'</code> after it says why), and <code>returning</code> answers the rows
+written or removed. The sections below take each in turn, and the last ones
+put several statements in one batch.</p>
 
 <h2 id="writes">Writes that read the row</h2>
 
@@ -180,6 +182,54 @@ put locks {name: "nightly", owner: $1} if absent require 1      -- refused while
     made it, so nothing can come between the check and the write. A scoped
     token's count is of the rows its rules let it write.</li>
   <li><b><code>require 0</code></b> asserts that nothing matches.</li>
+  <li><b><code>else '&lt;reason&gt;'</code></b> after the count says why the
+    statement was refused, in the statement's own words
+    (<a href="#require-reason">A reason for the refusal</a>).</li>
+</ul>
+
+<h3 id="require-reason">A reason for the refusal</h3>
+
+<p>A batch of several guards stops at one of them, and <code>"at"</code>, its
+place, moves with every statement added in front. <code>else
+'&lt;reason&gt;'</code> after the count gives the refusal a name that stays: a
+caller tells "insufficient funds" from "no such account" by it. It goes
+wherever <code>require N</code> does: after a <code>put</code>,
+<code>insert</code>, <code>set</code> or <code>del</code>, after a
+<code>get</code> (before its <code>lookup</code>), and in the SQL spellings,
+<code>update … set a = 1 where … require 1 else '…'</code>.</p>
+
+{{builder "docs: a debit that must find the money, or says why" "docs: a hold deleted that must be there, or says why" "docs: a coupon that must still be usable, or says why"}}
+<pre data-lang="fenecql">set accounts {balance: balance - 30} where name = "ada" and balance &gt;= 30 require 1 else 'insufficient funds'
+del holds where order_ref = $1 and state = "held" require 1 else 'it''s not held'
+get coupons where code = $1 and uses &lt; max_uses limit 1 require 1 else 'coupon used up'
+</pre>
+
+<ul>
+  <li><b>A text written in the statement.</b> Either quote, <code>'it''s
+    gone'</code> (a quote doubled inside) or <code>"it's gone"</code>, and a
+    backslash escapes as in any FenecQL text. It is never a parameter, as the
+    count is never one: it is the statement's contract, not a request's
+    data.</li>
+  <li><b>Refused, never cut:</b> a parameter (<code>else $1</code>), an empty
+    reason, one longer than 200 bytes of UTF-8 (<a href="limits.html">Limits</a>),
+    a backtick, which the refusal quotes its statement with, and anything
+    not in quotes. <code>else</code> with no
+    <code>require</code> before it is still an unknown command.</li>
+  <li><b>The error leads with the reason</b>, then the count in
+    parentheses: <code>unmet: insufficient funds (`set accounts` wrote 0
+    rows, and requires 1)</code>. The block is put back as without one.</li>
+  <li><b>Over HTTP, a <code>"reason"</code> key beside
+    <code>"error"</code></b>, on a lone statement's 412 and on a stopped
+    <code>/batch</code>'s, beside <code>"completed"</code> and
+    <code>"at"</code>; none where the statement gave none. A scoped token is
+    told it as any caller is: it is the statement's own text, and names
+    nothing of the rows.</li>
+  <li><b>Every SDK reads it from its error</b> (<code>FenecError.reason</code>
+    and its kin) and every builder writes it:
+    <code>.require(1, { reason: 'no such account' })</code> on a read,
+    <code>{ require: 1, reason: 'insufficient funds' }</code> among a write's
+    options. The page, the native library and a synced write the server
+    refused carry it too (<a href="sync.html">Sync</a>).</li>
 </ul>
 
 <h3 id="read-require">A read that must find its rows</h3>
@@ -211,8 +261,9 @@ get holds where order_ref = $1 and state = "held" require 0           -- none ma
   <li><b>On its own</b> it is a read like any other, refused with 412 when
     the count is not met. A scoped token's count is of the rows it may
     read.</li>
-  <li><b>Every builder</b> has it as a step, <code>.require(1)</code>; a
-    write takes it as its option instead. A replica's sync refuses one in a
+  <li><b>Every builder</b> has it as a step, <code>.require(1)</code>, with
+    a reason if asked (<code>.require(1, { reason: 'no such account' })</code>);
+    a write takes both as its options instead. A replica's sync refuses one in a
     batch of synced writes: it would count the replica's rows, and the
     server, which lands the batch, would never see it — send a guarded
     batch to the server itself.</li>
@@ -226,22 +277,23 @@ credit where the account is, and a journal of both, as one
 matched nothing, answered 0, and the credit went ahead: the sum of the
 balances grew with every refused transfer. With it, a debit that finds too
 little money or a credit that finds no account puts the whole transfer
-back, journal and all:</p>
+back, journal and all, and each guard says which it was:</p>
 
 <pre data-lang="fenecql">create collection accounts (name text @unique, balance int)
 create collection journal (tx text @hash, account text @hash, amount int)
 
-set accounts {balance: balance - $3} where name = $1 and balance &gt;= $3 require 1
-set accounts {balance: balance + $3} where name = $2 require 1
+set accounts {balance: balance - $3} where name = $1 and balance &gt;= $3 require 1 else 'insufficient funds'
+set accounts {balance: balance + $3} where name = $2 require 1 else 'no account to credit'
 insert journal [{tx: $4, account: $1, amount: 0 - $3}, {tx: $4, account: $2, amount: $3}]
 </pre>
 
 <pre data-lang="bash">printf '%s\n' \
-  '{"query":"set accounts {balance: balance - $3} where name = $1 and balance &gt;= $3 require 1","params":["ada","bob",30,"t1"]}' \
-  '{"query":"set accounts {balance: balance + $3} where name = $2 require 1","params":["ada","bob",30,"t1"]}' \
+  '{"query":"set accounts {balance: balance - $3} where name = $1 and balance &gt;= $3 require 1 else \"insufficient funds\"","params":["ada","bob",30,"t1"]}' \
+  '{"query":"set accounts {balance: balance + $3} where name = $2 require 1 else \"no account to credit\"","params":["ada","bob",30,"t1"]}' \
   '{"query":"insert journal [{tx: $4, account: $1, amount: 0 - $3}, {tx: $4, account: $2, amount: $3}]","params":["ada","bob",30,"t1"]}' |
 curl -s -X POST localhost:8080/batch -H "Idempotency-Key: t1" --data-binary @-
-# an overdraft: 412 {"error":"unmet: `set accounts` wrote 0 rows, and requires 1","completed":0,"at":0}
+# an overdraft: 412 {"error":"unmet: insufficient funds (`set accounts` wrote 0 rows, and requires 1)","completed":0,"at":0,"reason":"insufficient funds"}
+# no account to credit: the same at 1, "reason":"no account to credit"
 </pre>
 
 <ul>
@@ -281,17 +333,17 @@ coupon's use counted and the order written, as one <code>/batch</code>.</p>
 create collection coupons (code text @unique, off int, uses int, max_uses int)
 create collection orders (ref text @unique, sku text @hash, paid int)
 
-get products where sku = $1 and price = $2 require 1
-get coupons where code = $3 and uses &lt; max_uses require 1
-set products {stock: stock - 1} where sku = $1 and stock &gt; 0 require 1
-set coupons {uses: uses + 1} where code = $3 require 1
+get products where sku = $1 and price = $2 require 1 else 'price changed'
+get coupons where code = $3 and uses &lt; max_uses require 1 else 'coupon used up'
+set products {stock: stock - 1} where sku = $1 and stock &gt; 0 require 1 else 'out of stock'
+set coupons {uses: uses + 1} where code = $3 require 1 else 'no such coupon'
 insert orders {ref: $4, sku: $1, paid: $2 - $5}
 </pre>
 
 <ul>
   <li><b>A price that moved</b> stops the batch at its first line, 412 with
-    <code>"at":0</code>: the shopper is shown the new price, and nothing was
-    written.</li>
+    <code>"at":0</code> and <code>"reason":"price changed"</code>: the
+    shopper is shown the new price, and nothing was written.</li>
   <li><b>A coupon used up</b> stops it at the second, <b>no stock</b> at the
     third; the order's <code>@unique</code> <code>ref</code> refuses the
     same checkout twice (409), and an <code>Idempotency-Key</code> answers a

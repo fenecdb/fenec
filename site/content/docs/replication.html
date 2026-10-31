@@ -316,6 +316,9 @@ fenec restore /backups/archive before.fenec --to-change 41873
     restore within that window needs.</li>
   <li><b><code>fenec verify</code></b> says from when to when the archive can
     restore.</li>
+  <li>A <b>backup or a restore into a file</b> holds the file while it is
+    written, as the shell does: one a running server has open is refused, its
+    holder named, rather than renamed over under it.</li>
 </ul>
 
 <details class="deep"><summary>How a restore to a moment works</summary>

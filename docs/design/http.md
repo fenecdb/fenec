@@ -205,8 +205,9 @@ lock -- a function pointer, not a flag, since a flag kept `/query`'s path
 in the shell: `fenec mcp` added 243 KB to `fenec` with it (`maintain_with`
 alone 24 KB) and 130 KB without, `fenec-server` 97 KB, `fenec-shard` and
 the browser module not a byte. `<file>.lock` (`fenec_abi::lock`, moved
-from fenec-ffi) is taken by `fenec mcp --file`, `fenec-server --file` and
-the native library alike, so any two refuse each other. Calls are held to
+from fenec-ffi) is taken by `fenec mcp --file`, `fenec-server --file`, the
+native library and the shell alike, so any two refuse each other
+([engine.md](engine.md#single-writer)). Calls are held to
 `--mcp-calls-per-sec` by a scoped token's subject or the caller's address,
 counted in `fenec_mcp_tool_calls_total` once a process serves MCP, and a
 write tool's call is an `mcp` line of the audit log. A row by id costs

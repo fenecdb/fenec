@@ -56,7 +56,11 @@ condition on the field, as a shop's filter list does.
 
 Several statements are one `batch`, a block under one write lock: all
 land or none, and a `FenecError` that stops it says which (`e.at`, from 0;
-412 for a write whose `require` was not met). On a tenant node a quota
+412 for a write whose `require` was not met). `reason=` beside `require=`
+(`require 1 else 'insufficient funds'`, written into the text) comes back
+as `e.reason`, which tells one guard's refusal from another's where `e.at`
+moves with every statement added in front; a read's `.require(1,
+reason="no such account")` says its own. On a tenant node a quota
 names itself (`e.quota`): `"bytes"` and `"rows"` answer 507, and room is
 made by deleting; `"streams"`, `"requests"`, `"writes"` and `"write_bytes"`
 answer 429 with `e.retry_after`, the seconds the server asks to wait, as a
@@ -114,8 +118,11 @@ async with AsyncClient("http://127.0.0.1:8080", token="...") as db:
 
 Every write on the server's disk (`fenec-server --cdc`), for a consumer whose
 cursor the server keeps -- each batch committed once the loop comes back
-for the next, so each write comes at least once -- and the same handed on
-to another program or a webhook:
+for the next, so each write comes at least once, and a loop started again
+goes on from the last batch committed -- and the same handed on to another
+program or a webhook. `db.consumer(name)` makes one where there is none and
+leaves one that is there where it stands; `db.move_consumer(name, since)`
+moves it:
 
 ```python
 for batch in db.follow("search-index"):

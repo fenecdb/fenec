@@ -274,7 +274,7 @@ async function byMeaning(q) {
 
 function show(q, vector) {
   const t = performance.now();
-  const { hits, facets } = search(db, q, section, 10, vector);
+  const { hits, facets, by } = search(db, q, section, 10, vector);
   const ms = performance.now() - t;
   const keep = vector && options[active] ? options[active].id : null;
   render(q, hits, facets);
@@ -284,7 +284,7 @@ function show(q, vector) {
     const i = options.findIndex((h) => h.id === keep);
     if (i >= 0) select(i, false);
   }
-  ui.by.textContent = vector ? 'by words and meaning' : 'by words';
+  ui.by.textContent = `by ${by}`;
   ui.timing.textContent = q.trim() ? ` · ${ms < 1 ? ms.toFixed(2) : ms.toFixed(1)} ms` : '';
   ui.dialog.dataset.queryMs = ms.toFixed(3);
   ui.dialog.dataset.ranked = vector ? 'meaning' : 'words';

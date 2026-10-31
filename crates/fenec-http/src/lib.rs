@@ -447,7 +447,12 @@ fn authenticate(cfg: &Config, req: &Request) -> std::result::Result<Who, Respons
     let given = req
         .header("authorization")
         .and_then(|v| v.strip_prefix("Bearer "));
-    let refuse = |why: &str| Response::error(401, why).header("WWW-Authenticate", "Bearer");
+    // The audit line names the check that failed -- one of the server's own
+    // texts, never a value of the token.
+    let refuse = |why: &'static str| {
+        audit::refusal(why);
+        Response::error(401, why).header("WWW-Authenticate", "Bearer")
+    };
     if let (Some(token), Some(given)) = (&cfg.token, given) {
         if constant_eq(given.as_bytes(), token.as_bytes()) {
             audit::verified();
@@ -954,6 +959,8 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         // every row. A scoped token's filter holds no deletion of a row it
         // never saw, as a scoped subscription's ids do, so it is refused.
         if req.segments().first() == Some(&"_changes") {
+            let consumer = matches!(req.method, Method::Post | Method::Patch | Method::Delete)
+                && matches!(req.segments().as_slice(), ["_changes", "consumers", _]);
             let resp = match (authenticate(cfg, &req), repl.and_then(|r| r.feed())) {
                 (Err(deny), _) => deny,
                 (Ok(Who::Scoped(_)), _) => {
@@ -985,19 +992,16 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
                     match refused {
                         Some(refused) => refused,
                         None => match admit(&tenant, cdc_waits(&req)) {
-                            Ok(_slot) => cdc::route(db, feed, cfg, &req),
+                            Ok(_slot) => match &tenant {
+                                Some(t) if consumer => {
+                                    consumer_write(t, cfg, &req, || cdc::route(db, feed, cfg, &req))
+                                }
+                                _ => cdc::route(db, feed, cfg, &req),
+                            },
                             Err(refused) => refused,
                         },
                     }
                 }
-            };
-            // A consumer's commit is a tenant's write: asked of the lease
-            // again as it is answered, and refused by it 503 to come back.
-            let consumer = matches!(req.method, Method::Post | Method::Delete)
-                && matches!(req.segments().as_slice(), ["_changes", "consumers", _]);
-            let resp = match &tenant {
-                Some(t) if consumer => answered_under_lease(t, &req, resp),
-                _ => resp,
             };
             // Its `Fenec-Seq` a change of the history the database is on,
             // as every answer carrying one names it.
@@ -1722,6 +1726,29 @@ fn lapsed_under(keyed: bool) -> String {
              batch, seq is its last landed statement's, and a 504 does not say which earlier \
              ones survived"
         ),
+    }
+}
+
+/// A `/_changes` consumer's make, move or let-go on a tenant: a tenant's
+/// write, so held against a freeze and asked of the lease as
+/// [`handle_admitted`] holds and asks one -- told to come back (503) while
+/// the tenant is moved or its lease is out, and asked of the lease again
+/// as it is answered ([`answered_under_lease`]). Run past the gate, one sent
+/// during a move landed on the source after its export and was lost at the
+/// flip: a make lost so is made again later at the last write on disk,
+/// past every write in between. A request marked as a read
+/// ([`marked`]) is refused by the route in words of its own, never told to
+/// come back to the same copy.
+fn consumer_write(
+    t: &tenants::Tenant,
+    cfg: &Config,
+    req: &Request,
+    run: impl FnOnce() -> Response,
+) -> Response {
+    let _held = t.enter();
+    match refusal(t).filter(|_| !cfg.read_only) {
+        Some(why) => Response::retry_after(503, &why, 1),
+        None => answered_under_lease(t, req, run()),
     }
 }
 
@@ -2949,13 +2976,13 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         // Measured before each statement, as a lone one is: the batch
         // stops at the first the ceiling refuses, as at an error.
         let r = match over_ceiling(cfg.max_memory, &guard, stmt) {
-            Some(why) => Err((507, why)),
+            Some(why) => Err((507, why, None)),
             None => match &unscoped {
                 None => access::within(who, || guard.execute_ready(stmt, params, &mut ready, at))
                     .map(|r| masked(who, mask.as_ref(), &guard, r)),
                 Some(sent) => run_bound(who, &mut guard, &sent[at].0, params),
             }
-            .map_err(|e| (api::status_of(&e), e.to_string())),
+            .map_err(|e| api::stop_of(&e)),
         };
         match r {
             Ok(r) => {
@@ -2963,17 +2990,17 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
                 statements::rows(counted(&r));
                 results.push(r)
             }
-            Err((status, why)) if block => {
+            Err(stop) if block => {
                 // Nothing of the block reached the file: none of it is left.
                 guard.rollback();
                 // A `require` unmet wrote nothing: held, it waits.
-                if wait && status == 412 {
+                if wait && stop.0 == 412 {
                     held_plan(&guard, before);
                 }
                 let at = results.len();
-                return batch_stop(status, &why, 0, at);
+                return batch_stop(stop, 0, at);
             }
-            Err((status, why)) => {
+            Err(stop) => {
                 // Sync on the error path too: whatever was applied is durable.
                 // The statement's error is the one reported.
                 if !results.is_empty() {
@@ -2982,7 +3009,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
                     let _ = await_durable(db, durability);
                 }
                 let n = results.len();
-                return batch_stop(status, &why, n, n);
+                return batch_stop(stop, n, n);
             }
         }
     }
@@ -3014,7 +3041,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Ok(kept) => kept,
         Err(e @ Error::Quota(_)) => {
             let at = stmts.len().saturating_sub(1);
-            return batch_stop(api::status_of(&e), &e.to_string(), 0, at);
+            return batch_stop(api::stop_of(&e), 0, at);
         }
         Err(e) => return error_response(&e),
     };
@@ -3036,9 +3063,10 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
 /// A stopped `/batch`'s answer: where it stopped and how much of it stayed
 /// applied, and the quota where one stopped it -- whose refusal reads
 /// `quota: <kind>: <why>` as the engine's error says it.
-fn batch_stop(status: u16, why: &str, completed: usize, at: usize) -> Response {
-    let Some((kind, text)) = why.strip_prefix("quota: ").and_then(quota::split) else {
-        return api::render_batch_stop(status, why, completed, at, fenec_core::VERSION);
+fn batch_stop(stop: api::Stop, completed: usize, at: usize) -> Response {
+    let status = stop.0;
+    let Some((kind, text)) = stop.1.strip_prefix("quota: ").and_then(quota::split) else {
+        return api::render_batch_stop(stop, completed, at, fenec_core::VERSION);
     };
     let mut out = String::from("{\"error\":");
     fenec_core::json::escape_into(&mut out, text);
@@ -3085,8 +3113,7 @@ fn read_batch(
                 (&rebound.0[..], &rebound.1[..], &rebound.2)
             }
             Err((at, e)) => {
-                let (status, why) = (api::status_of(&e), e.to_string());
-                return api::render_batch_stop(status, &why, 0, at, fenec_core::VERSION);
+                return api::render_batch_stop(api::stop_of(&e), 0, at, fenec_core::VERSION);
             }
         },
     };
@@ -3199,14 +3226,8 @@ fn answer_reads(
             Ok(r) => results.push(shown(who, masks[at].as_ref(), db, r)),
             Err(e) => {
                 count(&results);
-                let why = e.to_string();
-                return Some(api::render_batch_stop(
-                    api::status_of(&e),
-                    &why,
-                    0,
-                    at,
-                    fenec_core::VERSION,
-                ));
+                let stop = api::stop_of(&e);
+                return Some(api::render_batch_stop(stop, 0, at, fenec_core::VERSION));
             }
         }
     }
@@ -3320,7 +3341,15 @@ fn error_response(e: &Error) -> Response {
         // A quota's refusal names the quota (`quota::limit`).
         Error::Quota(m) => return quota::engine_refusal(m),
     };
-    Response::error(api::status_of(e), msg)
+    // A `require` that said why: `{"error": ..., "reason": ...}`.
+    let Some(reason) = e.reason() else {
+        return Response::error(api::status_of(e), msg);
+    };
+    let mut body = String::from("{\"error\":");
+    fenec_core::json::escape_into(&mut body, msg);
+    api::reason_into(&mut body, Some(reason));
+    body.push('}');
+    Response::json(api::status_of(e), body)
 }
 
 /// Whether `--http-cors` lets `req`'s origin in ([`cors::allows`]).

@@ -18,6 +18,7 @@ mod lease_answers;
 mod mcp;
 mod node_archive;
 mod prepared;
+mod providers;
 mod reach;
 mod replication;
 mod require;

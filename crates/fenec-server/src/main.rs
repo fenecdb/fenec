@@ -131,6 +131,30 @@ usage: fenec-server [options]
                             (--mint-token gives one an hour)
       --jwt-max-age <s>     refuse a token whose `exp` lies further ahead
                             than this (0 = no bound, the default)
+      --jwt-issuer <iss>    take only a token whose `iss` is this, as written
+                            (a trailing / and all); repeatable, any one of
+                            them. Without it, any issuer the keys sign for
+                            (with --jwt-keys, said at the start)
+      --jwt-audience <aud>  take only a token whose `aud`, a text or a list,
+                            holds this; repeatable, any one of them. Without
+                            it, any audience. Give both whenever the keys
+                            sign tokens for more than one app: a Cloudflare
+                            Access team, an Auth0 tenant, Firebase (one set
+                            of keys for every project there is). The two
+                            lists are not paired: any issuer given, with any
+                            audience given. Where the caller picks its own
+                            `aud` (Google's identity tokens, GitHub Actions,
+                            Kubernetes), they are not enough: pin `sub`,
+                            `azp` or `repository` in the policy's rules
+      --jwt-client <id>     take only a token whose `azp` -- or `client_id`
+                            where it has none -- is this; repeatable. For a
+                            Cognito pool: --jwt-client for its access
+                            tokens, --jwt-audience for its ID tokens
+                            A token these refuse is 401 naming the check
+      --jwt-role-claim <name>  the claim a rule's `for <role>` reads, a text
+                            or a list holding the role  default: role.
+                            A role of more than a word is quoted in the
+                            policy: for \"Account Admin\"
       --jwt-tenant-claim <name>  with --dir, the claim naming the tenant a
                             token is for: it reaches /t/<t>/ only when the
                             claim names <t> (a text, or a list holding it)
@@ -146,10 +170,21 @@ usage: fenec-server [options]
                             [for <role>], the grants read, insert, update,
                             delete and write (all three) joined by commas;
                             `<collection> append-only` refuses every
-                            update and delete a token asks for there
+                            update and delete a token asks for there. A
+                            claim is $jwt.<name>, or $jwt.\"<name>\" for a
+                            name of other characters ($jwt.\"cognito:groups\"),
+                            a top-level one: a path into a nested object
+                            is refused, and an unquoted name running into
+                            `-` or `:`. A `#` outside quotes is a comment
       --mint-token <claims> print a token for this JSON object of claims,
                             signed with the secret or the first `oct` key,
-                            and exit
+                            and exit. Claims naming no `exp` get one an
+                            hour away (--jwt-max-age's, where sooner), and
+                            none naming `iss`, `aud` or `azp` the first
+                            --jwt-issuer, --jwt-audience or --jwt-client
+                            given: no token the server would refuse
+                            Every --jwt-* flag but the keys' is refused
+                            without --jwt-secret or --jwt-keys
       --http-cors <origin>  `Access-Control-Allow-Origin` (e.g. * or
                             https://example.com). Without it, no CORS header
       --http-read-only      turn off writes
@@ -283,6 +318,16 @@ fn fail(msg: &str) -> ! {
 /// deployment's environment file leaves a line it does not use.
 fn env_secret(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|t| !t.is_empty())
+}
+
+/// What a JWT flag was told, refused at the start where it is empty.
+fn told(value: &str, flag: &str) -> String {
+    if value.is_empty() {
+        fail(&format!(
+            "{flag} is empty -- a variable given it unset? Give it a value, or leave the flag out"
+        ));
+    }
+    value.to_string()
 }
 
 /// Whether `path` is this process's stdin by any name: `/dev/stdin` or
@@ -444,7 +489,17 @@ fn main() {
             None => fail(&format!("{flag} expects a value")),
         }
     };
+    // The first flag that holds a JWT to something, for the refusal of one
+    // given where no key verifies a JWT: taken and ignored, a server told
+    // `--jwt-audience` and no keys looked held to it.
+    let mut demanded: Option<String> = None;
     while i < args.len() {
+        let flag = args[i].as_str();
+        if flag.starts_with("--jwt-")
+            && !matches!(flag, "--jwt-secret" | "--jwt-keys" | "--jwt-secret-file")
+        {
+            demanded.get_or_insert_with(|| flag.to_string());
+        }
         match args[i].as_str() {
             "--file" | "-f" => file = Some(next(&mut i, "--file")),
             "--http" => http_cfg.addr = next(&mut i, "--http"),
@@ -558,8 +613,28 @@ fn main() {
                     v => fail(&format!("--jwt-require-exp expects on or off, got `{v}`")),
                 }
             }
-            "--jwt-tenant-claim" => demands.tenant_claim = next(&mut i, "--jwt-tenant-claim"),
+            // Given empty -- `--jwt-audience "$AUD"` with AUD unset -- each
+            // is refused at the start: a server told `""` would take no
+            // token, and none told would take every one; a tenant claim
+            // named `""` is held by no token, which `--jwt-unbound-tenants`
+            // then took for every tenant.
+            "--jwt-tenant-claim" => {
+                demands.tenant_claim =
+                    told(&next(&mut i, "--jwt-tenant-claim"), "--jwt-tenant-claim")
+            }
             "--jwt-unbound-tenants" => demands.unbound_tenants = true,
+            "--jwt-issuer" => demands
+                .issuers
+                .push(told(&next(&mut i, "--jwt-issuer"), "--jwt-issuer")),
+            "--jwt-audience" => demands
+                .audiences
+                .push(told(&next(&mut i, "--jwt-audience"), "--jwt-audience")),
+            "--jwt-client" => demands
+                .clients
+                .push(told(&next(&mut i, "--jwt-client"), "--jwt-client")),
+            "--jwt-role-claim" => {
+                demands.role_claim = told(&next(&mut i, "--jwt-role-claim"), "--jwt-role-claim")
+            }
             "--jwt-max-age" => {
                 let v = next(&mut i, "--jwt-max-age");
                 let secs: u64 = v
@@ -782,6 +857,24 @@ fn main() {
         .map(|a| a.demanding(demands.clone()))
     };
     let keyed = jwt_secret.is_some() || jwt_keys.is_some();
+    if let (false, Some(flag)) = (keyed, &demanded) {
+        fail(&format!(
+            "{flag} holds JSON Web Tokens to something, and no --jwt-secret or --jwt-keys \
+             verifies one: give the keys, or leave the flag out"
+        ));
+    }
+    // An identity provider's keys sign every token it issues, for every app
+    // it serves -- Firebase's one set for every project there is -- so keys
+    // with no issuer named take a token anyone's project minted, its
+    // claims and all. Said, not refused: keys of the app's own sign for it
+    // alone.
+    if jwt_keys.is_some() && demands.issuers.is_empty() {
+        fenec_http::log!(
+            "warning: --jwt-keys without --jwt-issuer takes every token the keys sign, whoever \
+             it was issued for: an identity provider's keys sign for every app it serves \
+             (Firebase's for every project). Give --jwt-issuer and --jwt-audience"
+        );
+    }
     if let Some(claims) = mint {
         if !keyed {
             fail("--mint-token signs with --jwt-secret or --jwt-keys");
@@ -972,11 +1065,19 @@ fn main() {
 
     // `<file>.lock` for as long as the process serves the file: a second
     // process over it -- another server, `fenec mcp --file`, an app through
-    // the native library -- corrupts it, and each takes the lock and is
-    // refused while another holds it. The system lets it go at the exit.
+    // the native library, the shell -- corrupts it, and each takes the lock
+    // and is refused while another holds it. The system lets it go at the
+    // exit. The refusal names the holder where it can be told; its first
+    // words stay what the desktop app reads (`it is open already`).
     let _held = file.as_deref().map(|path| {
         fenec_abi::lock::hold(path).unwrap_or_else(|e| {
-            fenec_http::log!("could not open {path}: {e}");
+            let who = match e {
+                fenec_abi::lock::Refused::Held => fenec_abi::lock::holder(path)
+                    .filter(|h| h.is_known())
+                    .map_or(String::new(), |h| format!(" (held by {h})")),
+                _ => String::new(),
+            };
+            fenec_http::log!("could not open {path}: {e}{who}");
             std::process::exit(1);
         })
     });

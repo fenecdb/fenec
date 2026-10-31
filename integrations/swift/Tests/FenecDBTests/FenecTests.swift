@@ -151,6 +151,43 @@ struct Note: Codable, Equatable, FenecValue {
         try await db.close()
     }
 
+    /// A require that says why: the error's `reason` is the statement's
+    /// own words, the library's and a server's alike; nil where it gave none.
+    @Test func anUnmetRequireSaysItsReason() async throws {
+        let db = try Fenec.memory()
+        try await db.execute("create collection accounts (name text, balance int)")
+        try await db.execute(#"put accounts {id: 1, name: "a", balance: 5}"#)
+        let accounts = try db.from("accounts")
+        do {
+            _ = try await accounts.where("name", "a").where("balance", ">=", 9)
+                .update(["balance": .inc(-9)] as Value, require: 1, reason: "insufficient funds")
+            Issue.record("a require not met was taken")
+        } catch let e as FenecError {
+            #expect(e.code == .unmet && e.reason == "insufficient funds", "\(e)")
+        }
+        do {
+            _ = try await accounts.where("id", 2).limit(1).require(1, reason: "it's not there").rows()
+            Issue.record("a read's require not met was taken")
+        } catch let e as FenecError {
+            #expect(e.code == .unmet && e.reason == "it's not there", "\(e)")
+        }
+        do {
+            _ = try await accounts.where("id", 2).delete(require: 1)
+            Issue.record("a require not met was taken")
+        } catch let e as FenecError {
+            #expect(e.code == .unmet && e.reason == nil, "\(e)")
+        }
+        try await db.close()
+        let body = try Value.parse(
+            #"{"error":"no such account (`set accounts` wrote 0 rows, and requires 1)","reason":"no such account"}"#)
+        let remote = FenecRemote.refused(412, body, retryAfter: nil)
+        #expect(remote.code == .unmet && remote.reason == "no such account" && remote.status == 412)
+        let batch = FenecRemote.refused(
+            412, try Value.parse(#"{"error":"unmet: x","completed":0,"at":1,"reason":"x"}"#), retryAfter: nil)
+        #expect(batch.at == 1 && batch.reason == "x")
+        #expect(FenecRemote.refused(412, try Value.parse(#"{"error":"unmet"}"#), retryAfter: nil).reason == nil)
+    }
+
     /// An open leaves a `@text` index for its first read; `warm` builds it
     /// beforehand, once.
     @Test func warmBuildsWhatAnOpenLeft() async throws {

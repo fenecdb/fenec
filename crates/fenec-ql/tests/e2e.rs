@@ -1701,3 +1701,61 @@ fn id_lookup_agrees_with_a_scan() {
     };
     assert_eq!(rs.rows[0].values[0], Value::Text("z".into()));
 }
+
+/// Every `require`'s reason the builders write reads back as it was given:
+/// the texts of `integrations/builder-golden.json` that give one, each
+/// builder's held to them, parse to the reason in its case's steps -- its
+/// quote doubled and its backslash escaped as the lexer reads them.
+#[test]
+fn every_reason_of_the_builders_golden_file_reads_as_given() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../integrations/builder-golden.json"
+    );
+    let file = std::fs::read_to_string(path).unwrap();
+    let Value::List(cases) = fenec_core::json::parse_json(&file).unwrap() else {
+        panic!("a list of cases")
+    };
+    let member = |v: &Value, k: &str| match v {
+        Value::Object(m) => m.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()),
+        _ => None,
+    };
+    let mut read = 0;
+    for case in &cases {
+        let Some(Value::Text(text)) = member(case, "text") else {
+            continue;
+        };
+        // The reason the last step that requires gives, in the options of
+        // its last argument: a later `require` replaces an earlier one.
+        let Some(Value::List(steps)) = member(case, "steps") else {
+            panic!("a case has steps")
+        };
+        if !fenec_core::json::to_string(&Value::List(steps.clone())).contains("\"reason\"") {
+            continue;
+        }
+        let last = |s: &Value| match member(s, "args") {
+            Some(Value::List(args)) => args.last().cloned(),
+            _ => None,
+        };
+        let requiring = steps.iter().rev().find(|s| {
+            member(s, "op") == Some(Value::Text("require".into()))
+                || last(s).is_some_and(|o| member(&o, "require").is_some())
+        });
+        let given = match requiring.and_then(last).and_then(|o| member(&o, "reason")) {
+            Some(Value::Text(r)) => r,
+            _ => String::new(),
+        };
+        let name = member(case, "name");
+        let stmts = parse(&text).unwrap_or_else(|e| panic!("{name:?}: `{text}`: {e}"));
+        let said = stmts.iter().find_map(|s| match s {
+            Statement::Put { require, .. }
+            | Statement::Update { require, .. }
+            | Statement::Delete { require, .. } => require.clone(),
+            Statement::Select(sel) => sel.require.clone(),
+            _ => None,
+        });
+        assert_eq!(said.map(|r| r.reason.to_string()), Some(given), "{name:?}");
+        read += 1;
+    }
+    assert!(read >= 10, "{read} reasons");
+}

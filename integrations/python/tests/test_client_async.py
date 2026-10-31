@@ -67,10 +67,11 @@ def test_an_idempotency_key_and_where_a_batch_stopped():
                 await db.query(put, ["c"], idempotency_key=f"{name}-2")
                 await db.query(put, ["c"], idempotency_key=f"{name}-2")
                 assert await db.query(f"get {name} count") == [{"count": 3}]
-                unmet = f"del {name} where t = $1 require 1"
+                unmet = f"del {name} where t = $1 require 1 else 'no such t'"
                 with pytest.raises(FenecError) as e:
                     await db.batch([(put, ["d"]), (unmet, ["none"])])
                 assert (e.value.status, e.value.at, e.value.completed) == (412, 1, 0)
+                assert e.value.reason == "no such t"
                 assert await db.query(f"get {name} count") == [{"count": 3}]
             finally:
                 await db.query(f"drop collection if exists {name}")

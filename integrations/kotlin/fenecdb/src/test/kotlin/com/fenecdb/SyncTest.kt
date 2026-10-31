@@ -210,6 +210,37 @@ class SyncTest {
         db.close()
     }
 
+    /**
+     * A require's reason goes with its write, and comes back with the refusal
+     * that puts it back; one the replica finds unmet says it at once, nothing sent.
+     */
+    @Test
+    fun aRequiresReasonComesBackWithItsRefusal() = runBlocking {
+        val s = server("reason")
+        val db = Fenec.sync(url = s.url, shapes = listOf(open), path = path("reason"))
+        db.replica!!.ready()
+        val refused = Collections.synchronizedList(ArrayList<Refusal>())
+        val job = launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) { db.replica!!.refusals.collect { refused.add(it) } }
+        val local = assertFailsWith<FenecException> {
+            db.from("tasks").where("key", "zzz").delete(require = 1, reason = "no such task")
+        }
+        assertEquals(FenecException.Code.UNMET, local.code, local.message)
+        assertEquals("no such task", local.reason)
+        // Offline, the server's row goes while the replica still holds it:
+        // the write's count is met here and not there, whichever of the
+        // stream and the write the server meets first.
+        offline(db)
+        s.run("""del tasks where key = "a"""")
+        db.from("tasks").where("key", "a").update(mapOf("title" to "X"), require = 1, reason = "the task was taken")
+        db.replica!!.setOnline(true)
+        eventually("the refusal") { refused.isNotEmpty() }
+        assertEquals(412, refused[0].status)
+        assertEquals("the task was taken", refused[0].reason)
+        eventually("the write put back") { titles(db) == listOf("two") }
+        job.cancel()
+        db.close()
+    }
+
     @Test
     fun aWriteATenantsQuotaRefusesIsPutBackAndTheDeleteBehindItGoes() = runBlocking {
         // A tenant node holding each tenant to the three rows it has.
@@ -334,11 +365,13 @@ class SyncTest {
             db.batch(
                 listOf(
                     tasks.toInsert(mapOf("key" to "e", "title" to "five")),
-                    tasks.where("key", "nobody").toDelete(require = 1),
+                    tasks.where("key", "nobody").toDelete(require = 1, reason = "nobody there"),
                 ),
             )
         }
         assertEquals(listOf<Any?>(FenecException.Code.UNMET, 412, 1, 0), listOf(e.code, e.status, e.at, e.completed))
+        // The statement's own words, which stay put where `at` moves.
+        assertEquals("nobody there", e.reason)
         assertEquals(4L, tasks.count())
 
         val keyed = db.withIdempotencyKey("batch-1")

@@ -162,8 +162,10 @@ def step_of(q, op, args):
         return q.facet(args[0], **kwargs(args[1] if len(args) > 1 else None))
     if op == "match":
         return q.match(args[0], args[1], **kwargs(args[2] if len(args) > 2 else None))
-    if op in ("limit", "offset", "require"):
+    if op in ("limit", "offset"):
         return getattr(q, op)(*args)
+    if op == "require":
+        return q.require(args[0], **kwargs(args[1] if len(args) > 1 else None))
     raise AssertionError(f"no builder step {op}")
 
 
@@ -185,6 +187,16 @@ def test_a_query_is_immutable_and_can_be_branched():
     assert base.to_fenecql() == ("get articles where year >= $1", [2024])
     assert a.to_fenecql()[0] == "get articles where year >= $1 and tags has $2"
     assert b.to_fenecql() == ("get articles where year >= $1 limit $2", [2024, 3])
+
+
+def test_a_reason_that_utf8_cannot_send_is_refused_as_the_builder_s():
+    # A lone surrogate is a str to Python and no text to UTF-8: refused as
+    # a reason of no bytes, a FenecError, never the UnicodeEncodeError.
+    for reason in ["\ud800", "a\udfffb"]:
+        with pytest.raises(FenecError, match="a text of 1 to 200 bytes"):
+            collection("t").where("id", 1).to_delete(require=1, reason=reason)
+        with pytest.raises(FenecError, match="a text of 1 to 200 bytes"):
+            collection("t").require(1, reason=reason)
 
 
 def test_an_unbound_query_has_text_but_cannot_run():

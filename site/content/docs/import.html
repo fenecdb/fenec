@@ -31,7 +31,9 @@ index    category @hash
 <p>The import derives the schema, the table's integer key becoming each
 document's id, writes the rows in batches and builds the indexes after the
 last, rather than keep them up a row at a time. The collection goes into
-<code>&lt;into&gt;.fenec</code> unless <code>--file</code> names another. A
+<code>&lt;into&gt;.fenec</code> unless <code>--file</code> names another, held
+while the import runs as the shell holds a file: one a server has open is
+refused, since two processes writing one file corrupt it. A
 column of embeddings comes across too (<a href="#vector-columns">Vector
 columns</a>). Every option is in <code>fenec import --help</code>.</p>
 </details>

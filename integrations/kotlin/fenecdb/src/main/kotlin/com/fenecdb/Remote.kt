@@ -188,7 +188,9 @@ class FenecRemote private constructor(
      * block -- their writes all land, or at the first error none of them do,
      * a [FenecException] whose [FenecException.at] is the statement that
      * stopped it ([FenecException.Code.UNMET] for a write's `require` not
-     * met). A statement is what the builder's `toInsert`, `toUpdate`,
+     * met, its [FenecException.reason] the one the statement gave, which
+     * stays put as statements go in front of it where `at` moves). A
+     * statement is what the builder's `toInsert`, `toUpdate`,
      * `toDelete` and `toFenecQL` make. With [idempotencyKey] a retry after a
      * timeout is answered as the first try was and writes nothing twice; a
      * batch of reads alone takes no key.
@@ -322,9 +324,10 @@ class FenecRemote private constructor(
         @Volatile internal var parsing: (() -> Unit)? = null
 
         /**
-         * A refusal as the error it is: its status and message, where a batch stopped, and where a
-         * tenant's quota refused it the quota and how many seconds to wait -- to the millisecond where
-         * the body says it (`retry_after_ms`), else `Retry-After`, or the same in the body.
+         * A refusal as the error it is: its status and message, where a batch stopped, what a
+         * `require n else '<reason>'` that refused it said, and where a tenant's quota refused it the
+         * quota and how many seconds to wait -- to the millisecond where the body says it
+         * (`retry_after_ms`), else `Retry-After`, or the same in the body.
          */
         fun refused(status: Int, r: Row?, retryAfter: String?): FenecException {
             val quota = r?.string("quota")
@@ -335,6 +338,7 @@ class FenecRemote private constructor(
                 status = status, at = r?.int("at"), completed = r?.int("completed"),
                 quota = quota,
                 retryAfter = ms ?: retryAfter?.toDoubleOrNull() ?: r?.double("retry_after"),
+                reason = r?.string("reason"),
             )
         }
 

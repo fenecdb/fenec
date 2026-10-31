@@ -94,9 +94,17 @@ data class SyncStatus(
 /**
  * A write the server refused: it was put back on the replica. [quota] is the tenant's quota that
  * refused it -- "bytes" or "rows", a 507 -- null for any other refusal: room is made by deleting,
- * and the writes behind it went on.
+ * and the writes behind it went on. [reason] is what the write's `require n else '<reason>'` said,
+ * where one refused it (a 412): the app says "the seat was taken" rather than "refused"; null where
+ * the statement gave none.
  */
-data class Refusal @JvmOverloads constructor(val status: Int, val message: String, val query: String, val quota: String? = null)
+data class Refusal @JvmOverloads constructor(
+    val status: Int,
+    val message: String,
+    val query: String,
+    val quota: String? = null,
+    val reason: String? = null,
+)
 
 /**
  * A replica of [shapes] in the file at [path], kept in step with the server
@@ -273,7 +281,10 @@ class Replica internal constructor(
                 }
                 "changed" -> db.lives.touch()
                 "refused" -> refused.tryEmit(
-                    Refusal(r.int("status") ?: 0, r.string("message") ?: "", r.string("query") ?: "", r.string("quota")),
+                    Refusal(
+                        r.int("status") ?: 0, r.string("message") ?: "", r.string("query") ?: "", r.string("quota"),
+                        r.string("reason"),
+                    ),
                 )
                 "status" -> reload()
             }
