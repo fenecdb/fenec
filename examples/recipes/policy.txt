@@ -1,0 +1,17 @@
+# collection  access                      rows                           role
+
+# Per-user rows: a person reads and writes their own notes.
+notes         read,write                  where owner = $jwt.sub
+
+# An admin also reads every note, and changes none. `role` is a claim of the
+# token (a text, or a list holding the role).
+notes         read                                                       for admin
+
+# Field read rules: every profile's name is public, the rest is its owner's.
+profiles      read(name)
+profiles      read,update(name, phone)    where owner = $jwt.sub
+
+# An audit trail a person adds lines about themselves to, and nobody edits.
+audit         read,insert                 where actor = $jwt.sub
+audit         read                                                       for admin
+audit         append-only

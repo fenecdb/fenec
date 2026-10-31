@@ -1,0 +1,6 @@
+# A token is good until its `exp`, and the server asks no one whether it was
+# revoked. A person to turn away sooner is a row, and every rule that grants
+# them anything asks for it: they read `banned` for their own row alone, so
+# the rule sees whether it is there.
+notes         read,write                  where owner = $jwt.sub and $jwt.sub not in (get banned select user)
+banned        read                        where user = $jwt.sub

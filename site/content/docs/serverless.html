@@ -33,7 +33,10 @@ server: one writer, and storage that outlives the process. So one object
 holds one database, as a tenant is one file on a <code>fenec-server</code>
 node.</p>
 
-<p>The second needs nothing new: <code>Fenec.connect(url)</code>, the
+<p>The second is also how a Worker stands in front of a server as an endpoint
+with logic of its own, a signup that writes the row and its job in one batch,
+run under <code>wrangler dev</code> on <a href="/docs/functions#worker">Functions
+and webhooks</a>. It needs nothing new: <code>Fenec.connect(url)</code>, the
 Python <code>Client</code> or <code>fetch</code>, and a function's connections
 are HTTP requests, so there is no pool to exhaust. Servers in several
 regions take one URL through a Worker in front of them, which sends each

@@ -92,6 +92,13 @@ NAV = [
     ]),
     ("Guides", [
         ("docs/sync", "Sync"),
+        # What a backend platform bundles, done with fenecdb and a standard
+        # service, each run against a real server: sign-in from the identity
+        # provider an app already has, files in an object store, and code
+        # that reacts to a write. No server feature of their own.
+        ("docs/auth", "Auth with your identity provider"),
+        ("docs/files", "Files with S3 and R2"),
+        ("docs/functions", "Functions and webhooks"),
         # What an app adds Redis for, a page a family of patterns: this one
         # says which page holds each, and is named for what it replaces now
         # that no group is.
