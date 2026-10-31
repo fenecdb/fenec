@@ -752,6 +752,51 @@ docs  read(title)                                 for viewer
     assert_eq!(at(&s, &["count"]), &Value::Int(1), "{s:?}");
 }
 
+/// An agent whose token holds `"sub": null` is held to what the same
+/// token's `/query` is: `owner = $jwt.sub` does not apply to it, and the
+/// draft no one owns is not its to read, search or change.
+#[test]
+fn a_null_subject_s_agent_reads_and_writes_no_ones_rows() {
+    let mut sql = DOCS.to_vec();
+    sql.push("put docs {title: \"draft\", body: \"an unowned fox\", year: 2026}");
+    let n = serve(
+        Config {
+            token: Some(ROOT.into()),
+            access: Some(Arc::new(Access::new(SECRET, POLICY).unwrap())),
+            mcp: Some(Arc::new(Options {
+                write: true,
+                ..opts()
+            })),
+            ..Config::default()
+        },
+        &sql,
+    );
+    let anonymous = n.token(r#"{"sub":null}"#);
+    for (tool, args) in [
+        ("query", r#"{"query":"get docs"}"#),
+        ("get", r#"{"collection":"docs","ids":[4]}"#),
+        ("search", r#"{"collection":"docs","text":"fox"}"#),
+        (
+            "write",
+            r#"{"statement":"set docs {title: 'taken'} where id = 4"}"#,
+        ),
+        ("write", r#"{"statement":"insert docs {title: 'mine'}"}"#),
+    ] {
+        let (err, s) = n.call(Some(&anonymous), tool, args);
+        assert!(err, "{tool} {args}: {s:?}");
+        assert!(!format!("{s:?}").contains("unowned"), "{tool}: {s:?}");
+    }
+    let (_, s) = n.call(Some(&anonymous), "schema", "{}");
+    assert!(!text(at(&s, &["fenecql"])).contains("docs"), "{s:?}");
+    let (_, s) = n.call(
+        Some(ROOT),
+        "query",
+        r#"{"query":"get docs select title order id"}"#,
+    );
+    assert_eq!(at(&s, &["count"]), &Value::Int(4));
+    assert_eq!(text(at(&s, &["rows", "3", "title"])), "draft");
+}
+
 #[test]
 fn memories_are_found_by_words_then_by_meaning_and_go_when_they_expire() {
     let n = start(Options {
@@ -1154,6 +1199,16 @@ fn the_write_tool_is_off_until_asked_for_and_then_writes_rows_alone() {
         r#"{"statement":"del docs where id = 999 require 1"}"#,
     );
     assert!(err && int(at(&s, &["status"])) == 412, "{s:?}");
+    assert_eq!(at(&s, &["reason"]), &Value::Null, "{s:?}");
+    // A `require` that says why: the reason beside the words, as /query's
+    // 412 gives it, for the model to tell one refusal from another by.
+    let (err, s) = n.call(
+        Some(ROOT),
+        "write",
+        r#"{"statement":"del docs where id = 999 require 1 else 'no such doc'"}"#,
+    );
+    assert!(err && int(at(&s, &["status"])) == 412, "{s:?}");
+    assert_eq!(at(&s, &["reason"]), &Value::Text("no such doc".into()));
     for (stmt, has) in [
         ("get docs", "a read goes through query"),
         ("create collection x (a int)", "not made over MCP"),

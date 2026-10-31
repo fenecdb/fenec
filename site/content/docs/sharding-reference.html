@@ -329,13 +329,18 @@ is refused with 403 elsewhere: on every route under the prefix, the
 statements, REST, <code>/batch</code>, a subscription, <code>/_changes</code>,
 <code>/_schema</code> and the statement counts. The check comes before the
 tenant is looked up, so a refused token learns nothing of which tenants
-exist. A token naming no tenant is refused on a <code>--dir</code> node
+exist. A token without the tenant claim is refused on a <code>--dir</code> node
 unless it is started with <code>--jwt-unbound-tenants</code>, which takes
-such a token for every tenant it serves; <code>--jwt-tenant-claim
+such a token for every tenant it serves; one holding the claim as
+<code>null</code>, <code>""</code>, a number or a list of no tenant's name
+is refused even then, since its issuer meant to bind it; <code>--jwt-tenant-claim
 &lt;name&gt;</code> reads another claim than <code>tenant</code>. The node's
 own <code>--http-token</code> and <code>--admin-token</code> are not bound.
 The router forwards <code>Authorization</code> as it came and holds no keys,
-so the node is what enforces it, behind the router or reached directly.
+so the node is what enforces it, behind the router or reached directly --
+and the issuer and audience a token must name (<code>--jwt-issuer</code>,
+<code>--jwt-audience</code>, <a href="/docs/http-access#whom-a-token-is-for">Whom
+a token is for</a>) are the node's flags too.
 What a scoped token writes to a tenant is checked against its rules as on a
 single file (<a href="/docs/http-access#scoped-access">Scoped access</a>).</p>
 

@@ -117,6 +117,30 @@ fn a_read_written_over_lines_is_read_whole() {
     assert_eq!(tables(&text(&out.stdout)), [["4 5"]]);
 }
 
+/// `require <n> else '<reason>'` over lines: the `else` on the line after
+/// the count goes on with it, a write's and a read's, and the refusal
+/// leads with the reason; nothing of the write lands.
+#[test]
+fn a_require_s_reason_on_the_next_line_goes_with_it() {
+    let d = Dir::new("reason");
+    let f = d.notes();
+    let out = piped(
+        &f,
+        "del notes where topic = 9 require 1\n  else 'no such note'\nget notes\n  where id = 1\n  require 0\n  else \"it's there\"\n",
+    );
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("error: unmet: no such note (`del notes` wrote 0 rows, and requires 1)"),
+        "{err}"
+    );
+    assert!(
+        err.contains("error: unmet: it's there (`get notes` answered 1 row, and requires 0)"),
+        "{err}"
+    );
+    assert!(!err.contains("begins no statement"), "{err}");
+    assert_eq!(count(&f, ""), 5);
+}
+
 #[test]
 fn a_delete_written_over_lines_deletes_what_it_says() {
     let d = Dir::new("del");

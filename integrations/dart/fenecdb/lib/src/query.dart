@@ -16,7 +16,7 @@
 // injection boundary. A step the builder refuses throws as it is called
 // (FenecCode.builder), its message the JS builder's.
 
-import 'dart:convert' show jsonEncode;
+import 'dart:convert' show jsonEncode, utf8;
 import 'dart:typed_data';
 
 import 'fenec.dart';
@@ -857,8 +857,13 @@ class Query {
 
   /// `require n` on a read: the rows it answers, after [limit], must number
   /// n, or it is refused (412, unmet) and the batch it is in put back, as a
-  /// write's `require` is -- a checkout's guard on a read.
-  Query require(int n) => _with(require: _requireClause(n));
+  /// write's `require` is -- a checkout's guard on a read. [reason] says why,
+  /// `require n else '<reason>'`: the exception's [FenecException.reason],
+  /// by which a caller tells "no such coupon" from another refusal where
+  /// [FenecException.at] moves with every statement put in front --
+  /// `require(1, reason: 'no such coupon')`. Written into the text, as the
+  /// count is, never a parameter: 1 to 200 bytes of UTF-8.
+  Query require(int n, {String? reason}) => _with(require: _requireClause(n, reason));
 
   // ------------------------------------------------------------ the text
 
@@ -1076,10 +1081,29 @@ class Query {
   // number written in, never a parameter: the count is what the statement
   // guards, a constant of the code, where a page's `limit` and `offset`
   // change with each request and go as parameters.
-  static String _requireClause(int? n) {
-    if (n == null) return '';
+  static String _requireClause(int? n, [String? reason]) {
+    if (n == null) {
+      if (reason != null) throw _refuse('a reason says why a require refused, and goes with one');
+      return '';
+    }
     if (n < 0) throw _refuse('require takes a count of rows, a whole number from 0 (got $n)');
-    return ' require $n';
+    return ' require $n${_reasonClause(reason)}';
+  }
+
+  // ` else '<reason>'` for a require's reason: written into the text, a
+  // quote doubled and a backslash escaped, as FenecQL takes it -- never a
+  // parameter, as the count is not: it is the statement's own words, which
+  // a caller tells one refusal from another by. 1 to 200 bytes of UTF-8, as
+  // the parser holds it: bytes, not code units, so 'ş' counts two. No
+  // backtick: the refusal quotes its statement with them, and the reason is
+  // read back as its words up to the first "(`".
+  static String _reasonClause(String? reason) {
+    if (reason == null) return '';
+    if (reason.isEmpty || utf8.encode(reason).length > 200) {
+      throw _refuse("a require's reason is a text of 1 to 200 bytes");
+    }
+    if (reason.contains('`')) throw _refuse("a require's reason holds no backtick");
+    return " else '${reason.replaceAll(r'\', r'\\').replaceAll("'", "''")}'";
   }
 
   // An update's or a delete's ` order ... limit $n returning ...`: the rows
@@ -1127,9 +1151,14 @@ class Query {
   /// them, not run. [ifAbsent]: `put ... if absent`, which passes over a
   /// document whose id or `@unique` value a row holds and counts only what
   /// it wrote -- a lock taken, or not, in one statement. [require]: refused,
-  /// and nothing written, unless it wrote exactly that many rows.
-  /// [returning]: the rows written answered, ids and all ([insertReturning]).
-  Statement toInsert(Object docs, {bool ifAbsent = false, int? require, List<String>? returning}) {
+  /// and nothing written, unless it wrote exactly that many rows; [reason]
+  /// says why (`require n else '<reason>'`), the exception's
+  /// [FenecException.reason], by which a caller tells "liked already" from
+  /// another refusal where [FenecException.at] moves with every statement
+  /// put in front -- written into the text, never a parameter, as the count
+  /// is not. [returning]: the rows written answered, ids and all
+  /// ([insertReturning]).
+  Statement toInsert(Object docs, {bool ifAbsent = false, int? require, String? reason, List<String>? returning}) {
     _assertPlain('insert');
     final list = docs is List ? docs : [docs];
     if (list.isEmpty) throw _refuse('cannot write an empty document list');
@@ -1137,23 +1166,27 @@ class Query {
     final bind = _binder(params);
     final body = list.map((d) => _renderDoc(d, bind, insert: true)).join(', ');
     final absent = ifAbsent ? ' if absent' : '';
-    final tail = _returningClause(returning) + _requireClause(require);
+    final tail = _returningClause(returning) + _requireClause(require, reason);
     return (text: 'put $collection ${list.length == 1 ? body : '[$body]'}$absent$tail', params: params);
   }
 
   /// The `set` of the rows the filter names, not run; with no filter it is
   /// refused unless [all] or a limit bounds it; with [require], refused
-  /// unless it set exactly that many rows. [order] and [limit] before it pick
-  /// the rows it writes -- the page a `get` with them answers -- and
+  /// unless it set exactly that many rows, and [reason] as [toInsert]'s:
+  /// `require: 1, reason: 'insufficient funds'`. [order] and [limit] before
+  /// it pick the rows it writes -- the page a `get` with them answers -- and
   /// [returning] answers them as written, the fields named or `*` for every
   /// one: a job queue's claim ([updateReturning]).
-  Statement toUpdate(Object patch, {bool all = false, int? require, List<String>? returning}) {
+  Statement toUpdate(Object patch, {bool all = false, int? require, String? reason, List<String>? returning}) {
     _assertPlain('update');
     final params = <Object?>[];
     final bind = _binder(params);
     final body = _renderDoc(patch, bind);
     final filter = _requireFilter('update', all, bind);
-    return (text: 'set $collection $body$filter${_pick(returning, bind)}${_requireClause(require)}', params: params);
+    return (
+      text: 'set $collection $body$filter${_pick(returning, bind)}${_requireClause(require, reason)}',
+      params: params,
+    );
   }
 
   /// The upsert, `put ... if absent else set {patch}`, not run: a document
@@ -1161,8 +1194,8 @@ class Query {
   /// -- an update's, [Computed.inc] and [Computed.expr] with it, and in an
   /// expression `new.f` the document's own `f` -- and every other one is
   /// inserted. The documents' parameters come first, then the patch's;
-  /// [returning] as [toInsert]'s.
-  Statement toUpsert(Object docs, Object patch, {int? require, List<String>? returning}) {
+  /// [require], [reason] and [returning] as [toInsert]'s.
+  Statement toUpsert(Object docs, Object patch, {int? require, String? reason, List<String>? returning}) {
     _assertPlain('upsert');
     final list = docs is List ? docs : [docs];
     if (list.isEmpty) throw _refuse('cannot write an empty document list');
@@ -1170,7 +1203,7 @@ class Query {
     final bind = _binder(params);
     final body = list.map((d) => _renderDoc(d, bind, insert: true)).join(', ');
     final set = _renderDoc(patch, bind);
-    final tail = _returningClause(returning) + _requireClause(require);
+    final tail = _returningClause(returning) + _requireClause(require, reason);
     return (
       text: 'put $collection ${list.length == 1 ? body : '[$body]'} if absent else set $set$tail',
       params: params,
@@ -1179,14 +1212,18 @@ class Query {
 
   /// The `del` of the rows the filter names, not run; with no filter it is
   /// refused unless [all] or a limit bounds it; with [require], refused
-  /// unless it deleted exactly that many rows. [order], [limit] and
-  /// [returning] as [toUpdate]'s, the rows answered as they were: a pop.
-  Statement toDelete({bool all = false, int? require, List<String>? returning}) {
+  /// unless it deleted exactly that many rows, and [reason] as [toInsert]'s.
+  /// [order], [limit] and [returning] as [toUpdate]'s, the rows answered as
+  /// they were: a pop.
+  Statement toDelete({bool all = false, int? require, String? reason, List<String>? returning}) {
     _assertPlain('delete');
     final params = <Object?>[];
     final bind = _binder(params);
     final filter = _requireFilter('delete', all, bind);
-    return (text: 'del $collection$filter${_pick(returning, bind)}${_requireClause(require)}', params: params);
+    return (
+      text: 'del $collection$filter${_pick(returning, bind)}${_requireClause(require, reason)}',
+      params: params,
+    );
   }
 
   // ------------------------------------------------------------- running
@@ -1231,32 +1268,36 @@ class Query {
   /// Puts a document -- a map of fields -- or a list of them: how many it
   /// wrote, which with [ifAbsent] leaves out those already held. None is no
   /// statement. [require]: refused ([FenecCode.unmet]) unless it wrote
-  /// exactly that many.
-  Future<int> insert(Object docs, {bool ifAbsent = false, int? require}) async {
+  /// exactly that many; [reason] beside it, what the exception's
+  /// [FenecException.reason] says.
+  Future<int> insert(Object docs, {bool ifAbsent = false, int? require, String? reason}) async {
     if (docs is List && docs.isEmpty) return 0;
-    return (await _run(toInsert(docs, ifAbsent: ifAbsent, require: require))).affected;
+    return (await _run(toInsert(docs, ifAbsent: ifAbsent, require: require, reason: reason))).affected;
   }
 
   /// Inserts each document, or, where a row holds its id or `@unique`
   /// value, sets that row by [patch] --
   /// `upsert({'key': k, 'n': 1}, {'n': Computed.expr('n + new.n')})`: the
   /// rows it set and made together. None is no statement.
-  Future<int> upsert(Object docs, Object patch, {int? require}) async {
+  Future<int> upsert(Object docs, Object patch, {int? require, String? reason}) async {
     if (docs is List && docs.isEmpty) return 0;
-    return (await _run(toUpsert(docs, patch, require: require))).affected;
+    return (await _run(toUpsert(docs, patch, require: require, reason: reason))).affected;
   }
 
   /// Sets the patch's fields on the rows the filter names; with no filter it
   /// is refused unless [all]; with [require], refused ([FenecCode.unmet])
-  /// unless it set exactly that many.
-  Future<int> update(Object patch, {bool all = false, int? require}) async =>
-      (await _run(toUpdate(patch, all: all, require: require))).affected;
+  /// unless it set exactly that many, the exception's
+  /// [FenecException.reason] the [reason] beside it:
+  /// `update({'balance': Computed.inc(-5)}, require: 1, reason: 'insufficient funds')`.
+  Future<int> update(Object patch, {bool all = false, int? require, String? reason}) async =>
+      (await _run(toUpdate(patch, all: all, require: require, reason: reason))).affected;
 
   /// Deletes the rows the filter names; with no filter it is refused unless
   /// [all]; with [require], refused ([FenecCode.unmet]) unless it deleted
-  /// exactly that many.
-  Future<int> delete({bool all = false, int? require}) async =>
-      (await _run(toDelete(all: all, require: require))).affected;
+  /// exactly that many, the exception's [FenecException.reason] the
+  /// [reason] beside it.
+  Future<int> delete({bool all = false, int? require, String? reason}) async =>
+      (await _run(toDelete(all: all, require: require, reason: reason))).affected;
 
   /// [update] that answers the rows it set, as written, under the fields
   /// named -- `*` every one. With [order] and [limit] a job queue's claim:
@@ -1264,26 +1305,29 @@ class Query {
   /// .updateReturning({'owner': me, 'run_at': Computed.expr('now() + ?', [30000]),
   /// 'attempts': Computed.inc(1)})`.
   Future<Rows> updateReturning(Object patch,
-          {List<String> returning = const ['*'], bool all = false, int? require}) async =>
-      (await _run(toUpdate(patch, all: all, require: require, returning: returning))).rows;
+          {List<String> returning = const ['*'], bool all = false, int? require, String? reason}) async =>
+      (await _run(toUpdate(patch, all: all, require: require, reason: reason, returning: returning))).rows;
 
   /// [delete] that answers the rows it deleted, as they were: a pop.
-  Future<Rows> deleteReturning({List<String> returning = const ['*'], bool all = false, int? require}) async =>
-      (await _run(toDelete(all: all, require: require, returning: returning))).rows;
+  Future<Rows> deleteReturning(
+          {List<String> returning = const ['*'], bool all = false, int? require, String? reason}) async =>
+      (await _run(toDelete(all: all, require: require, reason: reason, returning: returning))).rows;
 
   /// [insert] that answers the rows it wrote, ids and all, in the
   /// documents' order, under the fields named -- `*` every one:
   /// `from('orders').insertReturning({'item': 'tea'}, returning: ['id'])`.
   Future<Rows> insertReturning(Object docs,
-      {List<String> returning = const ['*'], bool ifAbsent = false, int? require}) async {
+      {List<String> returning = const ['*'], bool ifAbsent = false, int? require, String? reason}) async {
     if (docs is List && docs.isEmpty) return const Rows([]);
-    return (await _run(toInsert(docs, ifAbsent: ifAbsent, require: require, returning: returning))).rows;
+    return (await _run(toInsert(docs, ifAbsent: ifAbsent, require: require, reason: reason, returning: returning)))
+        .rows;
   }
 
   /// [upsert] that answers the rows it set and made, as written, in the
   /// documents' order.
-  Future<Rows> upsertReturning(Object docs, Object patch, {List<String> returning = const ['*'], int? require}) async {
+  Future<Rows> upsertReturning(Object docs, Object patch,
+      {List<String> returning = const ['*'], int? require, String? reason}) async {
     if (docs is List && docs.isEmpty) return const Rows([]);
-    return (await _run(toUpsert(docs, patch, require: require, returning: returning))).rows;
+    return (await _run(toUpsert(docs, patch, require: require, reason: reason, returning: returning))).rows;
   }
 }

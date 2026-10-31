@@ -8,6 +8,7 @@ mod follow;
 mod logs;
 mod mcp;
 mod otlp;
+mod providers;
 mod shutdown;
 mod start;
 mod stdin;

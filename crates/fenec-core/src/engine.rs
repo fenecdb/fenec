@@ -202,7 +202,7 @@ const FIELD_TTL: u8 = 4;
 fn required(
     verb: &str,
     collection: &str,
-    require: Option<u64>,
+    require: &Option<Require>,
     out: Result<Response>,
 ) -> Result<Response> {
     let n = match (require, &out) {
@@ -211,10 +211,7 @@ fn required(
         _ => return out,
     };
     match require {
-        Some(want) if n as u64 != want => Err(Error::Unmet(format!(
-            "`{verb} {collection}` wrote {n} {}, and requires {want}",
-            if n == 1 { "row" } else { "rows" }
-        ))),
+        Some(r) if n as u64 != r.n => Err(unmet(r, verb, collection, "wrote", n)),
         _ => out,
     }
 }
@@ -223,17 +220,42 @@ fn required(
 /// a block -- a `/batch` -- under its write lock, so what it saw is what
 /// the writes around it see, and refused, the block is put back.
 fn read_required(sel: &Select, rows: ResultSet) -> Result<Response> {
-    match sel.require {
-        Some(want) if rows.rows.len() as u64 != want => {
-            let n = rows.rows.len();
-            Err(Error::Unmet(format!(
-                "`get {}` answered {n} {}, and requires {want}",
-                sel.collection,
-                if n == 1 { "row" } else { "rows" }
-            )))
-        }
+    match &sel.require {
+        Some(r) if rows.rows.len() as u64 != r.n => Err(unmet(
+            r,
+            "get",
+            &sel.collection,
+            "answered",
+            rows.rows.len(),
+        )),
         _ => Ok(Response::Rows(rows)),
     }
+}
+
+/// The refusal of a count `r` did not meet, `n`: what the statement did,
+/// led by the reason its `else` gave where it gave one -- "insufficient
+/// funds (`set accounts` wrote 0 rows, and requires 1)" -- which the error
+/// reads back ([`Error::reason`]). One `format!` for a write's and a
+/// `get`'s, and the reason pushed rather than formatted: each `format!` is
+/// code of the browser module's own, and one with the reason's three
+/// arguments more was 0.1 KB more than the pushes.
+#[inline(never)]
+fn unmet(r: &Require, verb: &str, collection: &str, did: &str, n: usize) -> Error {
+    let rows = if n == 1 { "row" } else { "rows" };
+    let count = format!(
+        "`{verb} {collection}` {did} {n} {rows}, and requires {}",
+        r.n
+    );
+    let reason = &*r.reason;
+    if reason.is_empty() {
+        return Error::Unmet(count);
+    }
+    let mut m = String::with_capacity(reason.len() + count.len() + 3);
+    m.push_str(reason);
+    m.push_str(" (");
+    m.push_str(&count);
+    m.push(')');
+    Error::Unmet(m)
 }
 
 /// The expiry a [`FIELD_TTL`] change leaves its field with.
@@ -6477,7 +6499,7 @@ impl Database {
             } => required(
                 if *insert { "insert" } else { "put" },
                 collection,
-                *require,
+                require,
                 self.put(
                     collection,
                     docs,
@@ -6500,7 +6522,7 @@ impl Database {
             } => required(
                 "set",
                 collection,
-                *require,
+                require,
                 self.update(collection, set, filter, pick.as_deref(), params),
             ),
             Statement::Delete {
@@ -6511,7 +6533,7 @@ impl Database {
             } => required(
                 "del",
                 collection,
-                *require,
+                require,
                 self.delete(collection, filter, pick.as_deref(), params),
             ),
             Statement::ListCollections => Ok(Response::Schemas(
@@ -6561,7 +6583,9 @@ impl Database {
         };
         // The walk first: the collection looked up by name for every write
         // took a `set` by id 1.09 -> 1.14 us.
-        let asks = |f: &Expr| f.has_subquery() || (f.calls_now() && self.ordered(collection));
+        let asks = |f: &Expr| {
+            f.has_subquery() || (f.calls_now() && self.ordered(collection)) || kind_splits(f)
+        };
         if !filter.as_ref().is_some_and(asks) && self.ttl_of(collection).is_none() {
             return Ok(Cow::Borrowed(stmt));
         }
@@ -6577,13 +6601,13 @@ impl Database {
                 collection,
                 set: set.clone(),
                 filter,
-                require: *require,
+                require: require.clone(),
                 pick: pick.clone(),
             },
             Statement::Delete { require, pick, .. } => Statement::Delete {
                 collection,
                 filter,
-                require: *require,
+                require: require.clone(),
                 pick: pick.clone(),
             },
             _ => unreachable!("only a set or a del has a filter to answer"),
@@ -6777,7 +6801,15 @@ impl Database {
                 }
             }
         }
-        if !expiring && !sel.has_subquery() && !unsplit && !timed() {
+        // A kind's edge to fold (`kind_split`), its own or a level's:
+        // natively alone, where a scoped token's rule writes one.
+        let kinded = || {
+            let opt = |f: &Option<Expr>| f.as_ref().is_some_and(kind_splits);
+            cfg!(not(target_arch = "wasm32"))
+                && (opt(&sel.filter)
+                    || (sel.lookup.as_ref()).is_some_and(|l| l.chain().any(|s| opt(&s.filter))))
+        };
+        if !expiring && !sel.has_subquery() && !unsplit && !timed() && !kinded() {
             return Ok(std::borrow::Cow::Borrowed(sel));
         }
         let mut sel = sel.clone();
@@ -6888,6 +6920,10 @@ impl Database {
             let folds = f.calls_now() && self.ordered(collection);
             if let Some(now) = folds.then(|| self.now_value(params)).flatten() {
                 f.fold_now(&now, params);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(c) = self.collections.get(collection).filter(|_| kind_splits(f)) {
+                fold_kinds(f, &c.schema);
             }
         }
         if let Some(Expr::Not(past)) = self.alive(collection)? {
@@ -13612,10 +13648,14 @@ fn composed(
             }
         }
     }
-    let spans = prefixes
-        .iter()
-        .map(|p| ix.span(p, fixed, ranged.then_some(&range)))
-        .collect();
+    let none = by_kinds(comp, ix, &terms, params, fixed, &mut used, &mut ranged);
+    let spans = match none {
+        true => Vec::new(),
+        false => prefixes
+            .iter()
+            .map(|p| ix.span(p, fixed, ranged.then_some(&range)))
+            .collect(),
+    };
     Composed {
         spans,
         fixed,
@@ -13624,6 +13664,64 @@ fn composed(
         ranged,
         exact: used.iter().all(|u| *u) && ix.apart().is_empty(),
     }
+}
+
+/// The terms of a [`composed`] plan left untaken that compare a typed part
+/// with a value of another kind, true of every value it holds or of none
+/// (`by_kind`): what a scoped token's rule ANDs in to hold a claim to its
+/// kind (`level > true` beside `level <= $jwt.c`). True, it bounds nothing
+/// and is taken where the part is fixed, whose value is one of its kind,
+/// or ranged, whose range holds no `null`; false, no row is in the spans,
+/// which is the answer: `true`. Left to be tested row by row, it read
+/// every row of a span a count was answered from -- a scoped count over 5
+/// 000 of 200 000 rows took 285 us where the server token's took 0.85,
+/// and takes 1.3 now; over 500 of 20 000, 31 us -> 1.4. Natively alone,
+/// as `by_kind` is.
+#[cfg(not(target_arch = "wasm32"))]
+fn by_kinds(
+    comp: &Composite,
+    ix: &CompositeIndex,
+    terms: &[&Expr],
+    params: &[Value],
+    fixed: usize,
+    used: &mut [bool],
+    ranged: &mut bool,
+) -> bool {
+    let mut none = false;
+    for (j, e) in terms.iter().enumerate() {
+        let Some((name, op, v)) = e.range_key(params).filter(|_| !used[j]) else {
+            continue;
+        };
+        let Some(i) = comp.keys.iter().position(|(k, _)| k == name) else {
+            continue;
+        };
+        match ix.part_type(i).and_then(|ty| by_kind(&ty, op, v)) {
+            Some(false) => {
+                none = true;
+                used[j] = true;
+                *ranged |= i == fixed;
+            }
+            Some(true) if i <= fixed => {
+                used[j] = true;
+                *ranged |= i == fixed;
+            }
+            _ => {}
+        }
+    }
+    none
+}
+
+#[cfg(target_arch = "wasm32")]
+fn by_kinds(
+    _: &Composite,
+    _: &CompositeIndex,
+    _: &[&Expr],
+    _: &[Value],
+    _: usize,
+    _: &mut [bool],
+    _: &mut bool,
+) -> bool {
+    false
 }
 
 /// Whether `order`, over a run of `comp`'s entries whose first `fixed`
@@ -13725,10 +13823,103 @@ fn sorted_range(
                 range.narrow(op, key);
                 any = true;
             }
-            None => exact = false,
+            None => match by_kind(ty, op, v) {
+                Some(true) => {}
+                Some(false) => {
+                    range.close(ty);
+                    any = true;
+                }
+                None => exact = false,
+            },
         }
     }
     any.then_some((range, exact))
+}
+
+/// What a comparison of a typed field with a value of another kind is of
+/// every row ([`SortedIndex::by_kind`]): true, no bound; false, no row.
+/// Natively alone: what writes such a literal is a scoped token's rule
+/// (`fenec_http::access`), which the browser module has none of, and there
+/// it was 611 bytes; it evaluates such a comparison row by row, as before.
+#[cfg(not(target_arch = "wasm32"))]
+fn by_kind(ty: &DataType, op: CmpOp, v: &Value) -> Option<bool> {
+    SortedIndex::by_kind(ty, op, v)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn by_kind(_: &DataType, _: CmpOp, _: &Value) -> Option<bool> {
+    None
+}
+
+/// The field `e` holds to the edge below a text that reads as a time,
+/// `x >= "" or x >= "<text>"`: what a scoped token's rule ANDs in beside
+/// `x <= $jwt.until` (`fenec_http::access`), whose claim a time compares
+/// with as the time it reads and a text as the text it is. No two
+/// comparisons ANDed said both -- an int and a time order alike against
+/// every value but such a text -- so it is an `or`, true of every text by
+/// the first and of every time from the second's on.
+#[cfg(not(target_arch = "wasm32"))]
+fn kind_split(e: &Expr) -> Option<&str> {
+    let Expr::Or(a, b) = e else {
+        return None;
+    };
+    match (a.as_ref(), b.as_ref()) {
+        (Expr::Cmp(CmpOp::Ge, x, t), Expr::Cmp(CmpOp::Ge, y, u)) => {
+            match (&**x, &**t, &**y, &**u) {
+                (
+                    Expr::Field(f),
+                    Expr::Lit(Value::Text(t)),
+                    Expr::Field(g),
+                    Expr::Lit(Value::Text(_)),
+                ) if f == g && t.is_empty() => Some(f),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Whether [`kind_split`] is in `e`'s conditions.
+#[cfg(not(target_arch = "wasm32"))]
+fn kind_splits(e: &Expr) -> bool {
+    match e {
+        Expr::Or(..) if kind_split(e).is_some() => true,
+        Expr::And(a, b) | Expr::Or(a, b) => kind_splits(a) || kind_splits(b),
+        Expr::Not(a) => kind_splits(a),
+        _ => false,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn kind_splits(_: &Expr) -> bool {
+    false
+}
+
+/// Each [`kind_split`] in `e` made the side its field's declared type
+/// reads: a `timestamp` field's values are times, which no text but one
+/// reading as a time ranks with, so the second; any other field's -- a
+/// json one's among them, whose times are their ISO texts -- are no
+/// time, and every one the second takes the first takes too, `""` being
+/// below every text. Either way the same rows, `null`s left out by both,
+/// and a comparison an ordered index says as a key, where the `or` was
+/// tested row by row through every row of its range.
+#[cfg(not(target_arch = "wasm32"))]
+fn fold_kinds(e: &mut Expr, schema: &Schema) {
+    if let Some(f) = kind_split(e) {
+        let time = schema.field(f).is_some_and(|f| f.ty == DataType::Timestamp);
+        if let Expr::Or(a, b) = std::mem::replace(e, Expr::Lit(Value::Null)) {
+            *e = if time { *b } else { *a };
+        }
+        return;
+    }
+    match e {
+        Expr::And(a, b) | Expr::Or(a, b) => {
+            fold_kinds(a, schema);
+            fold_kinds(b, schema);
+        }
+        Expr::Not(a) => fold_kinds(a, schema),
+        _ => {}
+    }
 }
 
 /// Sort keys: a field position (`None` for `id`), whether it ascends, how

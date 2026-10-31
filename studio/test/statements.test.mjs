@@ -201,6 +201,12 @@ test('the editor cuts a text at each ; outside its strings and comments, and rew
   assert.deepEqual(texts('get a # x; y\n; get b'), ['get a # x; y', 'get b']);
   assert.deepEqual(texts('# only; a comment\n;'), []);
   assert.deepEqual(texts('get a where t = "open\n; get b'), ['get a where t = "open\n; get b']);
+  // A `require`'s reason is a string as any other: its `;`, its doubled
+  // quote and its backslash end nothing.
+  assert.deepEqual(
+    texts("set a {n: 0} where id = 1 require 1 else 'it''s gone; for now'; get b require 0 else \"a \\\" b; c\""),
+    ["set a {n: 0} where id = 1 require 1 else 'it''s gone; for now'", 'get b require 0 else "a \\" b; c"'],
+  );
 });
 
 test('one statement goes to /query with its parameters; several, a list each, to /batch', () => {

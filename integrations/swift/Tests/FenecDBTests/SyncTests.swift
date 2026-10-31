@@ -121,6 +121,41 @@
             try await db.close()
         }
 
+        /// A require's reason goes with its write, and comes back with the
+        /// refusal that puts it back; one the replica finds unmet says it
+        /// at once, nothing sent.
+        @Test func aRequiresReasonComesBackWithItsRefusal() async throws {
+            let s = try await Server("reason")
+            defer { s.stop() }
+            let db = try await Fenec.sync(url: s.url, shapes: [open], path: try scratch("sync-reason"))
+            await db.replica!.ready()
+            let refusals = db.replica!.refusals()
+            let refused = Box<[Refusal]>([])
+            let reader = Task {
+                for await r in refusals { refused.set { $0 + [r] } }
+            }
+            do {
+                try await db.from("tasks").where("key", "zzz").delete(require: 1, reason: "no such task")
+                Issue.record("a require the replica finds unmet was taken")
+            } catch let e as FenecError {
+                #expect(e.code == .unmet && e.reason == "no such task", "\(e)")
+            }
+            // Offline, the server's row goes while the replica still holds
+            // it: the write's count is met here and not there, whichever of
+            // the stream and the write the server meets first.
+            try await offline(db)
+            try await s.run(#"del tasks where key = "a""#)
+            try await db.from("tasks").where("key", "a").update(
+                ["title": "X"] as Value, require: 1, reason: "the task was taken")
+            db.replica!.setOnline(true)
+            try await eventually("the refusal") { !refused.get().isEmpty }
+            #expect(refused.get().first?.status == 412)
+            #expect(refused.get().first?.reason == "the task was taken")
+            reader.cancel()
+            try await eventually("the write put back") { try await titles(db) == ["two"] }
+            try await db.close()
+        }
+
         @Test func aWriteATenantsQuotaRefusesIsPutBackAndTheDeleteBehindItGoes() async throws {
             // A tenant node holding each tenant to the three rows it has.
             let s = try await Server("quota", tenantRows: 3)
@@ -247,11 +282,13 @@
             do {
                 _ = try await db.batch([
                     try tasks.toInsert(["key": "e", "title": "five"] as Value),
-                    try tasks.where("key", "nobody").toDelete(require: 1),
+                    try tasks.where("key", "nobody").toDelete(require: 1, reason: "nobody there"),
                 ])
                 Issue.record("an unmet batch was answered")
             } catch let e as FenecError {
                 #expect(e.code == .unmet && e.status == 412 && e.at == 1 && e.completed == 0)
+                // The statement's own words, which stay put where `at` moves.
+                #expect(e.reason == "nobody there")
             }
             #expect(try await tasks.count() == 4)
 

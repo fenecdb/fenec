@@ -922,12 +922,17 @@ class _Builder:
     def offset(self: Q, n: int) -> Q:
         return self._with(offset=_whole(n, "offset"))
 
-    def require(self: Q, n: int) -> Q:
+    def require(self: Q, n: int, *, reason: str | None = None) -> Q:
         """`require n`: the rows the query answers, after `limit`, must
         number `n`, or it is refused (412, `unmet`) and the batch it is in
         put back, as a write's `require=n` is -- a checkout's guard on a
-        read: `.where(sku=sku, price=price).require(1)`."""
-        return self._with(require=_require_clause(n))
+        read: `.where(sku=sku, price=price).require(1)`.
+
+        `reason` says why in the refusal, `require n else '<reason>'`: the
+        error's `reason`, by which a caller tells "no such coupon" from
+        "insufficient funds" where a batch's `at` moves with every statement
+        added in front -- `.require(1, reason="no such coupon")`."""
+        return self._with(require=_require_clause(n, reason))
 
     # ---------------------------------------------------------- the text
 
@@ -1092,14 +1097,17 @@ class _Builder:
         *,
         if_absent: bool = False,
         require: int | None = None,
+        reason: str | None = None,
         returning: Any = None,
     ) -> tuple[str, list]:
         """The `put` of a document or a list of them, not sent. With
         `if_absent=True`, `put ... if absent`: a document whose id or
         `@unique` value is held is passed over, and not counted. With
         `require=n` on any write, `... require n`: unless it wrote exactly
-        `n` rows it is refused (412) and its batch put back. `returning=True`,
-        or a list of fields, answers the rows written, ids and all."""
+        `n` rows it is refused (412) and its batch put back; `reason=` beside
+        it, `require n else '<reason>'`, is the refusal's `reason`.
+        `returning=True`, or a list of fields, answers the rows written, ids
+        and all."""
         self._assert_plain("insert")
         items = list(docs) if isinstance(docs, (list, tuple)) else [docs]
         if not items:
@@ -1107,7 +1115,7 @@ class _Builder:
         bind = _Binder()
         body = ", ".join(_render_doc(d, bind, "insert") for d in items)
         absent = " if absent" if if_absent is True else ""
-        tail = _returning_clause(returning) + _require_clause(require)
+        tail = _returning_clause(returning) + _require_clause(require, reason)
         many = body if len(items) == 1 else f"[{body}]"
         return f"put {self.collection} {many}{absent}{tail}", bind.params
 
@@ -1117,6 +1125,7 @@ class _Builder:
         *,
         all: bool = False,
         require: int | None = None,
+        reason: str | None = None,
         returning: Any = None,
     ) -> tuple[str, list]:
         """The `set` of the rows the filter names, not sent. `order` and
@@ -1129,7 +1138,7 @@ class _Builder:
         bind = _Binder()
         body = _render_doc(patch, bind, "update")
         where = self._require_filter("update", all, bind)
-        tail = f"{self._pick(returning, bind)}{_require_clause(require)}"
+        tail = f"{self._pick(returning, bind)}{_require_clause(require, reason)}"
         return f"set {self.collection} {body}{where}{tail}", bind.params
 
     def to_upsert(
@@ -1138,6 +1147,7 @@ class _Builder:
         patch: Mapping,
         *,
         require: int | None = None,
+        reason: str | None = None,
         returning: Any = None,
     ) -> tuple[str, list]:
         """The upsert, `put ... if absent else set {patch}`, not sent: a
@@ -1153,12 +1163,17 @@ class _Builder:
         bind = _Binder()
         body = ", ".join(_render_doc(d, bind, "insert") for d in items)
         patched = _render_doc(patch, bind, "update")
-        tail = _returning_clause(returning) + _require_clause(require)
+        tail = _returning_clause(returning) + _require_clause(require, reason)
         many = body if len(items) == 1 else f"[{body}]"
         return f"put {self.collection} {many} if absent else set {patched}{tail}", bind.params
 
     def to_delete(
-        self, *, all: bool = False, require: int | None = None, returning: Any = None
+        self,
+        *,
+        all: bool = False,
+        require: int | None = None,
+        reason: str | None = None,
+        returning: Any = None,
     ) -> tuple[str, list]:
         """The `del` of the rows the filter names, not sent; `order`,
         `limit` and `returning` as `to_update`'s, the rows answered as they
@@ -1166,7 +1181,7 @@ class _Builder:
         self._assert_plain("delete")
         bind = _Binder()
         where = self._require_filter("delete", all, bind)
-        tail = f"{self._pick(returning, bind)}{_require_clause(require)}"
+        tail = f"{self._pick(returning, bind)}{_require_clause(require, reason)}"
         return f"del {self.collection}{where}{tail}", bind.params
 
     # `near`, `offset`, `select` mean something only to a read; dropped from
@@ -1357,6 +1372,7 @@ class Query(_Builder):
         *,
         if_absent: bool = False,
         require: int | None = None,
+        reason: str | None = None,
         returning: Any = None,
     ) -> Any:
         """`put` of a document or a list of them: how many were written --
@@ -1364,10 +1380,15 @@ class Query(_Builder):
         left out, so a lock taken answers 1 and one held 0 -- or with
         `returning` the rows written, ids and all, in the documents' order.
         With `require=n` (on `update` and `delete` too) a write that did not
-        write exactly `n` rows is refused, 412, and its batch put back."""
+        write exactly `n` rows is refused, 412, and its batch put back;
+        `reason="..."` beside it is the `FenecError`'s `reason`, which tells
+        one refusal from another where a batch's `at` moves with every
+        statement added in front."""
         if isinstance(docs, (list, tuple)) and not docs:
             return _written({}, returning)
-        text = self.to_insert(docs, if_absent=if_absent, require=require, returning=returning)
+        text = self.to_insert(
+            docs, if_absent=if_absent, require=require, reason=reason, returning=returning
+        )
         return _written(self._client().query(*text), returning)
 
     def upsert(
@@ -1376,6 +1397,7 @@ class Query(_Builder):
         patch: Mapping,
         *,
         require: int | None = None,
+        reason: str | None = None,
         returning: Any = None,
     ) -> Any:
         """`put ... if absent else set`: each document inserted, or where a
@@ -1384,7 +1406,7 @@ class Query(_Builder):
         rows it set and made together, or with `returning` those rows."""
         if isinstance(docs, (list, tuple)) and not docs:
             return _written({}, returning)
-        text = self.to_upsert(docs, patch, require=require, returning=returning)
+        text = self.to_upsert(docs, patch, require=require, reason=reason, returning=returning)
         return _written(self._client().query(*text), returning)
 
     def update(
@@ -1393,6 +1415,7 @@ class Query(_Builder):
         *,
         all: bool = False,
         require: int | None = None,
+        reason: str | None = None,
         returning: Any = None,
         wait: float | None = None,
     ) -> Any:
@@ -1401,7 +1424,7 @@ class Query(_Builder):
         unless `all=True` or a `limit` bounds it. With `wait`, one that
         writes nothing is held at the server until it can, or that many
         seconds: a claim waiting for a job."""
-        text = self.to_update(patch, all=all, require=require, returning=returning)
+        text = self.to_update(patch, all=all, require=require, reason=reason, returning=returning)
         return _written(self._client().query(*text, **_held(wait)), returning)
 
     def delete(
@@ -1409,13 +1432,14 @@ class Query(_Builder):
         *,
         all: bool = False,
         require: int | None = None,
+        reason: str | None = None,
         returning: Any = None,
         wait: float | None = None,
     ) -> Any:
         """`del` of the rows the filter names: how many it deleted, or with
         `returning` the rows as they were. With no filter it is refused
         unless `all=True` or a `limit` bounds it. `wait` as `update`'s."""
-        text = self.to_delete(all=all, require=require, returning=returning)
+        text = self.to_delete(all=all, require=require, reason=reason, returning=returning)
         return _written(self._client().query(*text, **_held(wait)), returning)
 
 
@@ -1449,10 +1473,11 @@ class AsyncQuery(_Builder):
         *,
         if_absent: bool = False,
         require: int | None = None,
+        reason: str | None = None,
     ) -> int:
         if isinstance(docs, (list, tuple)) and not docs:
             return 0
-        text = self.to_insert(docs, if_absent=if_absent, require=require)
+        text = self.to_insert(docs, if_absent=if_absent, require=require, reason=reason)
         return _affected(await self._client().query(*text))
 
     async def upsert(
@@ -1461,10 +1486,12 @@ class AsyncQuery(_Builder):
         patch: Mapping,
         *,
         require: int | None = None,
+        reason: str | None = None,
     ) -> int:
         if isinstance(docs, (list, tuple)) and not docs:
             return 0
-        return _affected(await self._client().query(*self.to_upsert(docs, patch, require=require)))
+        text = self.to_upsert(docs, patch, require=require, reason=reason)
+        return _affected(await self._client().query(*text))
 
     async def update(
         self,
@@ -1472,10 +1499,11 @@ class AsyncQuery(_Builder):
         *,
         all: bool = False,
         require: int | None = None,
+        reason: str | None = None,
         returning: Any = None,
         wait: float | None = None,
     ) -> Any:
-        text = self.to_update(patch, all=all, require=require, returning=returning)
+        text = self.to_update(patch, all=all, require=require, reason=reason, returning=returning)
         return _written(await self._client().query(*text, **_held(wait)), returning)
 
     async def delete(
@@ -1483,10 +1511,11 @@ class AsyncQuery(_Builder):
         *,
         all: bool = False,
         require: int | None = None,
+        reason: str | None = None,
         returning: Any = None,
         wait: float | None = None,
     ) -> Any:
-        text = self.to_delete(all=all, require=require, returning=returning)
+        text = self.to_delete(all=all, require=require, reason=reason, returning=returning)
         return _written(await self._client().query(*text, **_held(wait)), returning)
 
 
@@ -1501,12 +1530,36 @@ def _held(wait: float | None) -> dict:
 # what the statement guards, a constant of the code, where a page's `limit`
 # and `offset` change with each request and go as parameters. A bool is an
 # int to Python and is refused, as JavaScript's builder refuses `true`.
-def _require_clause(n: Any) -> str:
+def _require_clause(n: Any, reason: Any = None) -> str:
     if n is None:
+        if reason is not None:
+            raise _err("a reason says why a require refused, and goes with one")
         return ""
     if isinstance(n, bool) or not isinstance(n, int) or n < 0:
         raise _err(f"require takes a count of rows, a whole number from 0 (got {n})")
-    return f" require {n}"
+    return f" require {n}{_reason_clause(reason)}"
+
+
+# ` else '<reason>'` for a require's `reason`: written into the text, a
+# quote doubled and a backslash escaped, as FenecQL takes it -- never a
+# parameter, as the count is not: it is the statement's own words, by which
+# a caller tells one refusal from another. 1 to 200 bytes of UTF-8, as the
+# parser holds it: bytes, not characters, so "ş" counts 2; a lone surrogate
+# is no text UTF-8 can send, refused as one rather than a UnicodeEncodeError.
+# No backtick: the refusal quotes its statement with them, and the reason is
+# read back as its words up to the first "(`".
+def _reason_clause(reason: Any) -> str:
+    if reason is None:
+        return ""
+    try:
+        size = len(reason.encode("utf-8")) if isinstance(reason, str) else 0
+    except UnicodeEncodeError:
+        size = 0
+    if not 1 <= size <= 200:
+        raise _err("a require's reason is a text of 1 to 200 bytes")
+    if "`" in reason:
+        raise _err("a require's reason holds no backtick")
+    return " else '" + reason.replace("\\", "\\\\").replace("'", "''") + "'"
 
 
 def collection(name: str) -> Query:

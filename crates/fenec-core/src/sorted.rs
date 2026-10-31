@@ -650,6 +650,50 @@ impl SortedIndex {
         }
     }
 
+    /// What `field <op> v` is of every value a field of type `ty` holds --
+    /// `null` aside, which lies in no range -- where `v` is of a kind
+    /// `cmp_value` orders the field's against by kind alone: `Some(true)`
+    /// of every one, `Some(false)` of none; `None` where the comparison
+    /// reads each value ([`Self::bound`]'s key, or row by row), and over a
+    /// json field, whose values are of every kind. A range takes the first
+    /// as no bound and the second as none, and stays exact: the edges a
+    /// scoped token's ordered rule is held to its claim's kind by
+    /// (`level <= 5 and level > true`) were left to be evaluated, and a
+    /// count the index answered read every row of its range, 216 us -> 1
+    /// ms over 200 000 rows.
+    pub fn by_kind(ty: &DataType, op: crate::query::CmpOp, v: &Value) -> Option<bool> {
+        use crate::query::CmpOp::*;
+        use Ordering::{Greater, Less};
+        let number = matches!(ty, DataType::Int | DataType::Float | DataType::Timestamp);
+        let high = |v: &Value| {
+            matches!(
+                v,
+                Value::Vector(_) | Value::List(_) | Value::Sparse(..) | Value::Object(_)
+            )
+        };
+        // Where the field's values rank against `v`'s, all alike.
+        let rank = match (ty, v) {
+            (_, Value::Bool(_)) if number || *ty == DataType::Text => Greater,
+            (DataType::Int | DataType::Float, Value::Text(_) | Value::Bytes(_)) => Less,
+            // A time compares with a text by reading it: one that does not
+            // read is above every time.
+            (DataType::Timestamp, Value::Text(t)) if crate::time::parse(t).is_err() => Less,
+            (DataType::Timestamp, Value::Bytes(_)) => Less,
+            (_, v) if number && high(v) => Less,
+            (DataType::Text, Value::Int(_) | Value::Float(_)) => Greater,
+            // A text against bytes compares bytes: no UTF-8 holds `0xFF`.
+            (DataType::Text, Value::Bytes(b)) if b.first() == Some(&0xFF) => Less,
+            (DataType::Text, v) if high(v) => Less,
+            _ => return None,
+        };
+        Some(match op {
+            Eq => false,
+            Ne => true,
+            Lt | Le => rank == Less,
+            Gt | Ge => rank == Greater,
+        })
+    }
+
     /// Every id in the range, in key order, and the `NaN` rows when every
     /// comparison was inclusive. `None` once more than `cap` ids turn up: a
     /// range that wide is cheaper to scan than to collect and sort.
@@ -1073,6 +1117,17 @@ impl Range {
         }
     }
 
+    /// Takes every row of a field of type `ty` out: a comparison true of
+    /// none ([`SortedIndex::by_kind`]). Below the least key of the field's
+    /// kind, whose `<` also keeps the `NaN` rows out.
+    pub fn close(&mut self, ty: &DataType) {
+        let least = match ty {
+            DataType::Text => Key::Text("".into()),
+            _ => Key::Num(0),
+        };
+        self.narrow(crate::query::CmpOp::Lt, least);
+    }
+
     /// Narrows the range by one comparison `field <op> key`.
     pub fn narrow(&mut self, op: crate::query::CmpOp, key: Key) {
         use crate::query::CmpOp::*;
@@ -1144,6 +1199,92 @@ pub use crate::off::SortedIndex;
 #[cfg(all(test, feature = "sorted"))]
 mod tests {
     use super::*;
+
+    /// What `by_kind` says of a field's values is what `compare` says of
+    /// each of them, for every value of every other kind and every
+    /// comparison; and it says nothing where `compare` reads the value.
+    #[test]
+    fn by_kind_is_what_the_comparison_says_of_every_value() {
+        use crate::query::CmpOp::{self, *};
+        let samples: [(DataType, Vec<Value>); 4] = [
+            (
+                DataType::Int,
+                vec![
+                    Value::Int(i64::MIN),
+                    Value::Int(-1),
+                    Value::Int(0),
+                    Value::Int(i64::MAX),
+                ],
+            ),
+            (
+                DataType::Float,
+                [f64::NEG_INFINITY, -0.0, 0.5, f64::MAX, f64::NAN]
+                    .map(Value::Float)
+                    .to_vec(),
+            ),
+            (
+                DataType::Timestamp,
+                vec![
+                    Value::Timestamp(i64::MIN),
+                    Value::Timestamp(0),
+                    Value::Timestamp(i64::MAX),
+                ],
+            ),
+            (
+                DataType::Text,
+                ["", "a", "\u{7f}", "\u{10ffff}\u{10ffff}", "2026-01-01"]
+                    .map(|t| Value::Text(t.into()))
+                    .to_vec(),
+            ),
+        ];
+        let literals = [
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Int(5),
+            Value::Float(0.5),
+            Value::Timestamp(1),
+            Value::Text(String::new()),
+            Value::Text("top".into()),
+            Value::Text("2026-01-01".into()),
+            Value::Bytes(vec![0xFF]),
+            Value::Bytes(vec![0x00]),
+            Value::Vector(vec![]),
+            Value::List(vec![]),
+            Value::Object(vec![]),
+        ];
+        let bytes = || TextOrder::BYTES;
+        let mut said = 0;
+        for (ty, values) in &samples {
+            for lit in &literals {
+                for op in [Eq, Ne, Lt, Le, Gt, Ge] {
+                    let Some(b) = SortedIndex::by_kind(ty, op, lit) else {
+                        continue;
+                    };
+                    said += 1;
+                    for v in values {
+                        let is = crate::query::compare(op, v, lit, &bytes);
+                        assert_eq!(is, b, "{ty:?} {v:?} {op:?} {lit:?}");
+                    }
+                }
+            }
+        }
+        assert!(said > 100, "{said}");
+        // A comparison that reads the value: none.
+        let reads: [(DataType, CmpOp, Value); 5] = [
+            (DataType::Int, Lt, Value::Float(0.5)),
+            (DataType::Timestamp, Le, Value::Text("2026-01-01".into())),
+            (DataType::Text, Ge, Value::Text("b".into())),
+            (DataType::Text, Lt, Value::Bytes(vec![0x61])),
+            (DataType::Json, Gt, Value::Bool(true)),
+        ];
+        for (ty, op, v) in reads {
+            assert_eq!(
+                SortedIndex::by_kind(&ty, op, &v),
+                None,
+                "{ty:?} {op:?} {v:?}"
+            );
+        }
+    }
 
     #[test]
     fn keys_keep_the_order_values_have() {

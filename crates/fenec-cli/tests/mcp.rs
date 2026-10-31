@@ -91,7 +91,9 @@ fn a_session_over_a_file_holds_its_lock_and_leaves_its_writes_on_disk() {
         .unwrap();
     assert_eq!(second.status.code(), Some(1));
     let why = String::from_utf8_lossy(&second.stderr);
-    assert!(why.contains("open already"), "{why}");
+    // Named: the session's own process, the shell's binary.
+    let holder = format!("is open in another process (fenec, pid {})", s.child.id());
+    assert!(why.contains(&holder), "{why}");
     // ... but one that only reads, and takes no lock, is let in.
     let mut ro = Session::start(&["--file", p, "--read-only", "--memory", "memories"], &[]);
     let a = ro.ask(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"recall","arguments":{"text":"build"}}}"#);

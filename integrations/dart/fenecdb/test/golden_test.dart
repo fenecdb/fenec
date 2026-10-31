@@ -107,7 +107,7 @@ Query step(Query q, String op, List a) => switch ((op, a.length)) {
       ('order', _) => q.order(a[0] as String, a.length > 1 ? a[1] as String : 'asc', opt(a, 2, 'collate') as String?),
       ('limit', _) => q.limit(a[0] as int),
       ('offset', _) => q.offset(a[0] as int),
-      ('require', _) => q.require(a[0] as int),
+      ('require', _) => q.require(a[0] as int, reason: opt(a, 1, 'reason') as String?),
       ('lookup', _) => q.lookup(a[0] as String,
           // A name, or a list of them: a key over several fields too.
           on: switch (opt(a, 1, 'on')) { final List l => l.cast<String>(), final v => v },
@@ -157,6 +157,7 @@ Future<(String?, List<Object?>?, String?)> run(List steps) async {
       bool all(int at) => opt(a, at, 'all') as bool? ?? false;
       bool absent() => opt(a, 1, 'ifAbsent') as bool? ?? false;
       int? require(int at) => opt(a, at, 'require') as int?;
+      String? reason(int at) => opt(a, at, 'reason') as String?;
       // JavaScript's `returning: true` is every field, `*` here.
       List<String>? returning(int at) => switch (opt(a, at, 'returning')) {
             null || false => null,
@@ -166,10 +167,13 @@ Future<(String?, List<Object?>?, String?)> run(List steps) async {
           };
       final made = switch (op) {
         'toFenecQL' => q.toFenecQL(),
-        'toInsert' => q.toInsert(value(a[0])!, ifAbsent: absent(), require: require(1), returning: returning(1)),
-        'toUpdate' => q.toUpdate(value(a[0])!, all: all(1), require: require(1), returning: returning(1)),
-        'toUpsert' => q.toUpsert(value(a[0])!, value(a[1])!, require: require(2), returning: returning(2)),
-        'toDelete' => q.toDelete(all: all(0), require: require(0), returning: returning(0)),
+        'toInsert' =>
+          q.toInsert(value(a[0])!, ifAbsent: absent(), require: require(1), reason: reason(1), returning: returning(1)),
+        'toUpdate' =>
+          q.toUpdate(value(a[0])!, all: all(1), require: require(1), reason: reason(1), returning: returning(1)),
+        'toUpsert' =>
+          q.toUpsert(value(a[0])!, value(a[1])!, require: require(2), reason: reason(2), returning: returning(2)),
+        'toDelete' => q.toDelete(all: all(0), require: require(0), reason: reason(0), returning: returning(0)),
         _ => null,
       };
       if (made != null) return (made.text, made.params, null);
@@ -179,17 +183,20 @@ Future<(String?, List<Object?>?, String?)> run(List steps) async {
         'count' => q.count(),
         'explain' => q.explain(),
         'insert' => returning(1) == null
-            ? q.insert(value(a[0])!, ifAbsent: absent(), require: require(1))
-            : q.insertReturning(value(a[0])!, returning: returning(1)!, ifAbsent: absent(), require: require(1)),
+            ? q.insert(value(a[0])!, ifAbsent: absent(), require: require(1), reason: reason(1))
+            : q.insertReturning(value(a[0])!,
+                returning: returning(1)!, ifAbsent: absent(), require: require(1), reason: reason(1)),
         'update' => returning(1) == null
-            ? q.update(value(a[0])!, all: all(1), require: require(1))
-            : q.updateReturning(value(a[0])!, returning: returning(1)!, all: all(1), require: require(1)),
+            ? q.update(value(a[0])!, all: all(1), require: require(1), reason: reason(1))
+            : q.updateReturning(value(a[0])!,
+                returning: returning(1)!, all: all(1), require: require(1), reason: reason(1)),
         'upsert' => returning(2) == null
-            ? q.upsert(value(a[0])!, value(a[1])!, require: require(2))
-            : q.upsertReturning(value(a[0])!, value(a[1])!, returning: returning(2)!, require: require(2)),
+            ? q.upsert(value(a[0])!, value(a[1])!, require: require(2), reason: reason(2))
+            : q.upsertReturning(value(a[0])!, value(a[1])!,
+                returning: returning(2)!, require: require(2), reason: reason(2)),
         'delete' => returning(0) == null
-            ? q.delete(all: all(0), require: require(0))
-            : q.deleteReturning(returning: returning(0)!, all: all(0), require: require(0)),
+            ? q.delete(all: all(0), require: require(0), reason: reason(0))
+            : q.deleteReturning(returning: returning(0)!, all: all(0), require: require(0), reason: reason(0)),
         _ => null,
       };
       if (ran != null) {

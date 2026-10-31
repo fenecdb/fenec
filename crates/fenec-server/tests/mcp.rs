@@ -11,7 +11,10 @@ fn a_second_process_over_a_served_file_is_refused() {
     let first = start(&["--file", p, "--mcp"]);
     let second = try_start(&["--file", p]);
     let log = second.err().expect("a second server over the file");
-    assert!(log.contains("open already"), "{log}");
+    // The words the desktop app reads, then the holder, named.
+    assert!(log.contains("it is open already"), "{log}");
+    let holder = format!("(held by fenec-server, pid {})", first.child.id());
+    assert!(log.contains(&holder), "{log}");
     // The lock is the native library's and `fenec mcp`'s: this process
     // takes it no more than the server lets it.
     assert!(matches!(

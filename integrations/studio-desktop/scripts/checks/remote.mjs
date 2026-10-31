@@ -107,19 +107,20 @@ n = lines().length;
 assert.equal((await open(bad)).ok, true, 'opens with the new token');
 await waitStudio(`remote:${bad}`, n);
 
-step('a saved server pointed at another address, with no token typed, is refused: its token is not sent to a new place');
+step('a saved server pointed at another address, with no token typed, forgets its token: it is not sent to a new place');
 const THIRD = data('third', 10);
 const third = await startServer(['--file', THIRD, '--studio', '--http', '127.0.0.1:0'], { FENEC_HTTP_TOKEN: 'third-token' });
 const mover = await save('mover', remote.origin, TOKEN);
 n = lines().length;
 cmd({ cmd: 'addconn', id: mover, name: 'mover', url: third.origin, token: '', tenant: '' });
-const noMove = await waitFor((l, i) => i >= n && l.what === 'conn-refused', 10000, 'the change refused');
-assert.match(noMove.message, /not sent to another address/);
-assert.equal(state().connections.find((c) => c.id === mover).url, remote.origin, 'the connection is as it was');
-assert.ok(keychainHas(mover), 'and so is its token');
+const moving = await waitFor((l, i) => i >= n && l.what === 'conn-added' && l.name === 'mover', 10000, 'the change taken');
+assert.equal(moving.forgotToken, true, 'said to have forgotten the token');
+assert.equal(state().connections.find((c) => c.id === mover).url, third.origin, 'the connection names the new address');
+await until(() => !keychainHas(mover), 10000, 'the old address\'s token gone from the Keychain');
 n = lines().length;
-cmd({ cmd: 'secret', id: mover });
-assert.equal((await waitFor((l, i) => i >= n && l.what === 'secret', 10000, 'secret')).token, TOKEN, 'unchanged');
+assert.equal((await open(mover)).ok, false, 'no token for the new address');
+await waitNotice('This server asks for a token', 10000, n);
+assert.ok(!(await windowsOpen()).includes(`remote:${mover}`), 'and no window on it');
 // With a token typed for the new address, it goes.
 n = lines().length;
 cmd({ cmd: 'addconn', id: mover, name: 'mover', url: third.origin, token: 'third-token', tenant: '' });
@@ -133,8 +134,16 @@ assert.equal(moved2.origin, third.origin, 'saved for the new address');
 // The same address with the token left blank is an edit of the name: the token stays.
 n = lines().length;
 cmd({ cmd: 'addconn', id: mover, name: 'mover renamed', url: third.origin, token: '', tenant: '' });
-await waitFor((l, i) => i >= n && l.what === 'conn-added' && l.name === 'mover renamed', 10000, 'the rename taken');
+const renamed = await waitFor((l, i) => i >= n && l.what === 'conn-added' && l.name === 'mover renamed', 10000, 'the rename taken');
+assert.equal(renamed.forgotToken, false);
 assert.ok(keychainHas(mover));
+// Check now: the look an open takes, with no window, said in words with its time.
+n = lines().length;
+cmd({ cmd: 'check-conn', id: mover });
+const checked = await waitFor((l, i) => i >= n && l.what === 'check-conn-result' && l.id === mover, 15000, 'the check');
+assert.equal(checked.ok, true, checked.text);
+assert.match(checked.text, /^Answered in \d+ ms\. Its studio is on; the token is accepted\.$/);
+assert.ok(!(await windowsOpen()).includes(`remote:${mover}`), 'a check opens no window');
 
 step('a token sealed for another address is none for this one: it is not sent, and the open says a token is needed');
 const stale = await save('stale', remote.origin, TOKEN);

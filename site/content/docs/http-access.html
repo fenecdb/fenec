@@ -283,11 +283,33 @@ orders  update(status, delivered_at, run_at, claim)  where courier = $jwt.sub an
     lists, <code>room in [$jwt.rooms, "lobby"]</code> those and one more,
     and a text claim there is a list of one. It holds reads, writes
     (<code>WITH CHECK</code>: a post into a room the list does not hold is
-    403) and subscriptions alike. A token whose list claim holds more than
+    403) and subscriptions alike. A list holding a <code>null</code>, a
+    <code>""</code>, a list or an object is no claim, and the rule naming
+    it does not apply; <code>[]</code> is a list of none. A token whose list claim holds more than
     1 000 values is refused (401). A <code>role</code> claim may be a list
     too, and a rule <code>for</code> a role applies when the list holds
     it. Membership kept in another collection is a rule's <code>in (get
     …)</code> (below).</li>
+  <li id="claim-names"><b>Claim names.</b> <code>$jwt.&lt;name&gt;</code>
+    takes letters, digits and <code>_</code>; a claim named with anything
+    else goes in double quotes, as its provider names it:
+<pre data-lang="text">teams  read   where team in $jwt."cognito:groups"
+posts  write  where author = $jwt."https://example.com/user_id"
+</pre>
+    Inside the quotes a <code>.</code>, a <code>:</code>, a <code>/</code>
+    or a <code>#</code> is part of the name, never a path or a comment, and
+    <code>$jwt."sub"</code> is <code>$jwt.sub</code>. An unquoted name
+    running into <code>-</code> or <code>:</code>
+    (<code>$jwt.x-hasura-user-id</code>) stops the server at startup, saying
+    to quote it: it would have been read as a subtraction. A claim is read
+    from the top of the token alone: <code>$jwt.app_metadata.role</code>
+    stops the server at startup too. Providers keep what a user may edit of
+    themselves in nested objects (Supabase's and Auth0's
+    <code>user_metadata</code>) beside what only the app may
+    (<code>app_metadata</code>), and a path into the wrong one would let a
+    user write their own grant; have the provider put the claim a rule
+    reads at the top of the token, where it was told to sign it. A
+    <code>#</code> outside quotes starts a comment.</li>
   <li><b>Rules that read another collection.</b> A rule's filter takes
     <code>in (get …)</code>, its claims bound inside as anywhere else:
 <pre data-lang="text"># a customer follows the courier carrying their order
@@ -359,7 +381,7 @@ messages   read,insert  where room in (get members select room where user = $jwt
     fields it shows, a row written again that shows what it showed is not
     sent: a write to a field the subscriber does not see would tell it
     when.</li>
-  <li><b>Tokens</b> are HS256, or RS256 with <code>--jwt-keys</code> (below).
+  <li><b>Tokens</b> are HS256, or RS256 and ES256 with <code>--jwt-keys</code> (below).
     The algorithm is the key's, not the token's, so <code>alg: none</code> is
     refused. Every token is checked against <code>exp</code> and <code>nbf</code>,
     and one with no <code>exp</code> is refused (401): it would be good for
@@ -367,10 +389,44 @@ messages   read,insert  where room in (get members select room where user = $jwt
     key. <code>--jwt-require-exp off</code> takes such tokens again, and
     <code>--jwt-max-age &lt;s&gt;</code> also refuses one whose
     <code>exp</code> lies further ahead than that. <code>--mint-token</code>
-    gives claims naming no <code>exp</code> one an hour away. A rule with <code>for</code> applies
-    to tokens whose <code>role</code> claim names that role, or lists it; rules on one
-    collection widen each other; a rule whose filter names a claim the token
-    lacks does not apply. A subscription is checked when it opens, and
+    gives claims naming no <code>exp</code> one an hour away, or
+    <code>--jwt-max-age</code> away where that is sooner. A server
+    told an issuer or an audience takes only the tokens issued for it
+    (<a href="#whom-a-token-is-for">Whom a token is for</a>). A rule with
+    <code>for</code> applies to tokens whose role claim names that role, or
+    lists it: <code>role</code>, or the claim
+    <code>--jwt-role-claim &lt;name&gt;</code> names, such as Cognito's
+    <code>cognito:groups</code>. A role is the word after the rule's last
+    <code>for</code>, so <code>for platform-admins</code> is that role;
+    one of more than a word goes in double quotes, <code>for "Account
+    Admin"</code>. <code>/_whoami</code> answers the roles the server read,
+    which the studio shows. Rules on one collection widen each other;
+    a rule whose filter names a claim the token lacks does not apply, and
+    grants nothing. Nor does one naming a claim
+    the token holds as <code>null</code>, as <code>""</code>, as an object,
+    or as a list where the rule reads one value: <code>"sub": null</code>
+    is no subject, and <code>owner = $jwt.sub</code> does not become
+    <code>owner = null</code>, which every row with no owner matches. A
+    number and a bool are values like any other. A claim a rule compares
+    by order (<code>level &lt;= $jwt.clearance</code>) admits only values
+    of its own kind, under a <code>not</code> too: given
+    <code>"top"</code>, no number is below it. A row with no value answers
+    as the rule written out: <code>not (level &gt; $jwt.c)</code> admits
+    the rows with no <code>level</code>. A text claim that reads as a
+    time, such as <code>"2026-07-01T00:00:00Z"</code>, orders a time field
+    by time (from year 0) and a text field as text. A rule reading another
+    collection through <code>not in (get ...)</code> builds its list as the
+    other collection's rules allow under that <code>not</code>, so a deny
+    list holds out what it held out before. A claim inside a call or
+    arithmetic (<code>lower($jwt.email)</code>, <code>$jwt.iat *
+    1000</code>) and an ordered comparison with a claim used as a value
+    stop the server at startup: mint the claim as the rule compares it. A
+    claim as the pattern of <code>like</code>, <code>ilike</code> or
+    <code>not like</code> (<code>path like $jwt.home</code>) is taken, as
+    is its <code>escape</code>. A policy names its
+    parameters by claim alone: one writing <code>$1</code> or
+    <code>$3</code> of its own stops the server at startup too. A
+    subscription is checked when it opens, and
     ended at its token's <code>exp</code> with
     <code>event: error</code> and
     <code>{"error":"the token has expired","status":401}</code>: the
@@ -392,9 +448,11 @@ messages   read,insert  where room in (get members select room where user = $jwt
   <li><b>Tenants.</b> On a <code>--dir</code> node a token reaches
     <code>/t/&lt;t&gt;/</code> only when its <code>tenant</code> claim names
     <code>&lt;t&gt;</code> (a text, or a list holding it), and is refused
-    with 403 under every other tenant's prefix; one naming no tenant is
+    with 403 under every other tenant's prefix; one without the claim is
     refused there unless the node runs with
-    <code>--jwt-unbound-tenants</code> (<a href="/docs/sharding-reference#tokens">Tokens</a>).</li>
+    <code>--jwt-unbound-tenants</code>, and one holding it as
+    <code>null</code>, <code>""</code> or anything else naming no tenant is
+    refused even then (<a href="/docs/sharding-reference#tokens">Tokens</a>).</li>
 </ul>
 
 <p>The server's own <code>--http-token</code> keeps full access alongside.</p>
@@ -426,8 +484,16 @@ fenec-server --file data.fenec --http 0.0.0.0:8080 --jwt-keys jwks.json --policy
 place of a secret. An <code>oct</code> key verifies HS256 tokens and needs at
 least 32 bytes. An <code>RSA</code> key of at least 2048 bits verifies RS256
 tokens, which is what Auth0, Clerk, Firebase and most identity providers
-sign with. A token issued by one of them is taken with its public keys
-alone. Keys of any other kind (EC, OKP) are skipped. A key is only used for
+sign with. An <code>EC</code> key on the P-256 curve verifies ES256 tokens
+(ECDSA with SHA-256), as Supabase Auth's EC signing keys sign them; its
+<code>x</code> and <code>y</code> must be a point of the curve, or the
+whole file is refused, as it is for an RSA key under 2048 bits. A file
+whose malformed P-256 key an earlier version skipped therefore no longer
+loads: at the start the server refuses it, and on a reload it keeps the
+keys it read last. A token one of these providers issues is taken with
+its public keys alone. Keys of any other kind (<code>OKP</code>, an <code>EC</code>
+key on P-384 or P-521) are skipped, and a token signed with EdDSA, PS256,
+ES384, ES512, RS384 or RS512 is refused (401). A key is only used for
 its own algorithm: an RSA modulus is public, and taken as an HS256 secret it
 would let anyone sign. A token that names a <code>kid</code> is checked
 against that key only. A token without one is checked against each key of
@@ -450,6 +516,108 @@ last and logs why. <code>--mint-token</code> signs with the first
 <p>A token that has already been verified is kept by its text, so that
 later requests with it skip the check. The server keeps up to 4 096 tokens,
 and the kept tokens are dropped whenever the keys change. Checking a token
-from that cache takes 0.3 µs for HS256 and 0.5 µs for RS256. Checking a new one takes 2.9 µs for HS256 and
-38 µs for RS256 over 2048 bits (Apple M1).</p>
+from that cache takes 0.3 to 0.5 µs, whatever its algorithm. Checking a new
+one takes 2.9 µs for HS256, 38 µs for RS256 over 2048 bits and 145 µs for
+ES256 (Apple M1, <code>make jwt-bench</code>). A client sends the same token
+for as long as it lives, so each token pays that once on each server.</p>
 </details>
+
+<h3 id="whom-a-token-is-for">Whom a token is for</h3>
+
+<p>A provider's keys sign every token it issues, for every app it signs
+users in to: an Auth0 tenant's, a Cognito user pool's, a Cloudflare Access
+team's. Firebase signs every project there is with one set of keys. A good
+signature says who issued a token, not that it was issued for this
+database. Given the issuer and the audience, the server takes only the
+tokens issued for it:</p>
+
+<pre data-lang="bash">fenec-server --file data.fenec --http 0.0.0.0:8080 --jwt-keys jwks.json --policy policy.txt \
+         --jwt-issuer https://acme.us.auth0.com/ --jwt-audience https://api.example.com
+</pre>
+
+<ul>
+  <li><b><code>--jwt-issuer &lt;iss&gt;</code></b>: the token's
+    <code>iss</code> must be one of those given, compared as written. Copy
+    it from the <code>issuer</code> of the provider's
+    <code>/.well-known/openid-configuration</code>: Auth0's ends in
+    <code>/</code>, Cloudflare Access's does not.</li>
+  <li><b><code>--jwt-audience &lt;aud&gt;</code></b>: the token's
+    <code>aud</code>, a text or a list, must hold one of those given; a
+    token with no <code>aud</code> is refused.</li>
+  <li><b><code>--jwt-client &lt;id&gt;</code></b>: the token's
+    <code>azp</code> must be one of those given or, where it names no
+    <code>azp</code>, its <code>client_id</code>. Cognito's access tokens
+    carry the app client's id in <code>client_id</code>, and an
+    <code>aud</code> only when the app asked for a token bound to a
+    resource server. Clerk's session tokens name the page's origin in
+    <code>azp</code>, and leave it out where the request carried no
+    <code>Origin</code>: under <code>--jwt-client</code> such a token is
+    refused. A provider naming its client otherwise, such as Okta's
+    <code>cid</code>, is pinned in a rule, <code>where owner = $jwt.sub and
+    $jwt.cid = "0oa1example"</code>, which applies to no token lacking the
+    claim or naming another.</li>
+</ul>
+
+<p>Each flag is repeatable, any one of its values taken, and each is asked
+of every token on every route — <code>/query</code>, REST,
+<code>/batch</code>, a subscription, MCP, <code>/_whoami</code> — after
+its signature and before its rules. The lists are independent, not pairs:
+given two issuers and two audiences, the server takes either issuer with
+either audience. Where each provider must keep to its own, pin the pair in
+the rules: <code>and $jwt.iss = "https://a.example/" and "api-a" in
+$jwt.aud</code>. A token refused is answered 401 naming the check,
+<code>{"error":"the token names no audience (aud) this server
+takes"}</code>, never the value the token holds, and the audit log's
+<code>refused</code> line names it in its <code>reason</code>.
+<code>--mint-token</code> stamps the first issuer, audience and client given
+on claims naming none, so the server takes the tokens it mints. Told none
+of them, the server takes any token its keys sign, as it always did; with
+<code>--jwt-keys</code> it says so on stderr as it starts. Every
+<code>--jwt-*</code> flag but the keys' is refused at the start where no
+<code>--jwt-secret</code> or <code>--jwt-keys</code> is given. Behind
+<code>fenec-shard</code> the nodes check them; the router holds no keys and
+forwards the token as it came.</p>
+
+<div class="note trap">
+  <p><b>Where the issuer and the audience are required, and where they are
+  not enough.</b> Firebase signs every project's ID tokens with the same
+  keys: without <code>--jwt-issuer
+  https://securetoken.google.com/&lt;project id&gt;</code> and
+  <code>--jwt-audience &lt;project id&gt;</code>, a token from anyone's
+  project, whose claims its owner writes, is taken here. Some issuers let
+  whoever asks for a token name its audience: Google's identity tokens
+  (<code>https://accounts.google.com</code>, any account's, through
+  <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/print-identity-token"><code>gcloud
+  auth print-identity-token --audiences</code></a>), GitHub Actions' tokens
+  (<code>https://token.actions.githubusercontent.com</code>, any workflow's,
+  through <a href="https://docs.github.com/en/actions/reference/security/oidc"><code>core.getIDToken(audience)</code></a>)
+  and a Kubernetes cluster's
+  <a href="https://kubernetes.io/docs/concepts/storage/projected-volumes/">projected
+  service account tokens</a>, whose pod names the audience. There the issuer
+  and the audience say only that some account of that issuer asked for a
+  token for this database: the rules must pin whose, by <code>sub</code>,
+  <code>azp</code> or <code>repository</code>:
+  <code>deploys write where $jwt.repository = "acme/deploy"</code>.</p>
+</div>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Provider</th><th><code>--jwt-issuer</code></th><th>and</th></tr></thead>
+<tbody>
+<tr><td><a href="https://auth0.com/docs/secure/tokens/access-tokens/validate-access-tokens">Auth0</a></td><td><code>https://&lt;your Auth0 domain&gt;/</code>, the tenant's or its custom domain, its <code>/</code> and all</td><td><code>--jwt-audience</code> the API's identifier, which an access token's <code>aud</code> lists; <code>--jwt-client</code> the application's client id</td></tr>
+<tr><td><a href="https://clerk.com/docs/guides/sessions/session-tokens">Clerk</a></td><td>the Frontend API URL: <code>https://clerk.&lt;your domain&gt;</code> in production, <code>https://&lt;slug&gt;.clerk.accounts.dev</code> in development</td><td><code>--jwt-client</code> each origin the app is served from: a session token names it in <code>azp</code>, where the request had an <code>Origin</code>, and carries no <code>aud</code></td></tr>
+<tr><td><a href="https://supabase.com/docs/guides/auth/jwt-fields">Supabase Auth</a></td><td><code>https://&lt;project ref&gt;.supabase.co/auth/v1</code></td><td><code>--jwt-audience authenticated</code>, every project's alike: the issuer is what sets projects apart. An <a href="https://supabase.com/docs/guides/auth/auth-anonymous">anonymous sign-in</a> is <code>authenticated</code> too, with <code>is_anonymous</code> true: to keep those out, each rule adds <code>and $jwt.is_anonymous = false</code></td></tr>
+<tr><td><a href="https://docs.aws.amazon.com/cognito/latest/developerguide/amazon-cognito-user-pools-using-tokens-verifying-a-jwt.html">Amazon Cognito</a></td><td><code>https://cognito-idp.&lt;region&gt;.amazonaws.com/&lt;user pool id&gt;</code>, or on the <a href="https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_IssuerConfigurationType.html">updated issuer</a> <code>https://issuer-cognito-idp.&lt;region&gt;.amazonaws.com/&lt;user pool id&gt;</code></td><td>Access tokens: <code>--jwt-client</code> the app client's id (or, for a token bound to a resource server, <code>--jwt-audience</code> its identifier). ID tokens: <code>--jwt-audience</code> the app client's id</td></tr>
+<tr><td><a href="https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/">Cloudflare Access</a></td><td><code>https://&lt;team&gt;.cloudflareaccess.com</code></td><td><code>--jwt-audience</code> the application's AUD tag: the team's keys sign for every one of its applications</td></tr>
+<tr><td><a href="https://firebase.google.com/docs/auth/admin/verify-id-tokens">Firebase Auth</a></td><td><code>https://securetoken.google.com/&lt;project id&gt;</code>, required</td><td><code>--jwt-audience</code> the project id, required: the keys are every project's</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>A provider that names a user's roles in a claim of its own is read with
+<code>--jwt-role-claim</code>: with <code>--jwt-role-claim
+cognito:groups</code> a rule <code>for editors</code> applies to a token
+whose <code>cognito:groups</code> lists <code>editors</code>, and
+<code>role</code> is then a claim like any other. Its other claims go in a
+policy by their names, quoted where they hold more than letters, digits and
+<code>_</code> (<a href="#claim-names">Claim names</a>).</p>

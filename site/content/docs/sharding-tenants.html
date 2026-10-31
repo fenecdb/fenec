@@ -173,8 +173,12 @@ curl -X POST localhost:8090/_shard/query -H 'Authorization: Bearer root' \
     (403) and writes nothing.</li>
   <li><b>Never cut.</b> A tenant that fails or times out fails the query,
     named; <code>"partial": true</code> answers the others' rows with the
-    failures listed. The rows and bytes gathered are bounded, and a query
-    past either is refused (413).</li>
+    failures listed, each with its <code>status</code> and
+    <code>error</code>, and the <code>reason</code> a tenant's
+    <code>require N else '…'</code> gave
+    (<a href="/docs/fenecql-writing#require-reason">A reason for the refusal</a>).
+    The rows and bytes gathered are bounded, and a query past either is
+    refused (413).</li>
   <li><b>Each answer is its tenant's own.</b> Tenants are read at different
     moments: there is no one moment across them.</li>
 </ul>

@@ -35,6 +35,55 @@ transfer waiting, 18 waits past 50 ms -> 2), and a long one is pinned now
 macOS and Linux alike, so a read under the lock beside a busy writer waits
 as before.
 
+**What takes `<file>.lock`.** A process that opens a file to write it, or
+renames a database file into its place, takes `<file>.lock` first
+(`fenec_abi::lock::hold`: a record lock, the process's, and a list of this
+process's lock files, [native-and-sync.md](native-and-sync.md#the-native-library)),
+and is refused while another holds it: `fenec-server --file`, the native
+library, `fenec mcp --file`, and the shell -- `fenec <file>` typed, `-c`,
+piped or a script, a read too since the lock is taken at the open --
+`fenec import` into a file (one-shot and `--follow`), `fenec backup` into a
+file and `fenec restore` into one (a rename over the file, its sync log
+removed first, which a server with it open would have gone on writing past
+and lost), and `.save <path>`, which writes beside the file and renames
+over it, as a mapped file is replaced, and is refused over the session's
+own file. The shell took none up to 0.1.12: beside a `fenec-server --file
+x.fenec`, `fenec x.fenec -c 'put ...'` printed `1 records` and exited 0;
+the server, which reads its file only at its open, never saw the row, and
+its next writes were appended at its own end of the file, over the
+shell's. A shell write of 300 bytes followed by two short server writes
+left the tail of the shell's body behind them, and the next open, the
+shell's or a server's, refused the file (`corrupt: unknown record kind
+120`, the `x`s read as a kind): one write lost, then the file. Since the
+holder writes its id and program into the lock file as it takes the lock,
+a refusal names it -- `x.fenec is open in another process (fenec-server,
+pid 4242)` -- from the system's `F_GETLK` and that line, the line taken
+only where its id is the one the system names (under a holder of an older
+release, which writes none, the line an earlier holder left would name the
+wrong program), and the file is opened to ask only once it is known not to
+be this process's own, since closing a descriptor of it lets this
+process's lock go. The lock, the naming, `--read-only` and `.save`'s
+rename are 10.2 KB of code in the smallest `fenec` (`make small`, 16.7 KB
+of file on arm64 macOS, whose pages are 16 KB). A tool that only looks takes none and
+writes nothing: `fenec --read-only`, `fenec mcp --read-only` and `fenec
+types` open with `fs::open_read_only`, which maps the file at its length
+at the open, passes a record a server is in the middle of appending over
+as a torn tail, cuts nothing and plays no sync log -- the file only grows
+and is replaced only by rename, so the bytes it read are never written
+under it; it reads the file as it stood at the open. The shell refuses a
+write there before the engine sees it: handed over, the read-only sink's
+refusal was a storage error, after which every write said so.
+
+Not covered yet: a `--dir` node takes no lock on its directory or on a
+tenant's file, nor does `fenec-shard` on its directory file, so a shell
+over a tenant's file, or two routers over one directory, are not refused.
+The lock file is named after the path as given, so a file opened through a
+symbolic link to it is locked under another name. Elsewhere than on a Unix
+`hold` takes no lock at all (no release is built
+for Windows); `LockFileEx` over a range past the holder's line is what it
+would take there, since a Windows lock is mandatory and would refuse the
+reads of the line.
+
 ## Prepared blocks
 
 **A block's documents are built beside the readers** (`engine/prepared.rs`,
