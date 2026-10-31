@@ -5,6 +5,33 @@ import { promisify } from 'node:util';
 
 const scrypt = promisify(scryptCb) as (pw: string, salt: Buffer, len: number, opts: object) => Promise<Buffer>;
 
+export interface ScryptCost {
+  N: number;
+  r: number;
+  p: number;
+}
+
+let watching: ((cost: ScryptCost) => void) | null = null;
+
+/**
+ * Tells `fn` the cost of every scrypt run until the returned function is
+ * called. A sign-in's property is the work it does, a count and a cost a
+ * test can hold exactly; the time it takes only measures the machine, and a
+ * loaded one made two paths doing the same work differ by 40%.
+ */
+export function watchScrypt(fn: (cost: ScryptCost) => void): () => void {
+  watching = fn;
+  return () => {
+    if (watching === fn) watching = null;
+  };
+}
+
+/** The one place scrypt runs, so a hash and a check cost one run each, told to `watchScrypt`. */
+function derive(password: string, salt: Buffer, N: number): Promise<Buffer> {
+  watching?.({ N, r: 8, p: 1 });
+  return scrypt(password.normalize('NFC'), salt, 32, { N, r: 8, p: 1, maxmem: 256 * N * 8 + 1024 * 1024 });
+}
+
 /**
  * scrypt with r = 8, p = 1 and a 16-byte salt, kept as
  * `scrypt$<log2 N>$<salt>$<hash>` so the cost can rise later and old hashes
@@ -13,7 +40,7 @@ const scrypt = promisify(scryptCb) as (pw: string, salt: Buffer, len: number, op
  */
 export async function hashPassword(password: string, N: number): Promise<string> {
   const salt = randomBytes(16);
-  const out = await scrypt(password.normalize('NFC'), salt, 32, { N, r: 8, p: 1, maxmem: 256 * N * 8 + 1024 * 1024 });
+  const out = await derive(password, salt, N);
   return `scrypt$${Math.log2(N)}$${salt.toString('base64url')}$${out.toString('base64url')}`;
 }
 
@@ -21,13 +48,7 @@ export async function hashPassword(password: string, N: number): Promise<string>
 export async function checkPassword(password: string, stored: string): Promise<boolean> {
   const [kind, logN, salt, want] = stored.split('$');
   if (kind !== 'scrypt' || !salt || !want) return false;
-  const N = 2 ** Number(logN);
-  const got = await scrypt(password.normalize('NFC'), Buffer.from(salt, 'base64url'), 32, {
-    N,
-    r: 8,
-    p: 1,
-    maxmem: 256 * N * 8 + 1024 * 1024,
-  });
+  const got = await derive(password, Buffer.from(salt, 'base64url'), 2 ** Number(logN));
   const w = Buffer.from(want, 'base64url');
   return w.length === got.length && timingSafeEqual(got, w);
 }
