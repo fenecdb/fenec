@@ -767,7 +767,8 @@ export function setArchive(path: string, dir: string, keyFile: string | null): R
 		ok: true,
 		message: [
 			keyFile ? "Its backups go there, sealed with that key." : "Its backups go there.",
-			...(running && !running.replicationToken ? ["Its server, running now, takes them from its next start: restart it, or close its window."] : []),
+			// Under --sync off no start gives it one (backupNow says why).
+			...(running && !running.replicationToken && running.plan.sync !== "off" ? ["Its server, running now, takes them from its next start: restart it, or close its window."] : []),
 			...(placed.warn ? [placed.warn] : []),
 		].join(" "),
 	};

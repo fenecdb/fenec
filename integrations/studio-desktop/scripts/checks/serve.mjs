@@ -52,7 +52,8 @@ step('the serve sheet, from the Databases list: the command it shows holds no to
 await until(async () => (await evalIn('launcher', `return document.querySelector('tr[data-path="${FILE}"]') !== null`)).value, 10000, 'the row');
 await evalIn('launcher', `[...document.querySelector('tr[data-path="${FILE}"]').querySelectorAll('button')].find((b) => b.textContent === 'Serve…').click()`);
 const command = await until(async () => (await evalIn('launcher', `return document.getElementById('sheet').open && document.getElementById('command').textContent`)).value, 10000, 'the sheet open, with its command');
-assert.match(command, /^FENEC_HTTP_TOKEN=•••• FENEC_REPLICATION_TOKEN=•••• fenec-server --file /);
+// No backups set up for it: no replication token, which would answer /_changes to the data token too.
+assert.match(command, /^FENEC_HTTP_TOKEN=•••• fenec-server --file /);
 assert.match(command, /--http 127\.0\.0\.1:0/);
 assert.match(command, /--exit-on-stdin-close$/);
 await evalIn('launcher', `document.getElementById('tok-show').click()`);

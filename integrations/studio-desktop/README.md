@@ -481,11 +481,10 @@ it. So a window that shows one gets:
   refuses a port something answers on at 127.0.0.1 (Serving, above), then
   starts the server, which binds it a moment later: a program that binds
   127.0.0.1 on that port in between gets the app's and its windows'
-  connections, the token with them; so does one that binds it by name at any
-  time beside a server on 0.0.0.0, since a bind by name takes loopback from a
-  wildcard one. It takes a program already running on this Mac, and one
-  running as you can read the token anyway (above). A window's server, on
-  127.0.0.1 and a port the system picks, has no such moment.
+  connections, the token with them (after the start, a server on 0.0.0.0 is
+  the case under Not yet). It takes a program already running on this Mac,
+  and one running as you can read the token anyway (above). A window's
+  server, on 127.0.0.1 and a port the system picks, has no such moment.
 * **A token copied to the clipboard** is there for a minute, as anything
   copied is: for every program of yours to read, and for Universal Clipboard to
   carry to your other devices where it is on. It is taken off then if the
@@ -626,6 +625,7 @@ which needs the signing identity and bundle id to stay fixed.
   `fenec-server`'s, not the app's.
 * A database served to the network is reached by the app's own windows on
   127.0.0.1. A program of another user that binds 127.0.0.1 on that port after
-  the server started would take those connections (the check before the start
-  covers the time before it); the Mac's own rules on binding a port another
-  user holds decide whether it can.
+  the server started would take those connections, as one could in the moment
+  between the check before the start and the server's bind (What is not
+  covered, above); the Mac's own rules on binding a port another user holds
+  decide whether it can.
