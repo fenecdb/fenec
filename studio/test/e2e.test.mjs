@@ -79,10 +79,24 @@ async function cell(p, i, field, within = 'body') {
   ).then((h) => h.jsonValue());
 }
 
-/** A collection opened from the sidebar, its rows in. */
+/**
+ * A collection opened from the sidebar, its rows in. The rows on the page
+ * when it is picked are marked first and the wait is for a row that is not
+ * one of them: a pick reads the collection again, and `Grid.show` draws its
+ * rows as new elements once the count is back, so until then the old grid
+ * -- the title already the new one's, and with the same collection (the one
+ * a sign-in opens) the same fields -- satisfies every other condition, and
+ * the layout read after it came out with no rows once the new grid landed
+ * in between (`0 !== 2`, 3 runs in 27 beside 24 busy loops on 8 cores, 0 in 30 with the mark).
+ */
 async function open(p, name) {
+  await p.$$eval('.row', (rows) => rows.forEach((r) => (r.dataset.drawn = 'before')));
   await p.click(`.coll[data-name="${name}"] .coll-line`);
-  await p.waitForFunction((name) => document.querySelector('.view-title')?.textContent === name && document.querySelector('.row:not(.pending):not([hidden])'), { timeout: 10_000 }, name);
+  await p.waitForFunction(
+    (name) => document.querySelector('.view-title')?.textContent === name && document.querySelector('.row:not(.pending):not([hidden]):not([data-drawn])'),
+    { timeout: 10_000 },
+    name,
+  );
 }
 
 const statusLine = (p) => p.$eval('.view-count', (e) => e.textContent);
